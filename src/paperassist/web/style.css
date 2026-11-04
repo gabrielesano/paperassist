@@ -974,13 +974,34 @@ body {
     font-weight: 700;
 }
 .settings-group input[type="text"],
-.settings-group input[type="email"],
 .source-row input[type="password"] {
     width: 100%;
     border: 1px solid #ccd7cd;
     background: #fff;
     padding: 7px 9px;
     border-radius: 3px;
+}
+.folder-field {
+    display: flex;
+    gap: 8px;
+}
+.folder-field input {
+    flex: 1;
+    min-width: 0;
+}
+.folder-field button {
+    flex: none;
+    border: 1px solid #ccd7cd;
+    background: #fff;
+    padding: 7px 12px;
+    border-radius: 3px;
+}
+.folder-field button:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+.source-row input.secret {
+    -webkit-text-security: disc;
 }
 .source-help {
     margin: 5px 0 0;

@@ -253,7 +253,7 @@
                 <div class="sources-body">
                     <section class="settings-group">
                         <label for="sources-email">Contact email</label>
-                        <input id="sources-email" type="email" autocomplete="email" placeholder="name@example.org" />
+                        <input id="sources-email" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="name@example.org" />
                         <p class="source-help">
                             Sent to Unpaywall, and to Crossref and OpenAlex for their
                             polite request pools. Never shared elsewhere.
@@ -269,7 +269,7 @@
                     </section>
                     <section class="settings-group">
                         <label for="sources-proxy">Library proxy</label>
-                        <input id="sources-proxy" type="text" spellcheck="false" placeholder="https://login.proxy.example.edu/login?url=" />
+                        <input id="sources-proxy" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://login.proxy.example.edu/login?url=" />
                         <p class="source-help">
                             Used only for links you open yourself, never for automatic
                             downloads. Example:
@@ -278,7 +278,10 @@
                     </section>
                     <section class="settings-group">
                         <label for="sources-inbox">Folder for manual downloads</label>
-                        <input id="sources-inbox" type="text" spellcheck="false" placeholder="/home/you/Downloads/papers" />
+                        <div class="folder-field">
+                            <input id="sources-inbox" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/home/you/Downloads/papers" />
+                            <button id="sources-browse" type="button" aria-label="Browse for the manual downloads folder">Browse…</button>
+                        </div>
                         <p class="source-help">
                             Save PDFs you download by hand here; PaperAssist copies
                             matching ones into the library and never changes this folder.

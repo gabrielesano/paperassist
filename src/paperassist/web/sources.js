@@ -88,8 +88,15 @@ export function createSourcesDialog({ api, onSaved }) {
         if (source.key) {
             const noun = source.noun || "key";
             const input = document.createElement("input");
-            input.type = "password";
-            input.autocomplete = "new-password";
+            // A password input makes browsers treat the dialog as a login form: they offer
+            // to save the key and show autofill popups (one crashes Brave). Mask a plain
+            // text input instead, and fall back to password where CSS masking is missing.
+            const masked = CSS.supports("-webkit-text-security", "disc");
+            input.type = masked ? "text" : "password";
+            input.classList.add("secret");
+            input.autocomplete = "off";
+            input.autocapitalize = "off";
+            input.spellcheck = false;
             input.placeholder = view.keys[source.id].configured ? `Paste a new ${noun} to replace it` : `Paste your ${noun}`;
             input.setAttribute("aria-label", `${source.name} ${noun}`);
             entry.input = input;
@@ -175,6 +182,27 @@ export function createSourcesDialog({ api, onSaved }) {
                 result.classList.toggle("error", outcome?.ok === false);
             }
             say("");
+        } catch (error) {
+            say(error.message, true);
+        } finally {
+            button.disabled = false;
+        }
+    };
+
+    // The browser cannot learn a folder's absolute path, so the local server opens the
+    // system chooser. The path only fills the field; Save stays the explicit step.
+    $("#sources-browse").onclick = async () => {
+        const button = $("#sources-browse");
+        button.disabled = true;
+        say("Choose a folder in the window that opened.");
+        try {
+            const { path } = await api("/api/choose-folder", {
+                method: "POST",
+                headers: JSON_HEADERS,
+                body: JSON.stringify({ start: field("inbox").value.trim() }),
+            });
+            if (path) field("inbox").value = path;
+            say(path ? "Folder selected. Save to keep it." : "");
         } catch (error) {
             say(error.message, true);
         } finally {

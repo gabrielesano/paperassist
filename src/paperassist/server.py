@@ -20,7 +20,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.serving import make_server
 
 from paperassist.library import Library
-from paperassist import inbox, references, retrieval, settings
+from paperassist import inbox, picker, references, retrieval, settings
 
 
 def _write_token(data_dir):
@@ -47,6 +47,7 @@ def create_app(data_dir):
     executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='paperassist')
     slots = threading.BoundedSemaphore(8)
     download_lock = threading.Lock()
+    picker_lock = threading.Lock()
     web = Path(__file__).parent / 'web'
 
     @app.before_request
@@ -122,6 +123,22 @@ def create_app(data_dir):
     @app.post('/api/settings/check')
     def check_settings():
         return jsonify(retrieval.check(settings.load(data_dir)))
+
+    @app.post('/api/choose-folder')
+    def choose_folder():
+        body = request.get_json(silent=True)
+        start = body.get('start') if isinstance(body, dict) else None
+        if not isinstance(start, (str, type(None))):
+            raise ValueError('start must be text')
+        # One native window at a time; a second click must not stack dialogs on the desktop.
+        if not picker_lock.acquire(blocking=False):
+            return jsonify(error='A folder window is already open.'), 409
+        try:
+            return jsonify(path=picker.choose_folder(start or None))
+        except picker.PickerUnavailable as error:
+            return jsonify(error=str(error)), 503
+        finally:
+            picker_lock.release()
 
     @app.get('/api/documents')
     def documents():

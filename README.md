@@ -116,6 +116,8 @@ corresponding setting is empty.
 - **Folder for manual downloads** is where you save PDFs obtained yourself. **Check
   access** on a reference looks there and links a matching file, which keeps
   publisher downloads under your control.
+  **Browse…** opens your system's folder window (zenity or kdialog on Linux when
+  installed, otherwise Tk); the chosen folder is kept when you press **Save**.
 
 ## Privacy and limitations
 
