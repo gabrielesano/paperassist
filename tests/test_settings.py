@@ -40,7 +40,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual((view['email'], view['enabled']['core'], view['enabled']['ads']), ('reader@example.org', False, True))
             self.assertNotIn(SECRET, json.dumps(view))
         file = self.data / 'settings.json'
-        self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+        if os.name != 'nt':  # Windows has no POSIX permission bits
+            self.assertEqual(file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(file.read_text())['keys']['ads'], SECRET)
         self.assertNotIn(SECRET, self.client.get('/api/config').get_data(as_text=True))
 
@@ -114,7 +115,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self.put({'inbox': str(folder / 'file.pdf')}).status_code, 400)
         self.assertEqual(self.put({'inbox': str(folder)}).json['inbox'], str(folder.resolve()))
         self.assertEqual(self.client.get('/api/config').json['inbox'], str(folder.resolve()))
-        with patch.dict(os.environ, {'HOME': str(folder)}):
+        # Windows resolves "~" from USERPROFILE, POSIX systems from HOME.
+        with patch.dict(os.environ, {'HOME': str(folder), 'USERPROFILE': str(folder)}):
             (folder / 'sub').mkdir()
             self.assertEqual(self.put({'inbox': '~/sub'}).json['inbox'], str((folder / 'sub').resolve()))
         self.assertEqual(self.put({'inbox': None}).json['inbox'], '')

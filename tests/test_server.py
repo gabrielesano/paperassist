@@ -1,6 +1,7 @@
 import tempfile
 import time
 from pathlib import Path
+import os
 import unittest
 
 from paperassist.server import create_app
@@ -24,8 +25,9 @@ class ServerTests(unittest.TestCase):
     def test_token_survives_restart_and_stays_private(self):
         again = create_app(self.directory.name).test_client()
         self.assertEqual(again.get('/api/config').json['token'], self.token)
-        mode = (Path(self.directory.name) / '.token').stat().st_mode & 0o777
-        self.assertEqual(mode, 0o600)
+        if os.name != 'nt':  # Windows has no POSIX permission bits
+            mode = (Path(self.directory.name) / '.token').stat().st_mode & 0o777
+            self.assertEqual(mode, 0o600)
         other = tempfile.TemporaryDirectory()
         self.addCleanup(other.cleanup)
         self.assertNotEqual(create_app(other.name).test_client().get('/api/config').json['token'], self.token)

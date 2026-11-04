@@ -21,11 +21,13 @@ class DataDirectoryTests(unittest.TestCase):
              patch.object(Path, 'home', return_value=Path(home)):
             return paths.default_data_dir()
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX-style absolute paths')
     def test_linux_uses_xdg_then_home(self):
         self.assertEqual(self.resolve('linux', {'XDG_DATA_HOME': '/xdg'}), Path('/xdg/paperassist'))
         self.assertEqual(self.resolve('linux', {}), Path('/home/ada/.local/share/paperassist'))
         self.assertEqual(self.resolve('linux', {'XDG_DATA_HOME': 'relative'}), Path('/home/ada/.local/share/paperassist'))
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX-style absolute paths')
     def test_macos_uses_application_support(self):
         self.assertEqual(self.resolve('darwin', {}), Path('/home/ada/Library/Application Support/PaperAssist'))
 

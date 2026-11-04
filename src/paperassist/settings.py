@@ -79,7 +79,10 @@ def _proxy(value):
 
 
 def _inbox(value, data_dir):
-    path = Path(value).expanduser()
+    try:
+        path = Path(value).expanduser()
+    except RuntimeError:  # "~" with no known home folder
+        raise ValueError('The folder for manual downloads must be an absolute path') from None
     if not path.is_absolute():
         raise ValueError('The folder for manual downloads must be an absolute path')
     path = path.resolve()
