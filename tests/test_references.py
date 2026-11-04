@@ -1,0 +1,513 @@
+import unittest
+
+from paperassist.references import (extract, local_candidates, get, link, repair_downloads, set_retrieval, _save,
+                                    map_destinations, _publication, DESTINATION_VERSION, EXTRACTION_VERSION)
+from tempfile import TemporaryDirectory
+from pathlib import Path
+from unittest.mock import patch
+
+
+class ReferenceTests(unittest.TestCase):
+    def test_publication_fingerprints_distinguish_journals(self):
+        self.assertEqual(_publication('Antolin, P. 2012, ApJ, 745, 152', '2012'),
+                         _publication('The Astrophysical Journal, 745:152 (21pp), 2012 February 1'))
+        self.assertEqual(_publication('Fang 2013, ApJL, 771, L29', '2013'),
+                         _publication('The Astrophysical Journal Letters, 771:L29 (6pp), 2013 July 10'))
+        self.assertEqual(_publication('Mignone 2007, ApJS, 170, 228', '2007'),
+                         _publication('The Astrophysical Journal Supplement Series, 170:228–242, 2007 June'))
+        self.assertNotEqual(_publication('ApJ, 170, 228', '2007'), _publication('ApJS, 170, 228', '2007'))
+        self.assertIsNone(_publication('ApJ, 170, 228'))
+
+    def test_numeric_groups_ranges_exclude_bibliography(self):
+        pages = ['See [1–3] and [1, 3].\nReferences\n[1] Alpha 2020. First.\n[2] Beta 2021. Second.\n[3] Gamma 2022. Third.']
+        refs = extract(pages)
+        self.assertEqual([r['citation_count'] for r in refs], [2, 1, 2])
+        self.assertTrue(all(r['count_status'] == 'partial' for r in refs))
+        self.assertEqual(refs[0]['occurrences'][0]['page'], 1)
+
+    def test_author_year_and_no_heading(self):
+        refs = extract(['Smith et al. (2020) and Smith (2020).\nReferences\nSmith, A. 2020. A useful paper.'])
+        self.assertEqual(refs[0]['citation_count'], 2)
+        self.assertEqual(extract(['No bibliography here']), [])
+
+    def test_multiline_entries_and_ambiguous_year(self):
+        refs = extract(['Smith (2020) mentions this.\nReferences\nSmith, A., Jones, B.,\nA long title, Journal 4, 2020.\nSmith, C., Another paper, Journal 5, 2020.'])
+        self.assertEqual(len(refs), 2)
+        self.assertTrue(all(ref['citation_count'] is None for ref in refs))
+        self.assertTrue(all(ref['count_status'] == 'ambiguous' for ref in refs))
+
+    def test_wrapped_citations_do_not_consume_unrelated_prose(self):
+        refs = extract(['Smith et al.\n(2020); Smith &\nJones (2020). Smith discussed Brown in 2020. Smith (2020a).\nReferences\nSmith, A. 2020. A useful paper.'])
+        self.assertEqual(refs[0]['citation_count'], 2)
+        self.assertIn('\n', refs[0]['occurrences'][0]['marker'])
+
+    def test_unicode_surnames_start_distinct_entries(self):
+        pages = ['Török et al. (2004), Martínez-Sykora (2008).\nReferences\n'
+                 'Testa, P., & Reale, F. 2012, ApJ, 750, L10\n'
+                 'Török, T., Kliem, B., & Titov, V. 2004, A&A, 413, L27\n'
+                 'Martínez-Sykora, J., Hansteen, V., & Carlsson, M. 2008, ApJ, 679, 871\n'
+                 'van Ballegooijen, A. A., & Berger, M. 2014, ApJ, 787, 87']
+        refs = extract(pages)
+        self.assertEqual([r['label'] for r in refs],
+                         ['Testa 2012', 'Török 2004', 'Martínez-Sykora 2008', 'van Ballegooijen 2014'])
+        self.assertEqual([refs[1]['citation_count'], refs[2]['citation_count']], [1, 1])
+        self.assertNotIn('Török', refs[0]['raw'])
+
+    def test_author_list_suggestions_remain_ambiguous(self):
+        ref = {'raw': 'Guarrasi, M., Reale, F., Orlando, S. 2014, A&A, 564, A48',
+               'authors': 'Guarrasi', 'year': '2014'}
+        documents = [
+            {'id': 1, 'title': 'Unrelated title', 'authors': 'Guarrasi M., Reale F., Orlando S.',
+             'year': None, 'metadata': {'candidates': {'year': [2014]}}},
+            {'id': 2, 'title': 'Another title', 'authors': 'Guarrasi M., Reale F.', 'year': None},
+            {'id': 3, 'title': 'Different paper', 'authors': 'Guarrasi M., Reale F.', 'year': 2015},
+            {'id': 4, 'title': 'Wrong order', 'authors': 'Reale F., Guarrasi M.', 'year': 2014},
+            {'id': 5, 'title': 'One author', 'authors': 'Guarrasi M.', 'year': 2014},
+        ]
+        self.assertEqual([d['id'] for d in local_candidates(ref, documents, 9)], [1, 2])
+        self.assertEqual([d['id'] for d in local_candidates(ref, documents, 1)], [2])
+
+    def test_unicode_and_multiword_author_suggestions(self):
+        documents = [
+            {'id': 1, 'title': 'Other', 'authors': 'Török T., Kliem B., Titov V.', 'year': 2004},
+            {'id': 2, 'title': 'Other', 'authors': 'van Ballegooijen A. A., Berger M.', 'year': 2014},
+            {'id': 3, 'title': 'Other', 'authors': 'Ballegooijen A. A., Berger M.', 'year': 2014},
+        ]
+        refs = [{'raw': 'Török, T., Kliem, B., & Titov, V. 2004, A&A, 413, L27',
+                 'authors': 'Török', 'year': '2004'},
+                {'raw': 'van Ballegooijen, A. A., & Berger, M. 2014, ApJ, 787, 87',
+                 'authors': 'van Ballegooijen', 'year': '2014'}]
+        self.assertEqual([d['id'] for d in local_candidates(refs[0], documents, 9)], [1])
+        self.assertEqual([d['id'] for d in local_candidates(refs[1], documents, 9)], [2])
+
+    def test_automatic_links_refresh_and_manual_link_wins(self):
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+                self.documents = []
+
+            def list_documents(self):
+                return self.documents
+
+            def get_document(self, document_id):
+                return next(d for d in self.documents if d['id'] == document_id)
+
+            def get_path(self, document_id, annotated=False):
+                self.get_document(document_id)
+                return 'paper.pdf'
+
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            ref = {'id': '0', 'raw': 'Smith, A., Jones, B. 2020', 'authors': 'Smith',
+                   'year': '2020', 'doi': '10.1234/example', 'local_document_id': None}
+            _save(library, 9, {'references': [ref], 'status': 'partial', 'destination_version': DESTINATION_VERSION,
+                               'extraction_version': EXTRACTION_VERSION})
+            library.documents = [{'id': 1, 'title': 'Paper', 'authors': 'Smith A., Jones B.',
+                                  'year': 2020, 'doi': '10.1234/example'},
+                                 {'id': 2, 'title': 'Other', 'authors': '', 'year': None}]
+            self.assertEqual(get(library, 9)['references'][0]['local_document_id'], 1)
+            library.documents.append({**library.documents[0], 'id': 3})
+            self.assertIsNone(get(library, 9)['references'][0]['local_document_id'])
+            link(library, 9, '0', 2)
+            library.documents.pop()
+            self.assertEqual(get(library, 9)['references'][0]['local_document_id'], 2)
+
+    def test_publication_match_ambiguity_missing_and_manual_precedence(self):
+        class Page:
+            def extract_text(self):
+                return 'A&A 564, A48 (2014)\nA paper title'
+
+        class Reader:
+            pages = [Page()]
+
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+                self.documents = [{'id': 1, 'sha256': 'one', 'authors': 'Guarrasi M., Reale F.', 'title': 'Paper'},
+                                  {'id': 2, 'sha256': 'two', 'authors': 'Other A.', 'title': 'Other'}]
+                self.missing = set()
+            def list_documents(self):
+                return self.documents
+            def get_document(self, document_id):
+                return next(d for d in self.documents if d['id'] == document_id)
+            def get_path(self, document_id, annotated=False):
+                if document_id in self.missing:
+                    raise FileNotFoundError
+                return 'paper.pdf'
+
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            ref = {'id': '0', 'raw': 'Guarrasi, M., Reale, F. 2014, A&A, 564, A48',
+                   'authors': 'Guarrasi', 'year': '2014', 'doi': ''}
+            _save(library, 9, {'references': [ref], 'status': 'partial',
+                               'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
+            with patch('paperassist.references.PdfReader', return_value=Reader()) as reader:
+                result = get(library, 9)['references'][0]
+                self.assertEqual((result['local_document_id'], result['local_match']), (1, 'publication'))
+                get(library, 9)
+                self.assertEqual(reader.call_count, 2)
+                library.documents.append({**library.documents[0], 'id': 3, 'sha256': 'three'})
+                self.assertIsNone(get(library, 9)['references'][0]['local_document_id'])
+                link(library, 9, '0', 2)
+                self.assertEqual(get(library, 9)['references'][0]['local_document_id'], 2)
+                library.missing.add(2)
+                result = get(library, 9)['references'][0]
+                self.assertTrue(result['local_missing'])
+                self.assertIsNone(result['local_document_id'])
+                self.assertEqual(result['manual_target_id'], 2)
+
+    def test_publication_uses_first_author_from_header_when_metadata_is_unhelpful(self):
+        class Page:
+            def extract_text(self):
+                return ('The Astrophysical Journal, 745:152 (21pp), 2012 February 1\n'
+                        'A PAPER TITLE\nP. Antolin1, and L. Rouppe van der Voort')
+        class Reader:
+            pages = [Page()]
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+            def list_documents(self):
+                return [{'id': 2, 'sha256': 'paper', 'authors': 'IOP Publishing'}]
+            def get_path(self, document_id, annotated=False):
+                return 'paper.pdf'
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            ref = {'id': '0', 'raw': 'Antolin, P., & Rouppe van der Voort, L. 2012, ApJ, 745, 152',
+                   'authors': 'Antolin', 'year': '2012'}
+            _save(library, 1, {'references': [ref], 'status': 'partial',
+                               'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
+            with patch('paperassist.references.PdfReader', return_value=Reader()):
+                self.assertEqual(get(library, 1)['references'][0]['local_document_id'], 2)
+
+    def test_manual_links_shared_only_when_reference_and_target_are_unique(self):
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+            def list_documents(self):
+                return [{'id': 2}, {'id': 3}]
+            def get_path(self, document_id, annotated=False):
+                return 'paper.pdf'
+
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            ref = {'id': '0', 'raw': 'Smith, A., Jones, B. 2020', 'authors': 'Smith', 'year': '2020'}
+            payload = {'references': [ref], 'status': 'partial', 'destination_version': DESTINATION_VERSION,
+                       'extraction_version': EXTRACTION_VERSION}
+            _save(library, 1, payload)
+            _save(library, 4, {'references': [{**ref, 'manual_link': True, 'local_document_id': 2}]})
+            result = get(library, 1)['references'][0]
+            self.assertEqual((result['local_document_id'], result['local_match']), (2, 'shared_manual'))
+            _save(library, 5, {'references': [{**ref, 'manual_link': True, 'local_document_id': 3}]})
+            self.assertIsNone(get(library, 1)['references'][0]['local_document_id'])
+            _save(library, 4, {'references': [{**ref, 'manual_link': True, 'local_document_id': 4}]})
+            _save(library, 5, {'references': []})
+            self.assertIsNone(get(library, 1)['references'][0]['local_document_id'])
+
+    def test_self_link_is_preserved_as_invalid_and_can_be_reset(self):
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+            def list_documents(self):
+                return [{'id': 1}, {'id': 2, 'doi': '10.1234/example'}]
+            def get_document(self, document_id):
+                return next(d for d in self.list_documents() if d['id'] == document_id)
+            def get_path(self, document_id, annotated=False):
+                return 'paper.pdf'
+
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            ref = {'id': '0', 'raw': 'Smith, A. 2020', 'authors': 'Smith', 'year': '2020',
+                   'doi': '10.1234/example', 'manual_link': True, 'local_document_id': 1}
+            _save(library, 1, {'references': [ref], 'status': 'partial',
+                               'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
+            invalid = get(library, 1)['references'][0]
+            self.assertTrue(invalid['local_invalid'])
+            self.assertEqual(invalid['manual_target_id'], 1)
+            self.assertIsNone(invalid['local_document_id'])
+            with self.assertRaisesRegex(ValueError, 'source document'):
+                link(library, 1, '0', 1)
+            reset = link(library, 1, '0', None)
+            self.assertEqual((reset['local_document_id'], reset['local_match']), (2, 'doi'))
+            self.assertNotIn('manual_link', reset)
+
+    def test_missing_current_revision_is_not_available(self):
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+            def list_documents(self):
+                return [{'id': 2, 'doi': '10.1234/example'}]
+            def get_path(self, document_id, annotated=True):
+                if annotated:
+                    raise FileNotFoundError('Missing saved revision')
+                return 'original.pdf'
+
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            ref = {'id': '0', 'raw': 'Smith, A. 2020', 'authors': 'Smith', 'year': '2020',
+                   'doi': '10.1234/example'}
+            _save(library, 1, {'references': [ref], 'status': 'partial',
+                               'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
+            self.assertIsNone(get(library, 1)['references'][0]['local_document_id'])
+
+    def test_named_destinations_use_geometry_and_unique_author_year(self):
+        class Destination:
+            typ, left = '/XYZ', 43
+            def __init__(self, top):
+                self.top = top
+
+        class Page:
+            def extract_text(self, visitor_text):
+                for text, y in [('Golub, L., Alpha, M., Other, B. 1980', 516.8), ('Guarrasi, M., Reale, F., Orlando, S. 2014', 507.7),
+                                ('Unknown entry without year', 498.7), ('Brown, A., Baker, B., Other, C. 2001', 489.7),
+                                ('Smith, A., Other, A. 2005a', 480), ('Smith, B., Other, B. 2005a', 470)]:
+                    visitor_text(text, [1, 0, 0, 1, 0, 0], [8, 0, 0, 8, 43, y], None, 1)
+
+        class Reader:
+            pages = [Page()]
+            named_destinations = {'golub': Destination(526), 'bib31': Destination(517),
+                                  'unknown': Destination(508), 'brown': Destination(499),
+                                  'bib32': Destination(489),
+                                  'figure': Destination(700)}
+            def get_destination_page_number(self, destination):
+                return 0
+
+        refs = [{'raw': 'Guarrasi, M., Reale, F., Orlando, S. 2014'}, {'raw': 'Golub, L., Alpha, M., Other, B. 1980'},
+                {'raw': 'Brown, A., Baker, B., Other, C. 2001'},
+                {'raw': 'Smith, A., Other, A. 2005a'}, {'raw': 'Smith, A., Other, A. 2005a'}]
+        map_destinations(Reader(), ['References'], refs)
+        self.assertEqual(refs[0]['destinations'], ['bib31'])
+        self.assertEqual(refs[1]['destinations'], ['golub'])
+        self.assertEqual(refs[2]['destinations'], ['brown'])
+        self.assertTrue(all(not ref['destinations'] for ref in refs[3:]))
+
+    def test_cached_analysis_migrates_once_preserving_manual_link(self):
+        class Page:
+            def extract_text(self, **kwargs):
+                return 'References'
+
+        class Reader:
+            pages = [Page()]
+            named_destinations = {}
+
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+            def get_path(self, document_id, annotated=False):
+                return 'paper.pdf'
+            def list_documents(self):
+                return [{'id': 3}]
+
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            ref = {'raw': 'Smith, A. 2020', 'authors': 'Smith', 'year': '2020',
+                   'manual_link': True, 'local_document_id': 3}
+            _save(library, 1, {'references': [ref], 'status': 'partial'})
+            with patch('paperassist.references.PdfReader', return_value=Reader()) as reader:
+                result = get(library, 1)['references'][0]
+                self.assertEqual(result['local_document_id'], 3)
+                self.assertEqual(result['destinations'], [])
+                get(library, 1)
+                reader.assert_called_once()
+
+    def test_destination_full_line_disambiguates_and_normalizes(self):
+        class Destination:
+            typ, left = '/XYZ', 43
+            def __init__(self, top):
+                self.top = top
+
+        class Page:
+            def extract_text(self, visitor_text):
+                fragments = [('Rappazzo, A. F., & Parker, E. N. 2013, ApJ', 43, 500),
+                             ('Other column 2013', 318, 500),
+                             ('Rappazzo, A. F., & Velli, M. 2013, ApJ', 43, 490),
+                             ('Fisher, G., Can', 43, 480), ('ﬁeld, R. 1985, ApJ', 105, 480),
+                             ('Müller, D., Hansteen, V., Peter, H. 2003, A&A', 43, 470),
+                             ('Smith, A., Jones, B. 2010', 43, 460)]
+                for text, x, y in fragments:
+                    visitor_text(text, [1, 0, 0, 1, 0, 0], [8, 0, 0, 8, x, y], None, 1)
+
+        class Reader:
+            pages = [Page()]
+            named_destinations = {str(i): Destination(y + 9) for i, y in enumerate([500, 490, 480, 470, 460])}
+            def get_destination_page_number(self, destination):
+                return 0
+
+        refs = [{'raw': 'Rappazzo, A. F., & Parker, E. N. 2013, ApJ, 1'},
+                {'raw': 'Rappazzo, A. F., & Velli, M. 2013, ApJ, 2'},
+                {'raw': 'Fisher, G., Canfield, R. 1985, ApJ, 3'},
+                {'raw': 'Mu\u0308ller, D., Hansteen, V., Peter, H. 2003, A&A, 4'},
+                {'raw': 'Smith, A., Jones, B. 2010, ApJ, 5'},
+                {'raw': 'Smith, A., Jones, B. 2010, ApJ, 6'}]
+        map_destinations(Reader(), ['References'], refs)
+        self.assertEqual([ref['destinations'] for ref in refs], [['0'], ['1'], ['2'], ['3'], [], []])
+
+    def test_reanalysis_preserves_split_manual_link_and_unmatched_state(self):
+        class Page:
+            def extract_text(self, **kwargs):
+                return ('References\nTesta, P., & Reale, F. 2012, ApJ, 750, L10\n'
+                        'Török, T., Kliem, B., & Titov, V. 2004, A&A, 413, L27')
+
+        class Reader:
+            pages = [Page()]
+            named_destinations = {}
+
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+            def get_path(self, document_id, annotated=False):
+                return 'paper.pdf'
+            def list_documents(self):
+                return [{'id': 3}, {'id': 4}]
+
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            old = {'id': '0', 'label': 'Testa 2012', 'authors': 'Testa', 'year': '2012',
+                   'raw': 'Testa, P., & Reale, F. 2012, ApJ, 750, L10 Török, T., Kliem, B., & Titov, V. 2004, A&A, 413, L27',
+                   'manual_link': True, 'local_document_id': 3, 'retrieval': {'status': 'found'}}
+            missing = {'id': '1', 'label': 'Lost 2001', 'authors': 'Lost', 'year': '2001',
+                       'raw': 'Lost, A. 2001', 'manual_link': True, 'local_document_id': 4}
+            _save(library, 1, {'references': [old, missing], 'status': 'partial'})
+            with patch('paperassist.references.PdfReader', return_value=Reader()) as reader:
+                refs = get(library, 1)['references']
+                by_label = {ref['label']: ref for ref in refs}
+                self.assertEqual(by_label['Testa 2012']['local_document_id'], 3)
+                self.assertEqual(by_label['Testa 2012']['retrieval']['status'], 'found')
+                self.assertTrue(by_label['Lost 2001']['legacy'])
+                self.assertEqual(by_label['Lost 2001']['status'], 'Previous reference — verify link')
+                self.assertEqual(by_label['Lost 2001']['local_document_id'], 4)
+                self.assertEqual(by_label['Török 2004']['authors'], 'Török')
+                get(library, 1)
+                reader.assert_called_once()
+
+
+class FakeLibrary:
+    """Minimal library whose first pages are described by `pages` (sha -> text)."""
+
+    def __init__(self, path, documents, pages=None):
+        self.db_path, self.documents, self.pages = path, documents, pages or {}
+        self.verified = []
+
+    def list_documents(self):
+        return self.documents
+
+    def get_document(self, document_id):
+        return next(d for d in self.documents if d['id'] == document_id)
+
+    def get_path(self, document_id, annotated=False):
+        return self.get_document(document_id)['sha256']
+
+    def apply_verified(self, document_id, record, filename=None):
+        self.verified.append((document_id, record['doi'], filename))
+
+
+class FakeReader:
+    def __init__(self, sha):
+        text = FakeLibrary.pages[sha]
+        self.pages = [type('Page', (), {'extract_text': lambda self: text})()]
+
+
+FakeLibrary.pages = {}
+BROWNING = {'id': 28, 'sha256': 'browning', 'title': 'Heating the corona by nanoflares', 'year': None,
+            'authors': 'Browning P. K., Gerrard C., Hood A. W., Kevis R., Van der Linden R. A. M.',
+            'metadata': {'candidates': {'year': [2008]}}}
+GERRARD = {'id': '0', 'raw': 'Gerrard, C. L., Arber, T. D., Hood, A. W., & Van der Linden, R. A. M. 2001, A&A, 373, 1089',
+           'authors': 'Gerrard', 'year': '2001', 'doi': ''}
+
+
+class ConflictTests(unittest.TestCase):
+    def setUp(self):
+        FakeLibrary.pages = {'browning': 'A&A 485, 837-848 (2008)\nHeating the corona by nanoflares',
+                             'guarrasi': 'A&A 564, A48 (2014)\nMHD modeling of coronal loops',
+                             'other': 'No journal line here'}
+        patcher = patch('paperassist.references.PdfReader', side_effect=lambda path: FakeReader(path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
+    def library(self, *documents):
+        return FakeLibrary(Path(self.directory.name) / 'library.sqlite', list(documents), FakeLibrary.pages)
+
+    def save(self, library, *refs):
+        _save(library, 9, {'references': list(refs), 'status': 'partial', 'destination_version': DESTINATION_VERSION,
+                           'extraction_version': EXTRACTION_VERSION})
+
+    def test_wrong_manual_link_is_kept_but_flagged(self):
+        library = self.library(BROWNING)
+        self.save(library, {**GERRARD, 'manual_link': True, 'local_document_id': 28})
+        ref = get(library, 9)['references'][0]
+        self.assertEqual((ref['local_document_id'], ref['manual_link']), (28, True))
+        self.assertEqual(ref['local_conflict'], 'Linked PDF is A&A 485, 837 (2008); reference is A&A 373, 1089 (2001)')
+
+    def test_matching_manual_link_is_not_flagged(self):
+        library = self.library(BROWNING)
+        ref = {**GERRARD, 'raw': 'Browning, P. K., Gerrard, C. 2008, A&A, 485, 837', 'year': '2008',
+               'authors': 'Browning', 'manual_link': True, 'local_document_id': 28}
+        self.save(library, ref)
+        self.assertNotIn('local_conflict', get(library, 9)['references'][0])
+
+    def test_confirmed_doi_and_year_contradictions_are_flagged(self):
+        library = self.library({'id': 2, 'sha256': 'other', 'doi': '10.1/a', 'year': 2010})
+        self.save(library, {**GERRARD, 'doi': '10.1/b', 'manual_link': True, 'local_document_id': 2})
+        self.assertIn('DOI 10.1/a', get(library, 9)['references'][0]['local_conflict'])
+        library = self.library({'id': 2, 'sha256': 'other', 'year': 2010})
+        self.save(library, {**GERRARD, 'manual_link': True, 'local_document_id': 2})
+        self.assertIn('from 2010', get(library, 9)['references'][0]['local_conflict'])
+
+    def test_candidates_exclude_documents_whose_publication_contradicts_the_reference(self):
+        evidence = lambda document: {'publication': ['A&A', '485', '837', '2008']}
+        document = {**BROWNING, 'metadata': {}}
+        self.assertEqual([d['id'] for d in local_candidates(GERRARD, [document], 9)], [28])
+        self.assertEqual(local_candidates(GERRARD, [document], 9, evidence), [])
+        self.assertEqual(local_candidates(GERRARD, [BROWNING], 9), [])  # the first-page year disagrees too
+
+    def test_candidates_exclude_first_page_years_far_from_the_reference_year(self):
+        document = {**BROWNING, 'metadata': {'candidates': {'year': [2007, 2008]}}}
+        self.assertEqual(local_candidates({**GERRARD, 'year': '2001'}, [document], 9), [])
+        self.assertEqual(len(local_candidates({**GERRARD, 'year': '2009'}, [document], 9)), 1)
+
+    def test_candidates_prefer_documents_led_by_the_first_author(self):
+        ref = {'raw': 'Guarrasi, M., Reale, F. 2014, A&A, 564, A48', 'authors': 'Guarrasi', 'year': '2014'}
+        documents = [{'id': 1, 'title': 'x', 'authors': 'Peres G., Guarrasi M., Reale F.', 'year': 2014},
+                     {'id': 2, 'title': 'y', 'authors': 'Guarrasi M., Reale F.', 'year': 2014}]
+        self.assertEqual([d['id'] for d in local_candidates(ref, documents, 9)], [2, 1])
+
+    def test_first_page_doi_links_only_without_contradiction(self):
+        paper = {'id': 3, 'sha256': 'guarrasi', 'authors': 'Guarrasi M., Reale F.', 'title': 'Paper',
+                 'metadata': {'candidates': {'doi': ['10.1051/0004-6361/201322439']}}}
+        ref = {'id': '0', 'raw': 'Guarrasi, M., Reale, F. 2014, A&A, 564, A48', 'authors': 'Guarrasi', 'year': '2014',
+               'doi': '10.1051/0004-6361/201322439'}
+        library = self.library(paper)
+        self.save(library, ref)
+        found = get(library, 9)['references'][0]
+        self.assertEqual((found['local_document_id'], found['local_match']), (3, 'first_page_doi'))
+        FakeLibrary.pages['revised'] = 'A&A 570, A1 (2014)\nMHD modeling'
+        library = self.library({**paper, 'sha256': 'revised'})
+        self.assertIsNone(get(library, 9)['references'][0]['local_document_id'])
+
+    def test_retrieval_identity_is_stored_and_supplies_the_doi(self):
+        library = self.library(BROWNING)
+        self.save(library, {**GERRARD})
+        identity = {'doi': '10.1051/0004-6361:20010080', 'title': 'T', 'provider': 'crossref'}
+        set_retrieval(library, 9, '0', {'version': 2, 'status': 'not_found', 'summary': 'x', 'attempts': [], 'identity': identity})
+        ref = get(library, 9)['references'][0]
+        self.assertEqual((ref['doi'], ref['identity']), (identity['doi'], identity))
+        self.assertNotIn('identity', ref['retrieval'])
+        self.assertEqual((ref['retrieval']['version'], ref['status']), (2, 'not_found'))
+
+    def test_repair_names_only_unnamed_documents_whose_first_author_is_on_the_page(self):
+        # Small-caps author lines extract with a split surname.
+        FakeLibrary.pages['download'] = 'Nanoflares in a twisted loop\nA. F. R APPAZZO 1, M. V ELLI 2'
+        FakeLibrary.pages['elsewhere'] = 'Something unrelated'
+        named = {'id': 70, 'sha256': 'download', 'filename': 'download.pdf', 'metadata_status': 'needs_review'}
+        elsewhere = {'id': 71, 'sha256': 'elsewhere', 'filename': 'download.pdf', 'metadata_status': 'needs_review'}
+        corrected = {'id': 72, 'sha256': 'other', 'filename': 'download.pdf', 'metadata_status': 'corrected'}
+        library = self.library(named, elsewhere, corrected)
+        identity = {'doi': '10.1088/x', 'year': 2013, 'first_author': 'Rappazzo', 'publication': ['APJ', '771', '76', '2013']}
+        refs = [{'id': str(i), 'raw': f'Rappazzo, A. F. 2013, ApJ, 771, 7{i}', 'authors': 'Rappazzo', 'year': '2013',
+                 'identity': identity, 'manual_link': True, 'local_document_id': target}
+                for i, target in enumerate((70, 71, 72))]
+        self.save(library, *refs)
+        report = repair_downloads(library, 9)
+        self.assertEqual([item['status'] for item in report], ['repaired', 'skipped'])
+        self.assertEqual(library.verified, [(70, '10.1088/x', 'Rappazzo_2013_ApJ_771_76.pdf')])

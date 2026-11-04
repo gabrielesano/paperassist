@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>PaperAssist</title>
+        <link rel="icon" href="data:," />
+        <link rel="stylesheet" href="/vendor/pdfjs/web/pdf_viewer.css" />
+        <link rel="stylesheet" href="/style.css" />
+        <script type="importmap">
+            { "imports": { "pdfjs-lib": "/vendor/pdfjs/build/pdf.mjs" } }
+        </script>
+        <script type="module" src="/app.js"></script>
+    </head>
+    <body>
+        <header class="toolbar">
+            <div class="brand">
+                <span class="brand-mark">P</span><span>PaperAssist</span>
+            </div>
+            <button id="library-button" class="tool">Library</button>
+            <button
+                id="panels-button"
+                class="tool"
+                aria-label="Hide side panels"
+                title="Hide side panels"
+                aria-controls="outline-panel details-panel"
+                aria-expanded="true"
+            >
+                <svg width="16" height="14" viewBox="0 0 16 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="1" y="1" width="14" height="12" rx="1.5" />
+                    <path d="M5 1v12M11 1v12" />
+                </svg>
+            </button>
+            <div class="tool-group page-controls">
+                <button id="previous-page" aria-label="Previous page">‹</button
+                ><label
+                    ><span class="sr-only">Page number</span
+                    ><input
+                        id="page-input"
+                        type="number"
+                        min="1"
+                        value="1" /></label
+                ><span id="page-total">/ –</span
+                ><button id="next-page" aria-label="Next page">›</button>
+            </div>
+            <div class="tool-group find-controls">
+                <input
+                    id="find-input"
+                    type="search"
+                    placeholder="Find in document"
+                    aria-label="Find in document"
+                /><button id="find-previous" aria-label="Previous match">
+                    ↑</button
+                ><button id="find-next" aria-label="Next match">↓</button>
+            </div>
+            <span class="divider"></span>
+            <div class="tool-group" aria-label="Zoom">
+                <button id="zoom-out" title="Zoom out" aria-label="Zoom out">
+                    −</button
+                ><button
+                    id="zoom-label"
+                    title="Fit page width"
+                    aria-label="Fit page width"
+                >
+                    Fit width</button
+                ><button id="zoom-in" title="Zoom in" aria-label="Zoom in">
+                    +
+                </button>
+            </div>
+            <span class="divider"></span>
+            <div class="tool-group" aria-label="Annotation tools">
+                <button id="select-tool" class="selected">Select</button
+                ><button id="ink-tool">Draw</button
+                ><button id="highlight-tool">Highlight</button
+                ><button id="comment-tool">Comment</button>
+            </div>
+            <div class="toolbar-spacer"></div>
+            <span
+                id="acquisition-status"
+                class="active-label"
+                aria-live="polite"
+                hidden
+            ></span
+            ><button id="cancel-acquisition" hidden>Cancel search</button
+            >
+            <div class="save-controls">
+                <span id="save-status" class="save-status" aria-live="polite"></span>
+                <button id="save-pdf" title="Save PDF (Ctrl or Command + S)">Save</button>
+            </div>
+            <div
+                id="editor-options"
+                class="editor-options"
+                role="toolbar"
+                aria-label="Annotation tool options"
+            >
+                <span id="editor-options-label" class="options-label"></span
+                ><span id="editor-hint" class="options-hint"></span
+                ><span id="color-label" class="options-label">Color</span>
+                <div
+                    id="color-options"
+                    class="color-options"
+                    aria-label="Annotation color"
+                ></div>
+                <label class="thickness"
+                    >Thickness
+                    <input
+                        id="editor-thickness"
+                        type="range"
+                        min="1"
+                        max="20"
+                        value="2" /></label
+                ><label id="visibility-option"
+                    ><input id="show-highlights" type="checkbox" checked /> Show
+                    highlights</label
+                ><button id="delete-annotation">Delete selected</button>
+            </div>
+        </header>
+        <main class="workspace">
+            <aside id="outline-panel" class="app-sidebar outline">
+                <div class="panel-heading">
+                    <span>Outline</span
+                    ><button
+                        id="outline-toggle"
+                        title="Hide outline"
+                        aria-label="Hide outline"
+                    >
+                        −
+                    </button>
+                </div>
+                <div id="outline" class="panel-scroll empty">
+                    Open a paper to see its outline.
+                </div>
+            </aside>
+            <section class="center">
+                <div id="tabs" class="tabs" role="tablist"></div>
+                <div id="readers" class="readers">
+                    <div id="welcome" class="welcome">
+                        <div class="welcome-rule"></div>
+                        <p class="eyebrow">YOUR RESEARCH DESK</p>
+                        <h1>Make room for<br />the reading.</h1>
+                        <p>
+                            Keep papers, notes, and the references between them
+                            close at hand.
+                        </p>
+                        <button id="welcome-library" class="primary">
+                            Open library
+                        </button>
+                    </div>
+                </div>
+            </section>
+            <aside id="details-panel" class="app-sidebar details">
+                <div class="panel-heading detail-tabs">
+                    <button id="references-tab" class="current">
+                        References</button
+                    ><button id="comments-tab">Comments</button
+                    ><button
+                        id="details-toggle"
+                        class="panel-collapse"
+                        title="Hide references and comments"
+                        aria-label="Hide references and comments"
+                    >
+                        −
+                    </button>
+                </div>
+                <div id="detail-content" class="panel-scroll empty">
+                    Open a paper to explore its references.
+                </div>
+            </aside>
+        </main>
+        <dialog id="unsaved-dialog" aria-labelledby="unsaved-title">
+            <h2 id="unsaved-title">Unsaved PDF changes</h2>
+            <p id="unsaved-message"></p>
+            <div class="comment-actions">
+                <button id="unsaved-save" class="primary">Save</button>
+                <button id="unsaved-discard">Discard</button>
+                <button id="unsaved-cancel">Cancel</button>
+            </div>
+        </dialog>
+        <dialog id="library-dialog">
+            <div class="dialog-head">
+                <div>
+                    <p class="eyebrow">PAPERASSIST</p>
+                    <h2>Library</h2>
+                </div>
+                <button data-close="library-dialog" aria-label="Close library">
+                    ×
+                </button>
+            </div>
+            <div class="library-actions">
+                <input
+                    id="search"
+                    type="search"
+                    placeholder="Search title, author, year or DOI"
+                    aria-label="Search library"
+                /><label class="button" for="files">Import PDFs</label
+                ><input
+                    id="files"
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    multiple
+                    hidden
+                /><label class="button" for="folder">Import folder</label
+                ><input
+                    id="folder"
+                    type="file"
+                    webkitdirectory
+                    multiple
+                    hidden
+                />
+            </div>
+            <div id="import-status" class="status" aria-live="polite"></div>
+            <button id="cancel-import" class="panel-action" hidden>
+                Cancel import
+            </button>
+            <div id="library-list" class="library-list"></div>
+        </dialog>
+        <dialog id="acquire-dialog">
+            <div class="dialog-head">
+                <div>
+                    <p class="eyebrow">REFERENCES</p>
+                    <h2>Reference PDFs</h2>
+                </div>
+                <button data-close="acquire-dialog" aria-label="Close">
+                    ×
+                </button>
+            </div>
+            <p class="dialog-intro">
+                Choose references to look for, or continue reading and return
+                here later.
+            </p>
+            <p id="acquire-providers" class="reference-meta"></p>
+            <div class="acquire-actions">
+                <button id="select-all">Select all</button
+                ><button id="clear-selection">Clear all</button
+                ><span id="selection-count" aria-live="polite"></span
+                ><button id="download-selected" class="primary">
+                    Find selected PDFs</button
+                ><button data-close="acquire-dialog">Continue reading</button>
+            </div>
+            <div id="acquire-list" class="acquire-list"></div>
+        </dialog>
+        <dialog id="sources-dialog" aria-labelledby="sources-title">
+            <form id="sources-form" novalidate>
+                <div class="dialog-head">
+                    <div>
+                        <p class="eyebrow">REFERENCES</p>
+                        <h2 id="sources-title">Sources</h2>
+                    </div>
+                    <button type="button" data-close="sources-dialog" aria-label="Close">
+                        ×
+                    </button>
+                </div>
+                <div class="sources-body">
+                    <section class="settings-group">
+                        <label for="sources-email">Contact email</label>
+                        <input id="sources-email" type="email" autocomplete="email" placeholder="name@example.org" />
+                        <p class="source-help">
+                            Sent to Unpaywall, and to Crossref and OpenAlex for their
+                            polite request pools. Never shared elsewhere.
+                        </p>
+                    </section>
+                    <section class="settings-group">
+                        <h3>Search services</h3>
+                        <p class="source-help">
+                            Keys stay on this computer and are never shown again after
+                            you save them.
+                        </p>
+                        <div id="sources-list"></div>
+                    </section>
+                    <section class="settings-group">
+                        <label for="sources-proxy">Library proxy</label>
+                        <input id="sources-proxy" type="text" spellcheck="false" placeholder="https://login.proxy.example.edu/login?url=" />
+                        <p class="source-help">
+                            Used only for links you open yourself, never for automatic
+                            downloads. Example:
+                            https://login.proxy.example.edu/login?url=
+                        </p>
+                    </section>
+                    <section class="settings-group">
+                        <label for="sources-inbox">Folder for manual downloads</label>
+                        <input id="sources-inbox" type="text" spellcheck="false" placeholder="/home/you/Downloads/papers" />
+                        <p class="source-help">
+                            Save PDFs you download by hand here; PaperAssist copies
+                            matching ones into the library and never changes this folder.
+                        </p>
+                    </section>
+                    <section class="settings-group">
+                        <h3>Library location</h3>
+                        <code id="sources-library" class="path"></code>
+                        <p class="source-help">
+                            Chosen at start-up with <code>--data-dir</code> or
+                            PAPERASSIST_DATA_DIR.
+                        </p>
+                    </section>
+                </div>
+                <div class="acquire-actions sources-footer">
+                    <button class="primary" type="submit">Save</button
+                    ><button id="sources-check" type="button">Check access</button
+                    ><button type="button" data-close="sources-dialog">Close</button
+                    ><span id="sources-message" class="sources-message" role="status"></span>
+                </div>
+            </form>
+        </dialog>
+        <dialog id="metadata-dialog">
+            <div class="dialog-head">
+                <div>
+                    <p class="eyebrow">LIBRARY</p>
+                    <h2>Edit paper details</h2>
+                </div>
+                <button data-close="metadata-dialog" aria-label="Close">
+                    ×
+                </button>
+            </div>
+            <form id="metadata-form">
+                <label>Title<input name="title" required /></label
+                ><label>Authors<input name="authors" /></label
+                ><label>Year<input name="year" type="number" /></label
+                ><label>DOI<input name="doi" /></label>
+                <div class="acquire-actions">
+                    <button class="primary" type="submit">Save details</button
+                    ><button type="button" data-close="metadata-dialog">
+                        Cancel
+                    </button>
+                </div>
+            </form>
+            <p id="metadata-status" class="status"></p>
+        </dialog>
+    </body>
+</html>

@@ -1,0 +1,39 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+!/src/paperassist/web/vendor/pdfjs/build/
+dist/
+
+# Local configuration and data
+.env
+.env.*
+!.env.example
+/data/*
+!/data/README.md
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Private evaluation corpus and local build assets
+/BibArticolo/
+/BibTesi/
+/node_modules/
+/tmp/
+
+# Personal maintainer notes
+CLAUDE.local.md
+docs/HANDOFF.md
