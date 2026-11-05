@@ -33,7 +33,10 @@ export class Reader {
         this.api = api;
         this.callbacks = callbacks;
         this.revision = doc.revision ?? 0;
-        this.dirty = false;
+        // Set by edits PDF.js reports; `dirty` also compares the serialized annotation state.
+        this.edited = false;
+        // Serialized annotation state matching the PDF on disk; "" means nothing is edited.
+        this.savedHash = "";
         this.saving = false;
         this.changeVersion = 0;
         this.editorReady = false;
@@ -156,7 +159,15 @@ export class Reader {
         );
         this.bus = new EventBus();
         this.bus.on("annotationeditoruimanager", ({ uiManager }) => {
+            if (this.editorManager === uiManager) return;
             this.editorManager = uiManager;
+            // PDF.js does not flag edits to editors already in its storage (move, resize);
+            // `dirty` sees them in the serialized state, so only the toolbar needs a refresh.
+            const addCommands = uiManager.addCommands;
+            uiManager.addCommands = (...args) => {
+                addCommands.apply(uiManager, args);
+                this.callbacks.status(this);
+            };
         });
         this.bus.on("annotationeditorlayerrendered", () => {
             if (this.editorReady || !this.editorManager) return;
@@ -173,7 +184,11 @@ export class Reader {
         this.bus.on("switchannotationeditormode", (options) => {
             if (!this.readOnly) this.viewer.annotationEditorMode = options;
         });
-        this.bus.on("editingstateschanged", () => this.reportSelection());
+        // Also fires on undo and redo, which can bring the annotations back to the saved state.
+        this.bus.on("editingstateschanged", () => {
+            this.reportSelection();
+            this.callbacks.status(this);
+        });
         this.bus.on("annotationeditorparamschanged", () => {
             queueMicrotask(() => this.reportSelection());
         });
@@ -220,9 +235,13 @@ export class Reader {
             throw error;
         }
         if (this.closed) return;
-        this.pdf.annotationStorage.onSetModified = () => {
-            this.markDirty();
-        };
+        // Entering an editing mode turns saved annotations into editors and flips PDF.js's
+        // modified flag without any change. Judge by the serialized state (untouched editors
+        // serialize to nothing) and re-arm the flag so the next real edit still reports.
+        this.pdf.annotationStorage.onSetModified = () => queueMicrotask(() => {
+            if (this.dirty) this.markDirty();
+            else this.pdf.annotationStorage.resetModified();
+        });
         this.find.setDocument(this.pdf);
         this.viewer.setDocument(this.pdf);
         this.links.setDocument(this.pdf);
@@ -323,9 +342,18 @@ export class Reader {
         this.reportSelection();
     }
     markDirty() {
-        this.dirty = true;
+        this.edited = true;
         this.changeVersion++;
         this.callbacks.status(this);
+    }
+    // PDF.js reports some edits late (a keyboard nudge is announced after a second) and
+    // others never, so besides the reported flag compare the serialized state with the saved one.
+    get dirty() {
+        return this.edited || (Boolean(this.pdf) &&
+            this.pdf.annotationStorage.serializable.hash !== this.savedHash);
+    }
+    set dirty(value) {
+        this.edited = value;
     }
     commitEdits() {
         this.editorManager?.currentLayer?.endDrawingSession();
@@ -339,6 +367,7 @@ export class Reader {
         this.saving = true;
         this.error = null;
         const version = this.changeVersion;
+        const hash = this.pdf.annotationStorage.serializable.hash;
         // PDF.js resets its modified flag during serialization; block page edits until the write finishes.
         this.container.inert = true;
         this.callbacks.status(this);
@@ -355,6 +384,7 @@ export class Reader {
                 });
                 this.revision = result.revision ?? result.document?.revision ?? this.revision + 1;
                 this.doc.revision = this.revision;
+                this.savedHash = hash;
                 this.dirty = this.changeVersion !== version;
                 return !this.dirty;
             } catch (error) {
