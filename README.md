@@ -176,8 +176,11 @@ corresponding setting is empty.
   reference search or click a link.
 - PDF parsing is deterministic; no language model is involved in importing or
   organizing papers.
-- Citation analysis is partial: some bibliography layouts, grouped citations and
-  non-Latin names are missed, so check results that matter.
+- Citation analysis is partial. It counts "Author year" and `[n]` citations and
+  leaves a count blank when two entries cannot be told apart. On six hand-checked
+  papers it found about 96% of citations and almost none wrongly, but scanned or
+  badly extracted PDFs, superscript numbering and unusual citation forms are missed;
+  see `docs/development/citation-accuracy.md`.
 - Scanned PDFs open but are not OCRed. Very large or malformed PDFs have no hard
   time or memory limits during import.
 

@@ -15,10 +15,24 @@ from paperassist.retrieval import identify, search_urls
 DOI = re.compile(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', re.I)
 HEADING = re.compile(r'^\s*(?:references|bibliography)\s*$', re.I | re.M)
 ENTRY = re.compile(r'^\s*(?:\[(\d+)\]|(\d+)\.)\s+(.+)$')
-AUTHOR_ENTRY = re.compile(rf'^\s*({SURNAME}),\s*(?:[^\W\d_]\.|[^\W\d_]+\s*,)')
-MARKER = re.compile(r'\[(\d+(?:\s*[,;–-]\s*\d+)*)\]')
+AUTHOR_ENTRY = re.compile(rf'^\s*({SURNAME}),\s*(?:[^\W\d_]\s?\.|[^\W\d_]+\s*,|[JS]r\.)')
+# Text extraction sometimes inserts a space inside a year ("200 8") or after "[".
+YEAR = re.compile(r'\b(?:19|20)\d\s?\d[a-z]?\b')
+MARKER = re.compile(r'\[\s*(\d+(?:\s*[,;–−-]\s*\d+)*)\s*\]')
+JOINED_ENTRIES = re.compile(r"(?<=\d)\s+(?=[A-Z][^\W\d_]+(?:[-'’][^\W\d_]+)*,\s[A-Z]\.|[.;]\s*(?:1[89]|20)\d\d)")
+IBID = re.compile(r'^[.;:—–_-]{1,8}\s*[.,]?\s*((?:1[89]|20)\d\d[a-z]?\b.*)')
+ENTRY_LIKE = re.compile(r"[A-Z][^\W\d_]+,\s[A-Z]\..*\b(?:1[89]|20)\d\d\b")
+# A second author may carry particles ("Rouppe van der Voort") but never a whole phrase,
+# so prose after "Smith &" cannot be mistaken for a name.
+PARTICLE = r'(?:van|von|de|del|der|den|di|da|dos|ter|la|le)'
+# A few trailing letters after a space are a kerning gap ("Spi cer"), not another word.
+SECOND_AUTHOR = rf"(?:[^\W\d_]+\s+(?={PARTICLE}\s))?(?:{PARTICLE}\s+)*[^\W\d_]+(?:[-'’][^\W\d_]+)*(?:\s[a-z]{{2,4}}(?![a-z]))?"
+# "B" in "A & B 2001" is a second author, not a citation of B.
+AFTER_NAME = re.compile(r'[^\W\d_]{2}\s*(?:&|\band)\s+$', re.I)
+SPACING_ACCENT = re.compile(r'\s*([´¨˜ˆˇ˚¸])\s*([A-Za-zı])')
+COMBINING = {'´': '\u0301', '¨': '\u0308', '˜': '\u0303', 'ˆ': '\u0302', 'ˇ': '\u030c', '˚': '\u030a', '¸': '\u0327'}
 DESTINATION_VERSION = 3
-EXTRACTION_VERSION = 1
+EXTRACTION_VERSION = 2
 
 
 @contextmanager
@@ -35,7 +49,7 @@ def _connection(library):
 def _numbers(marker):
     result = set()
     for part in re.split(r'\s*[,;]\s*', marker):
-        match = re.fullmatch(r'(\d+)\s*[–-]\s*(\d+)', part)
+        match = re.fullmatch(r'(\d+)\s*[–−-]\s*(\d+)', part)
         if match:
             a, b = map(int, match.groups())
             if a <= b and b - a <= 100:
@@ -45,57 +59,141 @@ def _numbers(marker):
     return result
 
 
+def _clean(text):
+    """Repair what PDF text extraction breaks: detached accents ("M¨ uller"), ligatures and
+    names hyphenated at a line end."""
+    joined = SPACING_ACCENT.sub(lambda m: m.group(2).replace('ı', 'i') + COMBINING[m.group(1)], text)
+    return re.sub(r'(?<=[^\W\d_])-\n(?=[a-z])', '', unicodedata.normalize('NFKC', joined))
+
+
+def _split_entries(lines):
+    """Group bibliography lines into entries; also return the lines before the first entry."""
+    entries, leading = [], []
+    # Scanned two-column pages can run several entries together on one line.
+    for line in (part for line in lines for part in JOINED_ENTRIES.split(line)):
+        line = line.strip()
+        numeric = ENTRY.match(line)
+        author = AUTHOR_ENTRY.match(line)
+        if ibid := IBID.match(line):
+            if entries:  # "———. 1988, ..." repeats the previous author list
+                entries.append({'label': '', 'raw': YEAR.split(entries[-1]['raw'], maxsplit=1)[0] + ibid.group(1)})
+        elif numeric:
+            entries.append({'label': numeric.group(1) or numeric.group(2), 'raw': numeric.group(3)})
+        elif author and (not entries or YEAR.search(entries[-1]['raw'])):
+            entries.append({'label': author.group(1), 'raw': line})
+        elif entries and line:
+            entries[-1]['raw'] += ' ' + line
+        elif line:
+            leading.append(line)
+    return entries, leading
+
+
+def _citation(author, year):
+    """Regex for citations of one author-year entry.
+
+    Accepts "A 2001", "A et al. (2001)", "A & B, 2001", earlier years of the same
+    group ("A 1999, 2001") and later suffixes ("A 2001a,b"). Intervening text is
+    limited to citation grammar, not arbitrary prose.
+    """
+    base, suffix = year[:4], year[4:]
+    # "2001a,b" cites both suffixed entries, so b is also found after an earlier suffix.
+    year_part = base + (rf'(?:{suffix}|[a-z](?:\s*,\s*[a-z])*?\s*,\s*{suffix})' if suffix else '')
+    # A large kerning gap after the first capital reads as a space ("W atanabe").
+    name = re.escape(author).replace(r'\-', r'-\s*').replace(r'\ ', r'\s+')
+    name = name[0] + r'\s?' + name[1:]
+    return re.compile(rf'\b{name}\b(?:(?P<more>\s+et\s+al\.?)|\s*(?:and|&)\s+(?P<second>{SECOND_AUTHOR}))?'
+                      rf'\s*[,\(]?\s*(?:(?:19|20)\d\d[a-z]?\s*,\s*)*{year_part}(?![A-Za-z0-9])', re.I)
+
+
+def _fits(count, second, citation):
+    """Whether an entry with this many authors and second author can be that citation."""
+    if citation['more']:
+        return count >= 3
+    if citation['second']:
+        return count == 2 and second == fold(citation['second'])
+    return count == 1
+
+
+def _share(group, found):
+    """Share citations between entries with the same first author and year.
+
+    "Smith & Jones 2001" belongs to the two-author entry and "Smith et al. 2001" to an
+    entry with three or more authors. A citation that fits none or several entries makes
+    all of them ambiguous rather than guessing.
+    """
+    authors = []
+    for entry in group:
+        names = surnames(entry['raw'])
+        # "Smith, A., et al." lists one name but stands for three or more authors.
+        count = max(len(names), 3) if re.search(r'\bet\s+al\b', re.split(YEAR, entry['raw'], maxsplit=1)[0]) else len(names)
+        authors.append((count, fold(names[1]) if len(names) > 1 else None))
+    owned, ambiguous = [[] for _ in group], set()
+    # Every member found the same text, so one member's matches stand for all.
+    for page, m in found[0]:
+        fits = [i for i, (count, second) in enumerate(authors) if _fits(count, second, m)]
+        if len(fits) == 1:
+            owned[fits[0]].append((page, m))
+        else:
+            ambiguous.update(fits or range(len(group)))
+    return owned, ambiguous
+
+
 def extract(pages):
     """Return detected references and occurrences; coverage is always partial."""
+    pages = [_clean(page) for page in pages]
     heading = next(((i, m) for i, page in enumerate(pages) if (m := HEADING.search(page))), None)
     if not heading:
         return []
     page_index, match = heading
-    bibliography = '\n'.join([pages[page_index][match.end():], *pages[page_index + 1:]])
-    entries = []
-    for line in bibliography.splitlines():
-        line = line.strip()
-        numeric = ENTRY.match(line)
-        author = AUTHOR_ENTRY.match(line)
-        if numeric:
-            entries.append({'label': numeric.group(1) or numeric.group(2), 'raw': numeric.group(3)})
-        elif author and (not entries or re.search(r'\b(?:19|20)\d{2}[a-z]?\b', entries[-1]['raw'])):
-            entries.append({'label': author.group(1), 'raw': line})
-        elif entries and line:
-            entries[-1]['raw'] += ' ' + line
-    body = pages[:page_index] + [pages[page_index][:match.start()]]
+    # Scanned two-column pages can print the left column of entries before the heading.
+    above = pages[page_index][:match.start()].splitlines()
+    top = len(above)
+    while top and ENTRY_LIKE.search(above[top - 1]):
+        top -= 1
+    bibliography = '\n'.join([*above[top:], pages[page_index][match.end():], *pages[page_index + 1:]])
+    entries, leading = _split_entries(bibliography.splitlines())
+    # In two-column layouts a mid-page heading can precede the rest of the body text.
+    body = pages[:page_index] + ['\n'.join([*above[:top], *leading])]
+    found = []
     for index, entry in enumerate(entries):
         raw = entry['raw']
         doi = DOI.search(raw)
-        year = re.search(r'\b(?:19|20)\d{2}[a-z]?\b', raw)
+        year = YEAR.search(raw)
+        year_text = re.sub(r'\s', '', year.group()) if year else ''
         author = AUTHOR_ENTRY.match(raw)
-        if not entry['label'].isdigit() and author and year:
-            entry['label'] = f'{author.group(1)} {year.group()}'
-        occurrences = []
-        for page_number, text in enumerate(body, 1):
-            if entry['label'].isdigit():
-                matches = [m for m in MARKER.finditer(text) if int(entry['label']) in _numbers(m.group(1))]
-            elif author and year:
-                # Limit the intervening text to citation grammar, not arbitrary prose.
-                pattern = (rf'\b{re.escape(author.group(1))}\b'
-                           rf'(?:\s+(?:et\s+al\.?|(?:and|&)\s+{SURNAME}))?'
-                           rf'\s*[,\(]?\s*{re.escape(year.group())}(?![A-Za-z0-9])')
-                matches = list(re.finditer(pattern, text, re.I))
-            else:
-                matches = []
-            for m in matches:
-                occurrences.append({'page': page_number, 'context': text[max(0, m.start()-60):m.end()+60], 'marker': m.group()})
-        entry.update(id=str(index), title=raw, authors=author.group(1) if author else '',
-                     year=year.group() if year else '', doi=doi.group().rstrip('.,;') if doi else '',
-                     citation_count=len(occurrences), count_status='partial', occurrences=occurrences,
-                     local_document_id=None)
+        surname = re.sub(r'\b([A-Z])\s(?=[a-z]{2})', r'\1', author.group(1)) if author else ''
+        numeric = entry['label'].isdigit()
+        if not numeric and author and year:
+            entry['label'] = f'{surname} {year_text}'
+        if numeric:
+            find = lambda text, n=int(entry['label']): [m for m in MARKER.finditer(text) if n in _numbers(m.group(1))]
+        elif author and year:
+            pattern = _citation(surname, year_text)
+            find = lambda text: [m for m in pattern.finditer(text) if not AFTER_NAME.search(text[max(0, m.start() - 30):m.start()])]
+        else:
+            find = lambda text: []
+        found.append([(page, m) for page, text in enumerate(body, 1) for m in find(text)])
+        entry.update(id=str(index), title=raw, authors=surname,
+                     year=year_text, doi=doi.group().rstrip('.,;') if doi else '',
+                     count_status='partial', local_document_id=None)
         entry['search_urls'] = search_urls(entry)
-    labels = [entry['label'].lower() for entry in entries]
-    for entry in entries:
-        if not entry['label'].isdigit() and labels.count(entry['label'].lower()) > 1:
-            entry['citation_count'] = None
-            entry['count_status'] = 'ambiguous'
-            entry['occurrences'] = []
+    homonyms = {}
+    for i, entry in enumerate(entries):
+        if not entry['label'].isdigit():
+            homonyms.setdefault(entry['label'].lower(), []).append(i)
+    ambiguous = set()
+    for members in homonyms.values():
+        if len(members) > 1:
+            owned, unclear = _share([entries[i] for i in members], [found[i] for i in members])
+            for i, hits in zip(members, owned):
+                found[i] = hits
+            ambiguous.update(members[j] for j in unclear)
+    for i, entry in enumerate(entries):
+        entry['occurrences'] = [{'page': page, 'context': body[page - 1][max(0, m.start()-60):m.end()+60], 'marker': m.group()}
+                                for page, m in found[i]]
+        entry['citation_count'] = len(entry['occurrences'])
+        if i in ambiguous:
+            entry.update(citation_count=None, count_status='ambiguous', occurrences=[])
     return entries
 
 
@@ -152,7 +250,8 @@ def analyze(library, document_id):
 
 
 def _normalize(text):
-    return ''.join(c for c in unicodedata.normalize('NFKC', text).casefold() if c.isalnum())
+    # Entries saved before accents were repaired must still match their new text.
+    return ''.join(c for c in _clean(text).casefold() if c.isalnum())
 
 
 def map_destinations(reader, pages, refs):

@@ -31,10 +31,23 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(extract(['No bibliography here']), [])
 
     def test_multiline_entries_and_ambiguous_year(self):
-        refs = extract(['Smith (2020) mentions this.\nReferences\nSmith, A., Jones, B.,\nA long title, Journal 4, 2020.\nSmith, C., Another paper, Journal 5, 2020.'])
+        refs = extract(['Smith et al. (2020) mentions this.\nReferences\nSmith, A., Jones, B.,\nBrown, C. A long title, Journal 4, 2020.\nSmith, C., Green, D., White, E., Another paper, Journal 5, 2020.'])
         self.assertEqual(len(refs), 2)
         self.assertTrue(all(ref['citation_count'] is None for ref in refs))
         self.assertTrue(all(ref['count_status'] == 'ambiguous' for ref in refs))
+
+    def test_same_first_author_and_year_are_told_apart_by_author_count(self):
+        pages = ['Smith & Jones (2020) and Smith et al. (2020) agree; Smith (2020) differs.\n'
+                 'References\n'
+                 'Smith, A., & Jones, B. 2020, Journal, 1, 1\n'
+                 'Smith, A., Jones, B., & Brown, C. 2020, Journal, 2, 2\n'
+                 'Smith, D. 2020, Journal, 3, 3']
+        self.assertEqual([r['citation_count'] for r in extract(pages)], [1, 1, 1])
+        pages = ['Smith & Brown (2020) and Smith et al. (2020).\nReferences\n'
+                 'Smith, A., & Jones, B. 2020, Journal, 1, 1\n'
+                 'Smith, A., Brown, C., & Green, D. 2020, Journal, 2, 2']
+        # "Smith & Brown" fits neither entry: neither count can be trusted.
+        self.assertEqual([r['citation_count'] for r in extract(pages)], [None, None])
 
     def test_wrapped_citations_do_not_consume_unrelated_prose(self):
         refs = extract(['Smith et al.\n(2020); Smith &\nJones (2020). Smith discussed Brown in 2020. Smith (2020a).\nReferences\nSmith, A. 2020. A useful paper.'])
@@ -52,6 +65,76 @@ class ReferenceTests(unittest.TestCase):
                          ['Testa 2012', 'Török 2004', 'Martínez-Sykora 2008', 'van Ballegooijen 2014'])
         self.assertEqual([refs[1]['citation_count'], refs[2]['citation_count']], [1, 1])
         self.assertNotIn('Török', refs[0]['raw'])
+
+    def test_year_lists_and_suffix_lists_cite_each_entry(self):
+        pages = ['Lee et al. (2005, 2008), Hall 2010a,b and Hall (2010a, b, c); Ray et al. 2001, 2003.\n'
+                 'References\n'
+                 'Lee, A., Kim, B., & Park, C. 2005, J, 1, 1\n'
+                 'Lee, A., Kim, B., & Park, C. 2008, J, 1, 2\n'
+                 'Hall, D. 2010a, J, 2, 1\n'
+                 'Hall, D. 2010b, J, 2, 2\n'
+                 'Hall, D. 2010c, J, 2, 3\n'
+                 'Ray, E., Fox, F., & Day, G. 2001, J, 3, 1\n'
+                 'Ray, E., Fox, F., & Day, G. 2003, J, 3, 2']
+        self.assertEqual({r['label']: r['citation_count'] for r in extract(pages)},
+                         {'Lee 2005': 1, 'Lee 2008': 1, 'Hall 2010a': 2, 'Hall 2010b': 2, 'Hall 2010c': 1,
+                          'Ray 2001': 1, 'Ray 2003': 1})
+
+    def test_second_author_is_not_a_citation_of_that_author(self):
+        pages = ['Torrilhon & Balsara 2004 and Balsara (2004); Antolin & Rouppe van der Voort 2012; '
+                 'Smith & Jones discussed Brown in 2020.\n'
+                 'References\n'
+                 'Balsara, D. 2004, J, 1, 1\n'
+                 'Torrilhon, M., & Balsara, D. 2004, J, 1, 2\n'
+                 'Rouppe van der Voort, L. 2012, J, 2, 2\n'
+                 'Antolin, P., & Rouppe van der Voort, L. 2012, J, 2, 1\n'
+                 'Smith, A., & Jones, B. 2020, J, 3, 1']
+        self.assertEqual({r['label']: r['citation_count'] for r in extract(pages)},
+                         {'Balsara 2004': 1, 'Torrilhon 2004': 1, 'Rouppe van der Voort 2012': 0,
+                          'Antolin 2012': 1, 'Smith 2020': 0})
+
+    def test_detached_accents_and_kerning_gaps_in_extracted_text(self):
+        pages = ['M¨ uller et al. (2003); Mart ´ ınez-Sykora et al. 2009; W atanabe et al. (2008); '
+                 'Rouppe van der Voort & Antolin (2012).\n'
+                 'References\n'
+                 'M¨ uller, D. A. N., Hansteen, V. H., & Peter, H. 2003, A&A, 411, 605\n'
+                 'Mart ´ ınez-Sykora, J., Hansteen, V., DePontieu, B., & Carlsson, M.\n2009, ApJ, 701, 1569\n'
+                 'W atanabe, T., Harra, L. K., & Hara, H. 200 8, ApJ, 678, L67\n'
+                 'Dowdy, Jr., J. F., Rabin, D., & Moore, R. L. 1986, Sol. Phys., 105, 35\n'
+                 'Rouppe van der Voort, L., & Antolin, P. 2012, J, 1, 1\n'
+                 'Alexiades, V ., Amiez, G., & Gremaud, P. A. 1996, J, 1, 2']
+        refs = extract(pages)
+        self.assertEqual([r['label'] for r in refs],
+                         ['Müller 2003', 'Martínez-Sykora 2009', 'Watanabe 2008', 'Dowdy 1986',
+                          'Rouppe van der Voort 2012', 'Alexiades 1996'])
+        self.assertEqual([r['citation_count'] for r in refs], [1, 1, 1, 0, 1, 0])
+
+    def test_surnames_hyphenated_at_a_line_end_are_rejoined(self):
+        refs = extract(['See Mignone & McKin-\nney (2007) and Or-\nlando et al. 2008.\nReferences\n'
+                        'Mignone, A., & McKinney, J. C. 2007, MNRAS, 378, 1118\n'
+                        'Orlando, S., Bocchino, F., & Reale, F. 2008, ApJ, 678, 274'])
+        self.assertEqual([r['citation_count'] for r in refs], [1, 1])
+
+    def test_body_text_after_a_mid_page_heading_still_counts(self):
+        # In two-column pages the extracted heading can precede the rest of the left column.
+        refs = extract(['Intro.\nReferences\nSee also Smith (2020) here.\nSmith, A. 2020, J, 1, 1'])
+        self.assertEqual(refs[0]['citation_count'], 1)
+        self.assertEqual(refs[0]['occurrences'][0]['page'], 1)
+
+    def test_scanned_two_column_page_with_entries_above_the_heading_and_ibid_dashes(self):
+        pages = ['Bak et al. 1988 and Dennis (1985) are cited.\n'
+                 'Babcock, K. L., & Westervelt, R. M. 1990, Phys. Rev. Letters, 64, 2168 Bak, P., Tang, C., & Wiesenfeld, K. 1987, PRL, 59, 381\n'
+                 ' . 1988, Phys. Rev. A, 38, 364 Dennis, B. R. 1985, Solar Phys., 100, 465\n'
+                 'REFERENCES\n'
+                 'Low, B. C. 1990, ARA&A, 28, 491']
+        refs = extract(pages)
+        self.assertEqual([r['label'] for r in refs],
+                         ['Babcock 1990', 'Bak 1987', 'Bak 1988', 'Dennis 1985', 'Low 1990'])
+        self.assertEqual([r['citation_count'] for r in refs], [0, 0, 1, 1, 0])
+
+    def test_numeric_markers_tolerate_inner_spaces(self):
+        pages = ['Known [ 1], range [2 – 3] and list [ 3, 1].\nReferences\n[1] One 2020.\n[2] Two 2021.\n[3] Three 2022.']
+        self.assertEqual([r['citation_count'] for r in extract(pages)], [2, 1, 2])
 
     def test_author_list_suggestions_remain_ambiguous(self):
         ref = {'raw': 'Guarrasi, M., Reale, F., Orlando, S. 2014, A&A, 564, A48',
