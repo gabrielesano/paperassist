@@ -8,6 +8,7 @@ import {
     clearCommentIndicators,
 } from "./comments.js";
 import { SOURCES, SOURCE_NAMES, createSourcesDialog, proxyUrl } from "./sources.js";
+import { installShortcuts } from "./shortcuts.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const LAYOUT_KEY = "paperassist-quick-view-layout";
@@ -1757,3 +1758,4 @@ api("/api/config")
         applyConfig(config);
     })
     .catch((error) => report(`Could not connect: ${error.message}`));
+installShortcuts({ currentReader });

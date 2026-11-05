@@ -117,6 +117,23 @@ source reports its own outcome, and a failed search never proves a paper is behi
 paywall. Unresolved references offer a prefilled web search. **Change PDF** corrects
 a wrong match.
 
+## Keyboard shortcuts
+
+Press `?` or use the keyboard button in the toolbar for the full list. The main keys
+(Command replaces Ctrl on macOS):
+
+- `N`/`J` and `P`/`K` next and previous page; `Home`/`End` first and last page; `G`
+  goes to a page number; `Esc` in a toolbar field returns to the document, where the
+  arrow, Space and Page Up/Down keys scroll.
+- `Ctrl+F` finds in the open paper; `Ctrl` with `+`, `-` or `0` zooms and fits the width.
+- `V`, `D`, `H`, `C` choose Select, Draw, Highlight and Comment; `Ctrl+Z` and
+  `Ctrl+Shift+Z` (or `Ctrl+Y`) undo and redo annotation edits; `Ctrl+S` saves.
+- `L` opens the library; `,` and `.` switch tabs; `X` closes the tab; `B` hides the
+  side panels; `1`, `2` and `O` go to References, Comments and the outline.
+
+Letter keys are ignored while you type in a field or a dialog is open. Without an open
+paper, `Ctrl+F` and the zoom keys stay with the browser.
+
 ## Sources settings
 
 Open **Sources** to switch search services on or off and enter optional

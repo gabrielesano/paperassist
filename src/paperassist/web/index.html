@@ -31,6 +31,18 @@
                     <path d="M5 1v12M11 1v12" />
                 </svg>
             </button>
+            <button
+                id="shortcuts-button"
+                class="tool"
+                aria-label="Keyboard shortcuts"
+                title="Keyboard shortcuts (?)"
+                aria-haspopup="dialog"
+            >
+                <svg width="16" height="12" viewBox="0 0 16 12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="1" y="1" width="14" height="10" rx="1.5" />
+                    <path d="M4 4.2h.01M7 4.2h.01M10 4.2h.01M12.5 4.2h.01M4.5 8h7" stroke-linecap="round" />
+                </svg>
+            </button>
             <div class="tool-group page-controls">
                 <button id="previous-page" aria-label="Previous page">‹</button
                 ><label
@@ -175,6 +187,21 @@
                 <button id="unsaved-discard">Discard</button>
                 <button id="unsaved-cancel">Cancel</button>
             </div>
+        </dialog>
+        <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-title">
+            <div class="dialog-head">
+                <div>
+                    <p class="eyebrow">PAPERASSIST</p>
+                    <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+                </div>
+                <button data-close="shortcuts-dialog" aria-label="Close">
+                    ×
+                </button>
+            </div>
+            <p class="dialog-intro">
+                Letter keys are ignored while a text field or dialog has focus.
+            </p>
+            <div id="shortcut-groups" class="shortcut-groups"></div>
         </dialog>
         <dialog id="library-dialog">
             <div class="dialog-head">
