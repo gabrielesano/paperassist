@@ -307,4 +307,5 @@ class InboxEndpointTests(unittest.TestCase):
         self.assertEqual(linked.json['retrieval']['status'], 'local')
         self.assertEqual(linked.json['local_document_id'], 2)
         # The job passes the stored settings on, so identification can use the email and ADS token.
-        self.assertEqual(identify.call_args.args[2].inbox, str(folder))
+        # Settings store the resolved path; on Windows the temp folder may differ by its 8.3 short name.
+        self.assertTrue(os.path.samefile(identify.call_args.args[2].inbox, folder))
