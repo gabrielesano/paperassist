@@ -202,6 +202,17 @@ button:hover,
     text-align: left;
     font-size: 12px;
 }
+.tab-rename {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 12px;
+    padding: 3px 4px;
+    border: 1px solid #8ab6a5;
+    border-radius: 2px;
+    background: #252a2a;
+    color: #f5f7f5;
+}
 .tab-close {
     font-size: 16px;
 }

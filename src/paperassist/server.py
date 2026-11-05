@@ -242,6 +242,10 @@ def create_app(data_dir, source='default', switch=None):
     def metadata(document_id):
         return jsonify(library.update_metadata(document_id, json_object()))
 
+    @app.put('/api/documents/<document_id>/label')
+    def label(document_id):
+        return jsonify(library.set_label(document_id, json_object().get('label')))
+
     @app.put('/api/documents/<document_id>/pdf')
     def save_pdf(document_id):
         revision = request.headers.get('X-PaperAssist-Revision')

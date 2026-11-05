@@ -85,3 +85,10 @@ test("every listed entry names its group, keys and description", () => {
         assert.ok(entry.keys.every((combo) => combo.length), entry.label);
     }
 });
+
+test("F2 renames only from a focused paper tab", () => {
+    const inTab = { closest: (selector) => selector === ".tab-title" ? inTab : null };
+    assert.equal(label(press("F2", { target: inTab })), "Rename the focused paper tab");
+    assert.equal(shortcutFor(press("F2")), null);
+    assert.equal(shortcutFor(press("F2", { target: inTab, ctrlKey: true })), null);
+});

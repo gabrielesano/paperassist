@@ -55,6 +55,8 @@ const byId = (id) =>
         (tab) => tab.main.doc.id === id || tab.preview?.doc.id === id,
     );
 const title = (doc) => doc.title || doc.filename || "Untitled paper";
+// A label is the reader's own name for a PDF; the bibliographic title stays the paper's name.
+const tabTitle = (doc) => doc.label || title(doc);
 const el = (tag, text, className) => {
     const node = document.createElement(tag);
     node.textContent = text ?? "";
@@ -353,17 +355,68 @@ function renderTabs() {
             "",
             `tab${tab === state.current ? " current" : ""}`,
         );
-        const button = el("button", title(tab.main.doc), "tab-title");
-        button.title = title(tab.main.doc);
+        const doc = tab.main.doc;
+        const button = el("button", tabTitle(doc), "tab-title");
+        // The tooltip and accessible name keep the full title when a short label hides it.
+        const full = doc.label ? `${doc.label} (${title(doc)})` : title(doc);
+        button.title = full;
+        button.setAttribute("aria-label", full);
         if (tab === state.current) button.setAttribute("aria-current", "page");
         button.onclick = () => selectTab(tab);
+        button.ondblclick = () => renameTab(tab);
         const close = el("button", "×", "tab-close");
-        close.setAttribute("aria-label", `Close ${title(tab.main.doc)}`);
+        close.setAttribute("aria-label", `Close ${tabTitle(doc)}`);
         close.onclick = () => closeTab(tab);
         item.append(button, close);
         container.append(item);
     }
     $("#welcome").hidden = state.tabs.length > 0;
+}
+// Edits the label in place. A label equal to the default title means "no label".
+function renameTab(tab) {
+    const doc = tab.main.doc;
+    const button = $("#tabs").children[state.tabs.indexOf(tab)]?.querySelector(".tab-title");
+    if (!button) return;
+    const input = el("input", "", "tab-rename");
+    input.value = tabTitle(doc);
+    input.maxLength = 80;
+    input.setAttribute("aria-label", "Paper tab name");
+    let finished = false;
+    const finish = async (save, refocus) => {
+        // Removing the input fires blur again; the first outcome wins.
+        if (finished) return;
+        finished = true;
+        const text = input.value.trim();
+        const label = text === title(doc) ? "" : text;
+        input.replaceWith(button);
+        if (refocus) button.focus();
+        if (!save || label === (doc.label || "")) return;
+        try {
+            const saved = await api(`/api/documents/${doc.id}/label`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ label }),
+            });
+            for (const entry of state.tabs)
+                for (const reader of [entry.main, entry.preview])
+                    if (reader?.doc.id === doc.id) {
+                        reader.doc.label = saved.label;
+                        reader.refreshLabel();
+                    }
+        } catch (error) {
+            report(`Could not rename the tab: ${error.message}`);
+        }
+        renderTabs();
+        if (refocus) $("#tabs").children[state.tabs.indexOf(tab)]?.querySelector(".tab-title")?.focus();
+    };
+    input.onkeydown = (event) => {
+        if (event.key === "Enter") finish(true, true);
+        else if (event.key === "Escape") finish(false, true);
+    };
+    input.onblur = () => finish(true, false);
+    button.replaceWith(input);
+    input.focus();
+    input.select();
 }
 function selectTab(tab) {
     if (state.active && state.active !== tab.main) {
@@ -406,7 +459,7 @@ async function saveReader(reader) {
 }
 function askUnsaved(reader) {
     const dialog = $("#unsaved-dialog");
-    $("#unsaved-message").textContent = `Save changes to ${title(reader.doc)} before closing?`;
+    $("#unsaved-message").textContent = `Save changes to ${tabTitle(reader.doc)} before closing?`;
     return new Promise((resolve) => {
         const finish = (result) => {
             dialog.close();

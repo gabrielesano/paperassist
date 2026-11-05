@@ -147,6 +147,10 @@ export const shortcuts = [
             if (!close) return false;
             close.click();
         } },
+    { group: "Tabs and panels", keys: [["F2"]], label: "Rename the focused paper tab",
+        match: (event) => modifierFree(event) && event.key === "F2" && event.target.closest?.(".tab-title"),
+        // The tab already renames itself on double-click; F2 asks for the same thing.
+        run: (app, event) => event.target.closest(".tab-title").dispatchEvent(new MouseEvent("dblclick")) },
     { group: "Tabs and panels", keys: [["B"]], label: "Show or hide the side panels", match: plain("b"),
         run: click("#panels-button") },
     { group: "Tabs and panels", keys: [["O"]], label: "Go to the outline", match: plain("o"),

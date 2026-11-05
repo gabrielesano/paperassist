@@ -112,6 +112,11 @@ reference that is already in your library shows it in a split below (or beside) 
 paper you are reading, so you can consult it without losing your place. A quick-view
 PDF can be moved into its own tab. Drag the divider to resize the split.
 
+Double-click a paper tab (or press `F2` on it) to give it a short name of your own,
+such as "Reale 2016". The name is kept with the PDF and also appears in the quick-view
+header; it does not change the paper's title, metadata or file name, and clearing it
+restores the title.
+
 While a quick view is open, the toolbar gains a **Second paper** group with its own
 page, find and zoom controls. The first set always drives the main paper, the second
 one the quick view, whichever pane you clicked last; annotation tools still follow the

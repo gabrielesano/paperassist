@@ -66,6 +66,26 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.client.post(endpoint, json=payload, headers=headers).status_code, 400)
         self.assertEqual(self.client.post('/api/import', json={'paths': [1]}, headers=headers).status_code, 400)
 
+    def test_label_endpoint_stores_a_nickname_behind_the_token(self):
+        from pypdf import PdfWriter
+        writer = PdfWriter()
+        writer.add_blank_page(width=100, height=100)
+        data = io.BytesIO()
+        writer.write(data)
+        data.seek(0)
+        document = Library(self.directory.name).import_stream(data, 'test.pdf')
+        endpoint = f"/api/documents/{document['id']}/label"
+        headers = {'X-PaperAssist-Token': self.token}
+        self.assertEqual(self.client.put(endpoint, json={'label': 'x'}).status_code, 403)
+        for payload in ([], {}, {'label': None}, {'label': 3}, {'label': 'x' * 81}):
+            self.assertEqual(self.client.put(endpoint, json=payload, headers=headers).status_code, 400)
+        self.assertEqual(self.client.put('/api/documents/999/label', json={'label': 'x'}, headers=headers).status_code, 404)
+        answer = self.client.put(endpoint, json={'label': ' Reale 2016 '}, headers=headers).json
+        self.assertEqual((answer['label'], answer['title'], answer['metadata_status']),
+                         ('Reale 2016', document['title'], document['metadata_status']))
+        self.assertEqual(self.client.get('/api/documents').json[0]['label'], 'Reale 2016')
+        self.assertEqual(self.client.put(endpoint, json={'label': ''}, headers=headers).json['label'], '')
+
     def test_reference_link_reset_requires_explicit_null(self):
         from unittest.mock import patch
         endpoint = '/api/documents/1/references/2'

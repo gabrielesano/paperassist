@@ -95,6 +95,38 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(result['metadata']['parser_version'], 3)
         self.assertEqual(self.library.get_path(doc['id']).read_bytes(), self.payload)
 
+    def test_label_is_a_nickname_that_leaves_the_catalogue_alone(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'one.pdf')
+        self.assertEqual(doc['label'], '')
+        labelled = self.library.set_label(doc['id'], '  Reale\n 2016  ')
+        self.assertEqual(labelled['label'], 'Reale 2016')
+        for key in ('title', 'authors', 'year', 'metadata_status', 'stored_name'):
+            self.assertEqual(labelled[key], doc[key])
+        self.assertEqual(self.library.list_documents()[0]['label'], 'Reale 2016')
+        # Re-reading the PDF with a newer parser rewrites the extracted data, not the nickname.
+        with self.library._connect() as db:
+            db.execute("UPDATE documents SET extracted = '{}' WHERE id = ?", (doc['id'],))
+        again = self.library.import_stream(io.BytesIO(self.payload), 'other.pdf')
+        self.assertEqual(again['label'], 'Reale 2016')
+        self.assertEqual(self.library.set_label(doc['id'], '   ')['label'], '')
+
+    def test_label_does_not_rename_the_stored_file(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'one.pdf')
+        before = sorted(path.name for path in self.library.originals.iterdir())
+        self.library.set_label(doc['id'], 'Reale 2016')
+        self.assertEqual(sorted(path.name for path in self.library.originals.iterdir()), before)
+
+    def test_label_validates_type_and_length(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'one.pdf')
+        for bad in (None, 5, ['x'], {'a': 1}):
+            with self.assertRaisesRegex(ValueError, 'string'):
+                self.library.set_label(doc['id'], bad)
+        self.assertEqual(len(self.library.set_label(doc['id'], 'x' * 80)['label']), 80)
+        with self.assertRaisesRegex(ValueError, 'longer'):
+            self.library.set_label(doc['id'], 'x' * 81)
+        with self.assertRaises(KeyError):
+            self.library.set_label(999, 'x')
+
     def test_progress_and_cancellation(self):
         root = Path(self.tmp.name) / 'inputs'
         root.mkdir()

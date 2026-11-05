@@ -256,9 +256,11 @@ export class Reader {
     setKind(kind, note = this.readOnly ? "Read only" : "") {
         this.kind = kind;
         this.element.classList.toggle("preview", kind === "preview");
+        this.note = note;
         const name = this.doc.title || this.doc.filename || "Untitled paper";
+        // A tab label also names the quick view; the accessible name keeps the full title.
         const label = kind === "preview"
-            ? ["Quick view", note, name].filter(Boolean).join(" · ")
+            ? ["Quick view", note, this.doc.label || name].filter(Boolean).join(" · ")
             : "";
         this.element.setAttribute(
             "aria-label",
@@ -272,6 +274,9 @@ export class Reader {
         if (kind !== "preview") this.element.style.flexBasis = "";
         this.element.querySelector(".close-preview").hidden =
             kind !== "preview";
+    }
+    refreshLabel() {
+        this.setKind(this.kind, this.note);
     }
     // "side" puts the quick view right of the main paper; narrow areas cannot offer it.
     setLayout(layout, canSplitSide) {

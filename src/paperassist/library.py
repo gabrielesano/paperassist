@@ -16,6 +16,7 @@ from pypdf import PdfReader
 from .citation import pdf_name
 from .metadata import PARSER_VERSION, extract_metadata
 
+MAX_LABEL = 80
 RESERVED_NAME = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", re.I)
 # Names that say nothing about the paper; the document id is a better label than these.
 GENERIC_NAME = re.compile(r"(?:download|document|file|untitled)[\d_()-]*|[\d_-]+|[0-9a-f]{16,}", re.I)
@@ -60,7 +61,7 @@ class Library:
                     doi TEXT, pages INTEGER NOT NULL, metadata_status TEXT NOT NULL,
                     extracted TEXT NOT NULL, work_id INTEGER, revision INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    stored_name TEXT
+                    stored_name TEXT, label TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS works (
                     id INTEGER PRIMARY KEY, preferred_file_id INTEGER REFERENCES documents(id)
@@ -74,8 +75,11 @@ class Library:
                     content TEXT NOT NULL
                 );
             """)
-            if "stored_name" not in {row[1] for row in db.execute("PRAGMA table_info(documents)")}:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
+            if "stored_name" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN stored_name TEXT")
+            if "label" not in columns:
+                db.execute("ALTER TABLE documents ADD COLUMN label TEXT NOT NULL DEFAULT ''")
         self._reconcile()
 
     @contextmanager
@@ -355,6 +359,20 @@ class Library:
                             WHERE id = ? AND preferred_file_id = ?""", (old_work, old_work, document_id))
             if status == "corrected":
                 self._rename(document_id)
+        return self.get_document(document_id)
+
+    def set_label(self, document_id: int, label) -> dict:
+        """Set the name shown on this PDF's tab. It is a nickname, so it leaves the
+        bibliographic metadata, its status and the stored file name alone."""
+        if not isinstance(label, str):
+            raise ValueError("Label must be a string")
+        label = " ".join(label.split())
+        if len(label) > MAX_LABEL:
+            raise ValueError(f"Label cannot be longer than {MAX_LABEL} characters")
+        with self._lock:
+            self.get_document(document_id)
+            with self._connect() as db:
+                db.execute("UPDATE documents SET label = ? WHERE id = ?", (label, document_id))
         return self.get_document(document_id)
 
     def apply_verified(self, document_id: int, record: dict, filename: str | None = None) -> dict:
