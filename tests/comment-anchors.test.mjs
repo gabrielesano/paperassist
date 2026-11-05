@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     clientRectToPdf, pdfRectToViewport, revealCommentAnchor, clearCommentAnchor,
-    setCommentIndicators, captureCommentAnchor,
+    setCommentIndicators, captureCommentAnchor, commentAt,
 } from '../src/paperassist/web/comments.js';
 
 async function realPage() {
@@ -61,6 +61,20 @@ test('legacy page notes navigate without geometry and cleanup removes listeners'
     assert.equal(listeners.size, 0);
 });
 
+
+test('a draft anchor can be revealed without scrolling the reader', () => {
+    let scrolled = false;
+    const reader = {
+        container: { querySelectorAll: () => [] },
+        bus: { on() {}, off() {} },
+        viewer: { scrollPageIntoView: () => { scrolled = true; } },
+    };
+    globalThis.requestAnimationFrame = () => {};
+    revealCommentAnchor(reader, { page: 3 }, false);
+    assert.equal(scrolled, false);
+    revealCommentAnchor(reader, { page: 3 });
+    assert.equal(scrolled, true);
+});
 
 test('saved outlines redraw and delete without affecting focus markers', () => {
     const listeners = new Map();
@@ -195,4 +209,47 @@ test('legacy fragmented anchors are drawn as clean per-line bands', async () => 
         .sort((a, b) => a[1] - b[1]).map(mark => mark.map(Math.round));
     assert.deepEqual(marks, [[60, 49, 90, 12], [10, 62, 180, 10], [10, 74, 110, 10]]);
     assert.equal(overlays[0].children[0].style.outline, '1.5px dashed #d42020');
+});
+
+
+const anchored = (...rects) => ({
+    text: 't', page: 1, anchor: { version: 1, pages: [{ page: 1, rects }] },
+});
+
+test('a click hits only the anchored phrase of a comment', async () => {
+    const viewport = (await realPage()).getViewport({ scale: 1 });
+    const note = anchored([10, 370, 50, 380]); // screen box x 10..50, y 20..30
+    assert.equal(commentAt([note], 1, viewport, [30, 25]), note);
+    assert.equal(commentAt([note], 1, viewport, [60, 25]), null);
+    assert.equal(commentAt([note], 1, viewport, [30, 40]), null);
+    assert.equal(commentAt([note], 2, viewport, [30, 25]), null);
+});
+
+test('page-only and malformed notes are not clickable', async () => {
+    const viewport = (await realPage()).getViewport({ scale: 1 });
+    const broken = { page: 1, anchor: { version: 1, pages: [{ page: 1, rects: [[1, 2]] }] } };
+    assert.equal(commentAt([{ page: 1, text: 'x' }, broken], 1, viewport, [5, 5]), null);
+});
+
+test('overlapping comments pick the smallest phrase, then the most recent', async () => {
+    const viewport = (await realPage()).getViewport({ scale: 1 });
+    const line = anchored([10, 370, 150, 380]);
+    const word = anchored([20, 370, 40, 380]);
+    const sameWord = anchored([20, 370, 40, 380]);
+    assert.equal(commentAt([line, word], 1, viewport, [30, 25]), word);
+    assert.equal(commentAt([word, line], 1, viewport, [30, 25]), word);
+    assert.equal(commentAt([line, word], 1, viewport, [100, 25]), line);
+    assert.equal(commentAt([word, sameWord], 1, viewport, [30, 25]), sameWord);
+});
+
+test('hit testing follows zoom and rotation like the drawn outline', async () => {
+    const page = await realPage();
+    const note = anchored([10, 370, 50, 380]);
+    // The same PDF point sits at twice the pixels when the zoom doubles.
+    assert.equal(commentAt([note], 1, page.getViewport({ scale: 2 }), [60, 50]), note);
+    assert.equal(commentAt([note], 1, page.getViewport({ scale: 2 }), [60, 70]), null);
+    // Rotated 90 degrees the box is 10 wide and 40 tall at x 370, y 10.
+    const rotated = page.getViewport({ scale: 1, rotation: 90 });
+    assert.equal(commentAt([note], 1, rotated, [375, 30]), note);
+    assert.equal(commentAt([note], 1, rotated, [30, 375]), null);
 });

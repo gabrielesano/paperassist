@@ -3,6 +3,7 @@ import {
     captureCommentAnchor,
     revealCommentAnchor,
     clearCommentAnchor,
+    commentAtClient,
     setCommentIndicators,
     clearCommentIndicators,
 } from "./comments.js";
@@ -37,6 +38,7 @@ const state = {
     commentTool: false,
     editDoc: null,
     selectedComment: null,
+    undo: null,
     layout: readLayoutPreference(),
 };
 const byId = (id) =>
@@ -90,6 +92,9 @@ function refreshToolbar() {
         $("#" + id).disabled = !reader || reader.readOnly ||
             !reader.editorReady || reader.modePending !== null;
     $("#select-tool").disabled = !!reader && reader.modePending !== null;
+    // Commenting must leave the editor mode, which is impossible until the editors are ready.
+    $("#comment-tool").disabled = !!reader && !reader.readOnly &&
+        (!reader.editorReady || reader.modePending !== null);
     $("#page-input").value = reader?.viewer.currentPageNumber || 1;
     $("#page-input").max = reader?.pdf?.numPages || 1;
     $("#page-total").textContent = `/ ${reader?.pdf?.numPages || "–"}`;
@@ -117,6 +122,7 @@ const callbacks = {
         if (state.active && changed) {
             clearCommentAnchor(state.active);
             state.selectedComment = null;
+            clearUndo();
         }
         state.active = reader;
         refreshToolbar();
@@ -294,6 +300,7 @@ function selectTab(tab) {
     if (state.active && state.active !== tab.main) {
         clearCommentAnchor(state.active);
         state.selectedComment = null;
+        clearUndo();
     }
     state.current = tab;
     state.active = tab.main;
@@ -1071,17 +1078,9 @@ async function showComments() {
         host.replaceChildren();
         if (commentDraft?.reader === reader) {
             const form = el("form", "", "comment-composer");
-            form.append(el("strong", `Comment · Page ${commentDraft.page}`));
-            if (commentDraft.quote)
-                form.append(el("blockquote", commentDraft.quote));
-            else
-                form.append(
-                    el(
-                        "p",
-                        "Page comment. Select text in the PDF to anchor a comment to a phrase.",
-                        "note-meta",
-                    ),
-                );
+            const head = el("div", "", "comment-anchor");
+            fillDraftHead(head);
+            form.append(head);
             const text = document.createElement("textarea");
             text.rows = 4;
             text.placeholder = "Write a comment…";
@@ -1097,6 +1096,7 @@ async function showComments() {
             cancel.type = "button";
             cancel.onclick = () => {
                 commentDraft = null;
+                clearCommentAnchor(reader);
                 updateEditorOptions();
                 showComments();
             };
@@ -1127,7 +1127,9 @@ async function showComments() {
                         body: JSON.stringify(updated),
                     });
                     updateCommentIndicators(draft.reader, updated);
+                    clearUndo();
                     commentDraft = null;
+                    clearCommentAnchor(draft.reader);
                     updateEditorOptions();
                     if (
                         currentReader() === draft.reader &&
@@ -1152,12 +1154,9 @@ async function showComments() {
             host.append(el("p", "No comments on this document yet.", "empty"));
         for (const note of notes) {
             const row = el("div", "", "note");
+            row.dataset.note = JSON.stringify(note);
             const jump = el("button", `Page ${note.page}`, "note-meta");
-            jump.onclick = () => {
-                state.selectedComment = { reader, note };
-                revealCommentAnchor(reader, note);
-                updateEditorOptions();
-            };
+            jump.onclick = () => selectComment(reader, note, true);
             row.append(jump);
             if (note.quote || note.selection)
                 row.append(el("blockquote", note.quote || note.selection));
@@ -1167,11 +1166,68 @@ async function showComments() {
             row.append(remove);
             host.append(row);
         }
+        markSelectedNote();
     } catch (error) {
         host.textContent = `Comments unavailable: ${error.message}`;
     }
 }
+function selectComment(reader, note, scroll = false) {
+    state.selectedComment = note ? { reader, note } : null;
+    if (note) revealCommentAnchor(reader, note, scroll);
+    else clearCommentAnchor(reader);
+    updateEditorOptions();
+    markSelectedNote();
+}
+// Notes have no ids, so rows and selection are matched by content like updateComment does.
+function markSelectedNote() {
+    if (state.detail !== "comments") return;
+    const selected = state.selectedComment?.reader === currentReader()
+        ? JSON.stringify(state.selectedComment.note) : null;
+    for (const row of document.querySelectorAll("#detail-content .note")) {
+        const on = row.dataset.note === selected;
+        row.classList.toggle("selected", on);
+        if (on) row.scrollIntoView({ block: "nearest" });
+    }
+}
+
+// Comments are saved at once, so a deleted one can be brought back for a few seconds.
+const undoBar = el("span", "", "comment-undo");
+const undoButton = el("button", "Undo");
+undoBar.hidden = true;
+undoBar.append(el("span", "Comment deleted."), undoButton);
+$("#editor-hint").after(undoBar);
+function clearUndo() {
+    clearTimeout(state.undo?.timer);
+    state.undo = null;
+    undoBar.hidden = true;
+}
+function offerUndo(reader, note, index) {
+    clearUndo();
+    state.undo = { reader, note, index, timer: setTimeout(clearUndo, 10000) };
+    undoBar.hidden = reader !== currentReader();
+}
+undoButton.onpointerdown = (event) => event.preventDefault();
+undoButton.onclick = async () => {
+    const { reader, note, index } = state.undo;
+    clearUndo();
+    try {
+        const latest = await api(`/api/documents/${reader.doc.id}/notes`);
+        const notes = Array.isArray(latest) ? latest : latest.notes;
+        notes.splice(Math.min(index, notes.length), 0, note);
+        await api(`/api/documents/${reader.doc.id}/notes`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(notes),
+        });
+        updateCommentIndicators(reader, notes);
+        if (currentReader() === reader && state.detail === "comments") showComments();
+    } catch (error) {
+        report(`Could not restore comment: ${error.message}`);
+    }
+};
+
 async function updateComment(reader, note, color) {
+    clearUndo();
     try {
         const latest = await api(`/api/documents/${reader.doc.id}/notes`);
         const notes = Array.isArray(latest) ? latest : latest.notes;
@@ -1192,16 +1248,58 @@ async function updateComment(reader, note, color) {
         clearCommentAnchor(reader);
         if (state.selectedComment?.reader === reader) {
             state.selectedComment = updated ? { reader, note: updated } : null;
-            if (updated) revealCommentAnchor(reader, updated);
+            if (updated) revealCommentAnchor(reader, updated, false);
         }
+        if (!updated) offerUndo(reader, note, index);
         if (currentReader() === reader && state.detail === "comments") {
             await showComments();
-            updateEditorOptions();
         }
+        updateEditorOptions();
     } catch (error) {
         report(`Could not update comment: ${error.message}`);
     }
 }
+
+function fillDraftHead(head) {
+    head.replaceChildren(el("strong", `Comment · Page ${commentDraft.page}`));
+    if (commentDraft.quote) head.append(el("blockquote", commentDraft.quote));
+    else
+        head.append(
+            el(
+                "p",
+                "Page comment. Select text in the PDF to anchor it to a phrase.",
+                "note-meta",
+            ),
+        );
+}
+
+// Only the text layer's own selection counts, so clicking into the textarea or the
+// panels (which collapses it) keeps the last phrase instead of dropping the anchor.
+function setDraftAnchor(selected) {
+    const draft = commentDraft;
+    if (!draft || !selected) return;
+    if (selected.quote === draft.quote &&
+        JSON.stringify(selected.anchor) === JSON.stringify(draft.anchor)) return;
+    Object.assign(draft, {
+        page: selected.page,
+        quote: selected.quote,
+        anchor: selected.anchor,
+    });
+    // Without scrolling: the reader just made this selection and is looking at it.
+    revealCommentAnchor(draft.reader, { page: selected.page, anchor: selected.anchor }, false);
+    const head = document.querySelector("#detail-content .comment-anchor");
+    if (head) fillDraftHead(head);
+}
+
+let selectionTimer = 0;
+document.addEventListener("selectionchange", () => {
+    if (!commentDraft || !state.commentTool) return;
+    clearTimeout(selectionTimer);
+    selectionTimer = setTimeout(() => {
+        if (commentDraft?.reader === currentReader() && state.commentTool)
+            setDraftAnchor(captureCommentAnchor(commentDraft.reader));
+    }, 150);
+});
 
 function comment() {
     const reader = currentReader();
@@ -1212,14 +1310,19 @@ function comment() {
             : captureCommentAnchor(reader);
     pendingAnchor = null;
     clearCommentAnchor(reader);
+    state.selectedComment = null;
     commentDraft = {
         reader,
-        page: selected?.page || reader.viewer.currentPageNumber,
-        quote: selected?.quote,
-        anchor: selected?.anchor,
+        page: reader.viewer.currentPageNumber,
         text: "",
     };
+    setDraftAnchor(selected);
+    // A PDF.js editor mode would turn the drag that picks the phrase into an annotation.
     state.commentTool = true;
+    reader.tool = "select-tool";
+    reader.color = null;
+    reader.thickness = null;
+    reader.setMode(pdfjs.AnnotationEditorType.NONE);
     updateEditorOptions();
     state.detail = "comments";
     setPanel("details", true);
@@ -1352,6 +1455,30 @@ window.addEventListener("keydown", (event) => {
         saveReader(currentReader());
     }
 });
+// A plain click inside a commented phrase selects it, like clicking a PDF.js highlight.
+// Drags are left alone so the phrase can still be selected as text.
+document.addEventListener("click", (event) => {
+    const reader = currentReader();
+    if (!reader || reader.readOnly || commentDraft?.reader === reader ||
+        !reader.container.contains(event.target) ||
+        reader.viewer.annotationEditorMode !== pdfjs.AnnotationEditorType.NONE ||
+        reader.selection?.hasSelection) return;
+    const picked = window.getSelection().isCollapsed ? commentAtClient(reader, event) : null;
+    if (picked) selectComment(reader, picked);
+    else if (state.selectedComment) selectComment(reader, null);
+});
+window.addEventListener("keydown", (event) => {
+    const reader = currentReader();
+    if (!state.selectedComment || state.selectedComment.reader !== reader ||
+        event.ctrlKey || event.metaKey || event.altKey ||
+        event.target.closest?.("input, textarea, select, [contenteditable]") ||
+        document.querySelector("dialog[open]")) return;
+    if (event.key === "Escape") selectComment(reader, null);
+    else if (["Delete", "Backspace"].includes(event.key) && !reader.selection?.hasSelection) {
+        event.preventDefault();
+        updateComment(reader, state.selectedComment.note, null);
+    }
+});
 function hasUnsavedEdits() {
     return state.tabs.some((tab) => [tab.main, tab.preview].some(
         (reader) => reader && (reader.dirty || reader.saving),
@@ -1393,10 +1520,11 @@ const HINTS = {
     none: "Open a paper to use the tools",
     readOnly: "Read-only preview — annotation tools are off",
     select: "Click a drawing, highlight or comment to change its color or delete it",
-    comment: "Select text in the PDF, then write the comment in the Comments panel",
+    comment: "Select the text to comment on in the PDF, then write in the Comments panel",
 };
 function updateEditorOptions() {
     const reader = currentReader();
+    undoBar.hidden = !state.undo || state.undo.reader !== reader;
     const tool = reader?.tool || "select-tool";
     const selection = reader?.selection;
     const selectedComment =
@@ -1520,6 +1648,7 @@ for (const [id, mode] of Object.entries(editorModes))
         const reader = currentReader();
         if (!reader) return;
         state.commentTool = false;
+        if (state.selectedComment) selectComment(reader, null);
         reader.tool = id;
         reader.color = null;
         reader.thickness = null;

@@ -866,6 +866,25 @@ body {
     white-space: pre-wrap;
 }
 
+.note.selected {
+    margin-left: -8px;
+    padding-left: 6px;
+    border-left: 2px solid var(--teal);
+    background: #e7eee8;
+}
+.comment-undo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #f1f3f1;
+}
+.toolbar .comment-undo button {
+    padding: 2px 8px;
+    border: 1px solid #8a9693;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
 .note-delete {
     padding: 0;
     font-size: 12px;

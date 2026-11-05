@@ -129,7 +129,7 @@ export function clearCommentAnchor(reader) {
         .forEach(element => element.remove());
 }
 
-export function revealCommentAnchor(reader, note) {
+export function revealCommentAnchor(reader, note, scroll = true) {
     clearCommentAnchor(reader);
     const page = note.anchor?.pages?.[0]?.page || note.page;
     if (!Number.isInteger(page) || page < 1) return;
@@ -143,9 +143,11 @@ export function revealCommentAnchor(reader, note) {
     const rect = note.anchor?.pages?.[0]?.rects?.[0];
     const destArray = Array.isArray(rect) && rect.length === 4 && rect.every(Number.isFinite)
         ? [null, { name: 'XYZ' }, rect[0], rect[3], null] : undefined;
-    reader.viewer.scrollPageIntoView({
-        pageNumber: page, destArray, center: 'vertical', allowNegativeOffset: true,
-    });
+    if (scroll) {
+        reader.viewer.scrollPageIntoView({
+            pageNumber: page, destArray, center: 'vertical', allowNegativeOffset: true,
+        });
+    }
     refresh();
 }
 
@@ -174,6 +176,42 @@ function drawIndicators(reader, notes) {
                 '1.5px dashed #d42020');
         }
     }
+}
+
+// Hit-test in viewport pixels against the same line bands the indicators draw, so the
+// clickable area always matches the red outline at any zoom or rotation. The overlay stays
+// pointer-transparent: capturing events would break dragging to select commented text.
+export function commentAt(notes, page, viewport, [x, y]) {
+    let best = null;
+    notes.forEach(note => {
+        if (note.anchor?.version !== 1 || !Array.isArray(note.anchor.pages)) return;
+        for (const item of note.anchor.pages) {
+            if (item.page !== page) continue;
+            for (const band of pdfLineBands(item.rects || [], viewport)) {
+                if (x < band.x || x > band.x + band.width ||
+                    y < band.y || y > band.y + band.height) continue;
+                // The smallest band is the most specific phrase; later notes win ties.
+                const area = band.width * band.height;
+                if (!best || area <= best.area) best = { note, area };
+            }
+        }
+    });
+    return best?.note ?? null;
+}
+
+export function commentAtClient(reader, event) {
+    const element = event.target?.closest?.('.page');
+    const state = indicators.get(reader);
+    const view = element && reader.viewer.getPageView(Number(element.dataset.pageNumber) - 1);
+    if (!state || !view?.viewport || view.div !== element) return null;
+    // The overlay is positioned inside the page border, so measure from the padding box.
+    const box = element.getBoundingClientRect();
+    const sx = view.viewport.width / element.clientWidth;
+    const sy = view.viewport.height / element.clientHeight;
+    return commentAt(state.notes, Number(element.dataset.pageNumber), view.viewport, [
+        (event.clientX - box.left - element.clientLeft) * sx,
+        (event.clientY - box.top - element.clientTop) * sy,
+    ]);
 }
 
 export function setCommentIndicators(reader, notes) {
