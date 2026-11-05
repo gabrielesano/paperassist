@@ -594,3 +594,174 @@ class ConflictTests(unittest.TestCase):
         report = repair_downloads(library, 9)
         self.assertEqual([item['status'] for item in report], ['repaired', 'skipped'])
         self.assertEqual(library.verified, [(70, '10.1088/x', 'Rappazzo_2013_ApJ_771_76.pdf')])
+
+
+WINEBARGER = 'Winebarger, A. R., Schmelz, J. T., Warren, H. P., Hulburt, E. O., Saar, S. H., Kashyap, V. L., 2011, Submitted.'
+CAPTIONS = ('Figure Captions\nFigure 1 Active region observed on 2010 June 19 using SDO/AIA. All 6 images are coaligned.\n'
+            'Figure 2 Normalized SDO/AIA temperature response functions (Smith 2020).')
+
+
+def raws(pages):
+    return [ref['raw'] for ref in extract(pages)]
+
+
+class BibliographyBoundaryTests(unittest.TestCase):
+    def test_entry_stops_before_figure_captions_that_follow_the_list(self):
+        refs = extract(['Body cites Winebarger et al. 2011 and Smith (2020).\nReferences\n'
+                        'Smith, A., Jones, B. 2020, ApJ, 745, 152\n' + WINEBARGER + '\n' + CAPTIONS])
+        self.assertEqual([ref['raw'] for ref in refs], ['Smith, A., Jones, B. 2020, ApJ, 745, 152', WINEBARGER])
+        # Captions after the list are still not body text, so "Smith 2020" there adds no citation.
+        self.assertEqual(refs[0]['citation_count'], 1)
+
+    def test_headings_and_labels_after_the_list_end_it(self):
+        for heading in ('Tables', 'TABLE 1. Loop parameters', 'Table II', 'Fig. 6.— Light curves', 'Figure Legends',
+                        'Appendix A: Derivation', 'Supplementary material', 'Acknowledgements', 'Acknowledgments. We thank',
+                        '7. ACRONYMS', 'List of Figures', 'Data Availability'):
+            with self.subTest(heading):
+                entries = raws(['References\nBrown, C. 2019, A&A, 1, 2\nWhite, D. 2018, A&A, 3, 4\n' + heading + '\nSmith, E. 2017, ApJ, 5, 6'])
+                # A caption only closes the entry before it; a section heading ends the list for good.
+                resumes = heading.startswith(('Fig.', 'TABLE ', 'Table '))
+                self.assertEqual(len(entries), 3 if resumes else 2, heading)
+                self.assertEqual(entries[1], 'White, D. 2018, A&A, 3, 4')
+
+    def test_a_wrapped_title_that_starts_like_a_heading_stays_in_its_entry(self):
+        pages = ['References\nGradshteyn, I. S., & Ryzhik, I. M. 2007, in\nTable of integrals and products\n(New York: Academic Press)\n'
+                 'Brown, C. 2019, A&A, 1, 2']
+        self.assertEqual(len(raws(pages)), 2)
+        self.assertIn('Table of integrals', raws(pages)[0])
+        pages = ['References\nBrown, C. 2019, A&A, 1, 2\nWhite, D. 2018, Figures of merit for\nsolar loops. ApJ, 3, 4']
+        self.assertEqual(raws(pages)[1], 'White, D. 2018, Figures of merit for solar loops. ApJ, 3, 4')
+
+    def test_figures_floating_between_reference_pages_do_not_end_the_list(self):
+        pages = ['Text.\nReferences\nBaty, H. 2000, A&A, 353, 1074\nFigure 14. As Figure 10(a), for the\nsimulation with constant resistivity.\n'
+                 '14 The Astrophysical Journal, 830:21 (15pp), 2016 October 10 Reale et al.',
+                 'Bradshaw, S., & Cargill, P. 2006, A&A, 458, 987\nReale, F., & Landi, E. 2012, A&A, 543, A90']
+        self.assertEqual(raws(pages), ['Baty, H. 2000, A&A, 353, 1074', 'Bradshaw, S., & Cargill, P. 2006, A&A, 458, 987',
+                                       'Reale, F., & Landi, E. 2012, A&A, 543, A90'])
+
+    def test_prose_after_a_caption_does_not_start_an_entry(self):
+        pages = ['References\nBaty, H. 2000, A&A, 353, 1074\nFigure 3. Snapshots of the strands; the mixing, i.e. the\n'
+                 'appearance, i.e. affecting only the nearest neighbors of each strand.\nde Groof, A. 2004, A&A, 415, 1141']
+        self.assertEqual(raws(pages), ['Baty, H. 2000, A&A, 353, 1074', 'de Groof, A. 2004, A&A, 415, 1141'])
+
+    def test_acknowledgements_before_the_list_remain_body_text(self):
+        pages = ['Acknowledgements\nWe thank Brown (2019) for the code.\nReferences\nBrown, C. 2019, A&A, 1, 2']
+        self.assertEqual(extract(pages)[0]['citation_count'], 1)
+
+    def test_pages_of_axis_ticks_are_not_part_of_the_list(self):
+        axis = '– 21 –\n0 20 40 60\nTime [min]\n105\n106\n107\nTemperature\n(K)\n0\n1\n2\n3\n4'
+        entries = raws(['References\nBrown, C. 2019, A&A, 1, 2\nWhite, D. 2018, A&A, 3, 4\nOpen entry 2017, Notes', axis,
+                        'Smith, E. 2016, ApJ, 5, 6'])
+        self.assertNotIn('Temperature', ' '.join(entries))
+        self.assertEqual(entries[-1], 'Smith, E. 2016, ApJ, 5, 6')
+
+
+class CompleteCitationTests(unittest.TestCase):
+    def test_a_finished_citation_ignores_headers_and_stray_lines(self):
+        pages = ['References\nTam, A. 2015, A&A, 580, A122\nArticle number, page 15 of 16\nWarren, H. P. 2011, ApJ, 73 4, 90\n'
+                 'This preprint was prepared with the AAS LATEX macros v5.2.\n– 31 –\n'
+                 'Zhou, Y. 2017, ApJ, 839, 9 (21pp), 2017\n27 ( a ) ( c ) ( b )']
+        self.assertEqual(raws(pages), ['Tam, A. 2015, A&A, 580, A122', 'Warren, H. P. 2011, ApJ, 73 4, 90',
+                                       'Zhou, Y. 2017, ApJ, 839, 9 (21pp), 2017'])
+
+    def test_every_kind_of_terminal_citation_closes_the_entry(self):
+        for entry in ('Smith, A. 2020, Journal, 4, 2020', 'Smith, A. 2020, Phys. Rev. Lett. 99, 1 (2020).',
+                      'Smith, A. 2020, doi:10.1086/123456', 'Smith, A. 2020, arXiv:2001.01234 [astro-ph.SR]',
+                      'Smith, A. 2020, ApJ, in press', 'Smith, A. 2020, submitted to ApJ', 'Smith, A. 2020, in prep.',
+                      'Smith, A. 2020, Solar MHD. Cambridge University Press', 'Smith, A. 2020, Ph.D. thesis, University of Oslo',
+                      'Smith, A. 2008, in ASP Conf. Ser. 383, Subsurface Activity, ed. R. Howe (San Francisco: ASP), 235'):
+            with self.subTest(entry):
+                self.assertEqual(raws([f'References\n{entry}\nCaption-like stray text\nBrown, C. 2019, A&A, 1, 2']),
+                                 [entry, 'Brown, C. 2019, A&A, 1, 2'])
+
+    def test_wraps_pages_and_urls_may_still_continue_a_finished_citation(self):
+        for entry, more in (('Smith, A. 2020, doi:10.1086/', '123456'), ('Smith, A. 2020, ApJ, 745, 152', '–160'),
+                            ('Smith, A. 2020, ApJ, 745, 152', '(Erratum 2021)'), ('Smith, A. 2020, ApJ, 745, 152', 'arXiv:2001.01234'),
+                            ('Smith, A. 2020, ApJ, 745, 152,', 'with an erratum')):
+            with self.subTest(entry, more=more):
+                self.assertEqual(raws([f'References\n{entry}\n{more}\nBrown, C. 2019, A&A, 1, 2'])[0], f'{entry} {more}')
+
+    def test_an_unfinished_citation_collects_its_lines_across_a_page_header(self):
+        pages = ['Body.\nReferences\nBrown, C. 2019, A&A, 1, 2\nWinebarger, A. R., Schmelz, J. T., Warren, H. P., Hulburt, E. O.,\n'
+                 'Saar, S. H., & Kashyap, V. L. 2011, ApJ,',
+                 '– 18 –\n740, 2\nWhite, D. 2018, A&A, 3, 4\nWood, E. 2010, in Springer,\nHeidelberg']
+        entries = raws(pages)
+        self.assertEqual(len(entries), 4)
+        self.assertTrue(entries[1].endswith('2011, ApJ, – 18 – 740, 2'))
+        self.assertEqual(entries[3], 'Wood, E. 2010, in Springer, Heidelberg')
+
+    def test_a_publisher_or_status_word_in_the_author_list_is_not_the_end(self):
+        entry = 'Lemen, J. R., Springer, L., Press, W. H., Books, A. 2012, Sol. Phys., 275, 17'
+        self.assertEqual(raws([f'References\n{entry}\nBrown, C. 2019, A&A, 1, 2'])[0], entry)
+
+    def test_an_author_list_without_a_comma_starts_an_entry_once_the_previous_one_ended(self):
+        pages = ['Smith (2020), Hood et al. (2009).\nReferences\nSmith, A. 2020, ApJ, 745, 152\n'
+                 'Hood A. W., Browning P. K., Van der Linden, R. A. M. 2009, A&A, 506, 913']
+        refs = extract(pages)
+        self.assertEqual([ref['label'] for ref in refs], ['Smith 2020', 'Hood 2009'])
+        self.assertEqual([ref['citation_count'] for ref in refs], [1, 1])
+        refs = extract(['References\nZacharias, P. 2011, A&A, 531, A97\nZel’dovich, Ya. B., & Raizer, Yu. P. 1967, Physics, 1, 2'])
+        self.assertEqual([ref['label'] for ref in refs], ['Zacharias 2011', 'Zel’dovich 1967'])
+        # Inside an unfinished entry the same shape is a wrapped author list.
+        self.assertEqual(len(raws(['References\nHood, A. W., Browning P. K., Van der Linden,\nKlimchuk J. A. 2009, A&A, 506, 913'])), 1)
+
+
+class OutlierTests(unittest.TestCase):
+    def test_an_entry_far_beyond_the_median_is_cut_at_its_first_citation(self):
+        junk = ' '.join(['stray words from a figure caption'] * 12)
+        entry = 'Smith, A. 2020, The long story of an unfinished entry'
+        pages = ['References\n' + '\n'.join(f'Author{chr(97 + i)}, A. 20{10 + i}, Notes {i}' for i in range(6)) +
+                 f'\n{entry}\nJournal of Tests, 12, 34 (2020) {junk}']
+        refs = extract(pages)
+        self.assertTrue(refs[-1].get('truncated'))
+        self.assertTrue(refs[-1]['raw'].endswith('Journal of Tests, 12, 34 (2020)'))
+        self.assertFalse(any(ref.get('truncated') for ref in refs[:-1]))
+
+    def test_a_long_author_list_is_left_alone_and_unfinished_entries_cannot_be_cut(self):
+        authors = ', '.join(f'Name{chr(65 + i)}, {chr(65 + i)}.' for i in range(20))
+        lines = [f'Author{chr(97 + i)}, A. 20{10 + i}, ApJ, {i}, 1' for i in range(6)]
+        legit = f'Consortium, A., Springer, L., Press, W. H., {authors} 2014, Sol. Phys., 289, 2733'
+        refs = extract(['References\n' + '\n'.join(lines) + '\n' + legit])
+        self.assertEqual(refs[-1]['raw'], legit)
+        self.assertFalse(refs[-1].get('truncated'))
+        open_entry = 'Plain, A. 2019, ' + 'no citation end in this one ' * 30
+        refs = extract(['References\n' + '\n'.join(lines) + '\n' + open_entry])
+        self.assertEqual(refs[-1]['raw'], open_entry.strip())
+        self.assertFalse(refs[-1].get('truncated'))
+
+
+class ShortenedEntryCarryOverTests(unittest.TestCase):
+    def test_links_and_retrieval_of_an_over_merged_entry_follow_the_shortened_entry(self):
+        class Page:
+            def extract_text(self, **kwargs):
+                return (f'References\nBrown, C. 2019, A&A, 1, 2\nBaty, H. 2000, A&A, 353, 1074\nFigure 14. As Figure 10(a), for the simulation.\n'
+                        f'{WINEBARGER}\n{CAPTIONS}')
+
+        class Reader:
+            pages = [Page()]
+            named_destinations = {}
+
+        class Library:
+            def __init__(self, path):
+                self.db_path = path
+            def get_path(self, document_id, annotated=False):
+                return 'paper.pdf'
+            def list_documents(self):
+                return [{'id': 3}]
+
+        old_raw = f'{WINEBARGER} Figure Captions Figure 1 Active region observed on 2010 June 19 using SDO/AIA. All 6 images are coaligned.'
+        with TemporaryDirectory() as directory:
+            library = Library(Path(directory) / 'library.sqlite')
+            old = {'id': '1', 'label': 'Winebarger 2011', 'authors': 'Winebarger', 'year': '2011', 'raw': old_raw,
+                   'manual_link': True, 'local_document_id': 3, 'retrieval': {'status': 'found'}}
+            # A short entry must match too: the prefix rule is not reserved for long ones.
+            short = {'id': '2', 'label': 'Baty 2000', 'authors': 'Baty', 'year': '2000', 'manual_link': True, 'local_document_id': 3,
+                     'raw': 'Baty, H. 2000, A&A, 353, 1074 Figure 14. As Figure 10(a), for the simulation.'}
+            _save(library, 1, {'references': [old, short], 'status': 'partial', 'extraction_version': EXTRACTION_VERSION - 1})
+            with patch('paperassist.references.PdfReader', return_value=Reader()):
+                refs = get(library, 1)['references']
+        self.assertEqual([ref['raw'] for ref in refs], ['Brown, C. 2019, A&A, 1, 2', 'Baty, H. 2000, A&A, 353, 1074', WINEBARGER])
+        self.assertEqual(refs[2]['local_document_id'], 3)
+        self.assertEqual(refs[2]['retrieval']['status'], 'found')
+        self.assertEqual(refs[1]['local_document_id'], 3)
+        self.assertFalse(any(ref.get('legacy') for ref in refs))

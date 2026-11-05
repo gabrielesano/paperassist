@@ -3,6 +3,7 @@
 import json
 import math
 import re
+import statistics
 import unicodedata
 from contextlib import contextmanager
 import sqlite3
@@ -16,6 +17,9 @@ DOI = re.compile(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', re.I)
 HEADING = re.compile(r'^\s*(?:references|bibliography)\s*$', re.I | re.M)
 ENTRY = re.compile(r'^\s*(?:\[(\d+)\]|(\d+)\.)\s+(.+)$')
 AUTHOR_ENTRY = re.compile(rf'^\s*({SURNAME}),\s*(?:[^\W\d_]\s?\.|[^\W\d_]+\s*,|[JS]r\.)')
+# "Hood A. W., Browning P. K." has no comma after the surname; accepted only once the previous
+# citation has ended, because the same shape also appears inside a wrapped author list.
+INITIALS_ENTRY = re.compile(r"^\s*([^\W\d_]+(?:[-'’][^\W\d_]+)*),?\s(?:[A-Z][a-z]?\.\s?){1,3}(?:,|\s&|\sand\b)")
 # Text extraction sometimes inserts a space inside a year ("200 8") or after "[".
 YEAR = re.compile(r'\b(?:19|20)\d\s?\d[a-z]?\b')
 MARKER = re.compile(r'\[\s*(\d+(?:\s*[,;–−-]\s*\d+)*)\s*\]')
@@ -32,7 +36,39 @@ AFTER_NAME = re.compile(r'[^\W\d_]{2}\s*(?:&|\band)\s+$', re.I)
 SPACING_ACCENT = re.compile(r'\s*([´¨˜ˆˇ˚¸])\s*([A-Za-zı])')
 COMBINING = {'´': '\u0301', '¨': '\u0308', '˜': '\u0303', 'ˆ': '\u0302', 'ˇ': '\u030c', '˚': '\u030a', '¸': '\u0327'}
 DESTINATION_VERSION = 3
-EXTRACTION_VERSION = 2
+# Sections printed after the references. Bare words must fill the line, so a wrapped title such as
+# "Table of integrals" stays in its entry.
+END_HEADING = re.compile(
+    r'\s*(?:\d+\.?\s+)?(?:(?:figure|table)s?(?:\s+(?:captions?|legends?))?|captions?|list\s+of\s+(?:figures|tables)'
+    r'|acronyms|abbreviations|glossary|nomenclature|data\s+availability|author\s+contributions?|funding'
+    r'|conflicts?\s+of\s+interests?)\s*[:.]?\s*', re.I)
+END_START = re.compile(r'\s*(?:appendi(?:x|ces)\b|supplement(?:ary|al)\b|supporting\s+information|acknowledg)', re.I)
+# Preprints and emulateapj papers float figures and tables between reference pages, so a caption
+# only closes the entry before it; the list resumes at the next entry.
+FLOAT = re.compile(r'\s*(?:fig(?:ure)?|table)s?\.?\s*(?:\d|[IVX]+\b)', re.I)
+# A journal reference ends a citation: "ApJ, 745, 152", "Phys. Rev. Lett. 99, 1 (2007)" or, in year-last
+# styles, "Journal 4, 2020". Numbers tolerate a kerning gap ("73 4"); "AR 11158, 11159" is not a journal.
+_NUMBER = r'[A-Z]?\d(?:\s?\d){0,5}'
+_JOURNAL_REF = (rf'(?<!\w)(?!(?:AR|NOAA|NGC|Fig|Table|Eq)\b)[A-Z][\w.&]*\.?,?\s*(?:[Vv]ol\.?\s*)?{_NUMBER}\s*(?:\(\d+\))?[,:]\s*'
+                rf'(?:p{{1,2}}\.\s*|id\.\s*)?{_NUMBER}(?:\s?[-–−]\s?(?:{_NUMBER}|\+))?')
+_STATUS = (r'(?:submitted(?:\s+to\s+[\w. &]{1,40})?|in\s+press|in\s+prep(?:aration)?|to\s+appear|accepted|unpublished'
+           r'|priv(?:ate|\.)\s+comm(?:unication|\.))')
+_BOOK = (r'(?:(?:thesis|dissertation)\b[^.]{0,80}|(?:Press|Springer|Wiley|Elsevier|Kluwer|Reidel|Dover|Pergamon|Verlag'
+         r'|Publish\w*|Books)\b[^.]{0,25})')
+# Conference papers and book chapters end on a page: "(San Francisco: ASP), 235" or "..., 235–+".
+_PAGES = r'(?:\)\s*,?\s*(?:pp?\.\s*)?\d+|[,)]\s*(?:pp?\.\s*)?\d+\s?[-–−]\s?(?:\d+|\+))'
+_TAIL = (r'(?:\s*\(\d+\s?pp\)|\s*\[[\w.-]+\]|\s*[\[(]?(?i:arXiv|doi)[^\])]*[\])]?|\s*\(?(?:19|20)\d\d[a-z]?\)?|[\s.,;:)\]]'
+         r'|,?\s*pp?\.\s*\d+(?:\s?[-–−]\s?\d+)?)*')
+CITATION_END = re.compile(rf'(?:(?P<strong>{_JOURNAL_REF}|(?i:arXiv:\s*[\w./-]+|{DOI.pattern}))|(?i:{_STATUS}|{_BOOK}|{_PAGES})){_TAIL}')
+ENDS_ENTRY = re.compile(CITATION_END.pattern + r'$')
+# What may still follow a finished citation: wrapped URLs and DOIs, page ranges, parenthetical notes.
+CONTINUATION = re.compile(r'(?:[-–−]\s?\d+[.,;)]?$|\d+\s?[-–−]\s?\d+[.,;)]?$|[(\[]|\S+/\S+$|10\.\d{4}'
+                          r'|(?:arXiv|doi|https?:|www\.|erratum|errata|addendum|isbn|issn|url)\b)', re.I)
+# A bibliography page made mostly of short lines holds axis ticks and labels, not entries.
+SHORT_LINE, MIN_LINES = 16, 8
+# An entry this many times longer than the median entry is suspect, however long real author lists are.
+OUTLIER = 6
+EXTRACTION_VERSION = 3
 
 
 @contextmanager
@@ -66,26 +102,97 @@ def _clean(text):
     return re.sub(r'(?<=[^\W\d_])-\n(?=[a-z])', '', unicodedata.normalize('NFKC', joined))
 
 
+def _citation_end(pattern, raw):
+    """First match of a citation-ending cue in the text, or None.
+
+    Status, publisher and page cues count only after the year: "Springer" or "Press" can be a
+    surname in the author list.
+    """
+    year = YEAR.search(raw)
+    if year:
+        return next((m for m in pattern.finditer(raw) if m['strong'] or m.start() >= year.start()), None)
+
+
+def _name_start(line):
+    """Surnames start with a capital or a particle ("de Groof"); prose such as "appearance, i.e." does not."""
+    return line[:1].isupper() or bool(re.match(PARTICLE + r'[\s-]', line))
+
+
+def _ended(raw):
+    """Whether the text stops at the end of a citation, so what follows is no longer part of it."""
+    return bool(_citation_end(ENDS_ENTRY, raw.rstrip()))
+
+
+def _continues(raw, line):
+    """Whether a line can still belong to an entry whose citation has ended."""
+    return raw.endswith(('-', '/', ',', ';', ':')) or bool(CONTINUATION.match(line))
+
+
+def _ends_bibliography(line):
+    return bool(END_HEADING.fullmatch(line) or END_START.match(line))
+
+
+def _figure_page(text):
+    """A page of axis ticks and labels: most of its lines are very short."""
+    # Page numbers such as "– 21 –" say nothing about the layout.
+    lines = [line for line in map(str.strip, text.splitlines()) if line and not re.fullmatch(r'[–-]?\s*\d+\s*[–-]?', line)]
+    return len(lines) >= MIN_LINES and sum(len(line) < SHORT_LINE for line in lines) * 2 >= len(lines)
+
+
 def _split_entries(lines):
-    """Group bibliography lines into entries; also return the lines before the first entry."""
-    entries, leading = [], []
+    """Group bibliography lines into entries; also return the lines before the first entry.
+
+    Each entry is open until its citation ends. A line that is neither a continuation nor a new
+    entry then closes it, so running headers and whatever follows the list stay out of it.
+    """
+    entries, leading, state = [], [], 'open'
     # Scanned two-column pages can run several entries together on one line.
     for line in (part for line in lines for part in JOINED_ENTRIES.split(line)):
         line = line.strip()
         numeric = ENTRY.match(line)
-        author = AUTHOR_ENTRY.match(line)
+        author = _name_start(line) and AUTHOR_ENTRY.match(line)
+        if entries and _ends_bibliography(line):
+            break
+        if entries and FLOAT.match(line):
+            state = 'closed'
+            continue
         if ibid := IBID.match(line):
             if entries:  # "———. 1988, ..." repeats the previous author list
                 entries.append({'label': '', 'raw': YEAR.split(entries[-1]['raw'], maxsplit=1)[0] + ibid.group(1)})
+                state = 'done' if _ended(entries[-1]['raw']) else 'open'
         elif numeric:
             entries.append({'label': numeric.group(1) or numeric.group(2), 'raw': numeric.group(3)})
+            state = 'done' if _ended(entries[-1]['raw']) else 'open'
         elif author and (not entries or YEAR.search(entries[-1]['raw'])):
             entries.append({'label': author.group(1), 'raw': line})
+            state = 'done' if _ended(line) else 'open'
+        elif entries and state != 'open' and (initials := _name_start(line) and INITIALS_ENTRY.match(line)):
+            entries.append({'label': initials.group(1), 'raw': line})
+            state = 'done' if _ended(line) else 'open'
         elif entries and line:
-            entries[-1]['raw'] += ' ' + line
+            if state == 'done' and not _continues(entries[-1]['raw'], line):
+                state = 'closed'
+            if state != 'closed':
+                entries[-1]['raw'] += ' ' + line
+                state = 'done' if state == 'done' or _ended(entries[-1]['raw']) else 'open'
         elif line:
             leading.append(line)
     return entries, leading
+
+
+def _trim_outliers(entries):
+    """Cut an entry far longer than its list's typical one at the end of its first citation.
+
+    Entries that never state a citation end cannot be cut and stay as they are.
+    """
+    if len(entries) < 5:
+        return
+    limit = OUTLIER * statistics.median(len(entry['raw']) for entry in entries)
+    for entry in entries:
+        raw = entry['raw']
+        end = len(raw) > limit and _citation_end(CITATION_END, raw)
+        if end and raw[end.end():].strip():
+            entry.update(raw=raw[:end.end()].rstrip(), truncated=True)
 
 
 def _citation(author, year):
@@ -150,8 +257,10 @@ def extract(pages):
     top = len(above)
     while top and ENTRY_LIKE.search(above[top - 1]):
         top -= 1
-    bibliography = '\n'.join([*above[top:], pages[page_index][match.end():], *pages[page_index + 1:]])
+    later = [page for page in pages[page_index + 1:] if not _figure_page(page)]
+    bibliography = '\n'.join([*above[top:], pages[page_index][match.end():], *later])
     entries, leading = _split_entries(bibliography.splitlines())
+    _trim_outliers(entries)
     # In two-column layouts a mid-page heading can precede the rest of the body text.
     body = pages[:page_index] + ['\n'.join([*above[:top], *leading])]
     found = []
@@ -160,7 +269,7 @@ def extract(pages):
         doi = DOI.search(raw)
         year = YEAR.search(raw)
         year_text = re.sub(r'\s', '', year.group()) if year else ''
-        author = AUTHOR_ENTRY.match(raw)
+        author = AUTHOR_ENTRY.match(raw) or INITIALS_ENTRY.match(raw)
         surname = re.sub(r'\b([A-Z])\s(?=[a-z]{2})', r'\1', author.group(1)) if author else ''
         numeric = entry['label'].isdigit()
         if not numeric and author and year:
@@ -221,7 +330,7 @@ def analyze(library, document_id):
             same_author = old.get('authors') and _normalize(ref.get('authors', '')).startswith(
                 _normalize(old['authors']))
             unique_prefix = sum(old_raw.startswith(_normalize(item['raw'])) for item in refs) == 1
-            if (len(raw) >= 20 and old_raw.startswith(raw) and same_author
+            if (len(raw) >= 12 and old_raw.startswith(raw) and same_author
                     and old.get('year') == ref.get('year') and unique_prefix):
                 matches.append(i)
         old = preserved[matches[0]] if len(matches) == 1 else {}
