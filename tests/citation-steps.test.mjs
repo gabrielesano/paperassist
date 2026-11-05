@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
     buildTextIndex,
+    citationPosition,
     findMarkers,
     matchRects,
     mergeLinks,
     nearestItem,
     nextCitationIndex,
 } from "../src/paperassist/web/citation-steps.js";
+import { realPage } from "./real-page.mjs";
 
 // A text item as PDF.js reports it: 10-point upright text starting at (x, y).
 const item = (str, x, y, width = str.length * 5) => ({ str, transform: [10, 0, 0, 10, x, y], width, height: 10 });
@@ -17,7 +19,7 @@ test("markers match across spaces, line breaks and dash styles", () => {
     const [first, second] = findMarkers(index, ["Bingert &\nPeter 2011", "[3, 5-7]"]);
     assert.ok(first && second);
     assert.equal(index.text.slice(first.start, first.end), "bingert&peter2011");
-    assert.equal(index.text.slice(second.start, second.end), "[3,5-7]");
+    assert.equal(index.text.slice(second.start, second.end), "[3,57]");
 });
 
 test("ligatures and soft hyphens do not break a match", () => {
@@ -25,6 +27,30 @@ test("ligatures and soft hyphens do not break a match", () => {
     assert.ok(findMarkers(index, ["Lu 1991"])[0]);
     assert.equal(findMarkers(index, ["Schmitt et al. 2o12"])[0].start, 0);
     assert.ok(findMarkers(index, ["first"])[0]);
+});
+
+test("accents compare equal whether composed, combining or spacing", () => {
+    const index = buildTextIndex([
+        item("see M¨uller 2004 and Mart´ınez et al. 2010", 0, 100),
+        item("also Mu\u0308ller 2004, Gu\u0308rkan, Mart\u0131nez", 0, 88),
+    ]);
+    const found = findMarkers(index, ["Müller 2004", "Martínez et al. 2010", "Müller 2004", "Gürkan"]);
+    assert.ok(found.every(Boolean));
+    assert.equal(index.owner[found[0].start][0], 0);
+    assert.equal(index.owner[found[2].start][0], 1);
+    // The box starts at the spacing accent's item position, covering the whole name.
+    assert.equal(index.owner[found[0].start][1], "see M¨uller".indexOf("M"));
+    assert.equal(index.owner[found[0].end - 1][1], "see M¨uller 2004".length - 1);
+});
+
+test("a surname hyphenated at the line end matches the unbroken marker", () => {
+    const items = [item("as in van Balle-", 50, 300), item("gooijen et al. 2011", 50, 288)];
+    const index = buildTextIndex(items);
+    const match = findMarkers(index, ["van Ballegooijen et al. 2011"])[0];
+    assert.ok(match);
+    assert.equal(matchRects(items, index, match).length, 2);
+    // A real dash inside the marker matches a dash or none on the page.
+    assert.ok(findMarkers(buildTextIndex([item("Schmidt-Ott 2001", 0, 0)]), ["Schmidt Ott 2001"])[0]);
 });
 
 test("repeated markers on a page are matched in order", () => {
@@ -102,4 +128,15 @@ test("a series starts at the reading position, then follows the list and wraps",
     assert.equal(nextCitationIndex(positions, 1, 7), 2, "later clicks ignore the reading position");
     assert.equal(nextCitationIndex(positions, 3, 1), 0);
     assert.equal(nextCitationIndex([], undefined, 1), -1);
+});
+
+test("a citation's position inside the page follows the page rotation", async () => {
+    const page = await realPage();
+    const citation = { page: 1, rects: [[10, 370, 50, 380]] }; // near the top-left of an upright 200x400 page
+    const position = (rotation) => {
+        const viewport = page.getViewport({ scale: 1, rotation });
+        const reader = { viewer: { getPageView: () => ({ viewport }) } };
+        return citationPosition(reader, citation);
+    };
+    assert.deepEqual([0, 90, 180, 270].map(position), [1.05, 1.05, 1.925, 1.75]);
 });

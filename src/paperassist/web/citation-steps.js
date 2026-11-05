@@ -2,13 +2,17 @@
 // Everything shown is a DOM overlay on the page, so it never touches PDF.js annotations
 // and cannot make the PDF modified.
 
-// pypdf and PDF.js disagree on spaces, line breaks, dash styles and ligatures, so
-// markers are compared only by their visible characters.
+// pypdf and PDF.js disagree on spaces, line breaks, hyphens, ligatures and how accents are
+// written (composed, combining or as a spacing mark before the letter), so markers are
+// compared only by their base letters and digits: accents and every dash are dropped.
+// Spaces, combining marks, soft hyphen, hyphens and dashes, then the spacing accents
+// ` ¨ ¯ ´ ¸ ˆ ˘ ˙ ˚ ˛ ˜ ˝.
+const IGNORED = /[\s\p{M}\u00ad\u2010-\u2015\u2212\-`\u00a8\u00af\u00b4\u00b8\u02c6\u02d8-\u02dd]/u;
 function* visibleChars(text) {
     for (let i = 0; i < text.length; i++) {
-        for (const char of text[i].normalize("NFKC").toLowerCase()) {
-            if (/[\s­]/.test(char)) continue;
-            yield [/[‐-―−]/.test(char) ? "-" : char, i];
+        for (const char of text[i].normalize("NFKD").toLowerCase()) {
+            if (IGNORED.test(char)) continue;
+            yield [char === "\u0131" ? "i" : char, i];
         }
     }
 }

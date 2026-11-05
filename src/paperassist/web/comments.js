@@ -26,6 +26,14 @@ export function pdfRectToViewport(rect, viewport) {
     ];
 }
 
+// XYZ destination for the corner of a PDF rect that lands top-left on screen. On rotated
+// pages that is not (left, top) in PDF space, so scrolling there would miss the phrase.
+export function topLeftDestination(rect, viewport) {
+    const [x, y] = pdfRectToViewport(rect, viewport);
+    const [pdfX, pdfY] = viewport.convertToPdfPoint(x, y);
+    return [null, { name: 'XYZ' }, pdfX, pdfY, null];
+}
+
 // One band per text line: drop rects that PDF.js text-node and element rects duplicate,
 // then join the word boxes of each baseline. Boxes are {x, y, width, height} on screen.
 function lineBands(boxes, viewport) {
@@ -63,6 +71,22 @@ function textLayer(node, reader) {
     return layer && reader.container.contains(layer) ? layer : null;
 }
 
+// Only text boxes count: when a selection crosses pages, range.getClientRects() also returns
+// the page-sized boxes of every element it fully contains, which would outline the whole page.
+function textRects(range, layer) {
+    const walker = document.createTreeWalker(layer, NodeFilter.SHOW_TEXT);
+    const rects = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (!range.intersectsNode(node)) continue;
+        const part = document.createRange();
+        part.selectNodeContents(node);
+        if (node === range.startContainer) part.setStart(node, range.startOffset);
+        if (node === range.endContainer) part.setEnd(node, range.endOffset);
+        rects.push(...part.getClientRects());
+    }
+    return rects.filter(rect => rect.width > 0 && rect.height > 0);
+}
+
 export function captureCommentAnchor(reader) {
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1 ||
@@ -72,8 +96,6 @@ export function captureCommentAnchor(reader) {
     const quote = selection.toString().trim();
     if (!quote) return null;
     const range = selection.getRangeAt(0);
-    const rects = [...range.getClientRects()]
-        .filter(rect => rect.width > 0 && rect.height > 0);
     const pages = [];
     for (const page of reader.container.querySelectorAll('.page')) {
         const layer = page.querySelector('.textLayer');
@@ -82,7 +104,7 @@ export function captureCommentAnchor(reader) {
         if (!layer || !view?.viewport || !range.intersectsNode(layer)) continue;
         const bounds = layer.getBoundingClientRect();
         if (!bounds.width || !bounds.height) continue;
-        const clipped = rects.map(rect => ({
+        const clipped = textRects(range, layer).map(rect => ({
             left: Math.max(rect.left, bounds.left),
             top: Math.max(rect.top, bounds.top),
             right: Math.min(rect.right, bounds.right),
@@ -141,8 +163,9 @@ export function revealCommentAnchor(reader, note, scroll = true) {
     reader.bus.on('scalechanging', refresh);
     reader.bus.on('rotationchanging', refresh);
     const rect = note.anchor?.pages?.[0]?.rects?.[0];
-    const destArray = Array.isArray(rect) && rect.length === 4 && rect.every(Number.isFinite)
-        ? [null, { name: 'XYZ' }, rect[0], rect[3], null] : undefined;
+    const viewport = reader.viewer.getPageView?.(page - 1)?.viewport;
+    const destArray = viewport && Array.isArray(rect) && rect.length === 4 && rect.every(Number.isFinite)
+        ? topLeftDestination(rect, viewport) : undefined;
     if (scroll) {
         reader.viewer.scrollPageIntoView({
             pageNumber: page, destArray, center: 'vertical', allowNegativeOffset: true,

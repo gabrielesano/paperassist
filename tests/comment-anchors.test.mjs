@@ -2,31 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     clientRectToPdf, pdfRectToViewport, revealCommentAnchor, clearCommentAnchor,
-    setCommentIndicators, captureCommentAnchor, commentAt,
+    setCommentIndicators, captureCommentAnchor, commentAt, topLeftDestination,
 } from '../src/paperassist/web/comments.js';
-
-async function realPage() {
-    const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    const objects = [
-        '<< /Type /Catalog /Pages 2 0 R >>',
-        '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-        '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 400] >>',
-    ];
-    let pdf = '%PDF-1.4\n';
-    const offsets = [0];
-    objects.forEach((object, index) => {
-        offsets.push(pdf.length);
-        pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
-    });
-    const xref = pdf.length;
-    pdf += `xref\n0 ${offsets.length}\n0000000000 65535 f \n`;
-    for (const offset of offsets.slice(1)) {
-        pdf += `${String(offset).padStart(10, '0')} 00000 n \n`;
-    }
-    pdf += `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-    const document = await getDocument({ data: new TextEncoder().encode(pdf) }).promise;
-    return document.getPage(1);
-}
+import { realPage } from './real-page.mjs';
 
 test('selection geometry survives zoom and page rotation with PDF.js viewports', async () => {
     const page = await realPage();
@@ -131,13 +109,33 @@ const fragments = [
     box(10, 74, 40, 84), box(44, 74, 120, 84), // line 3, ends mid-line
 ];
 
-function captureWith(rects, viewport) {
+// Each rect stands for one text node; `outside` nodes lie beyond the selection.
+function captureWith(rects, viewport, { outside = [], startOffset, endOffset } = {}) {
     const layer = {
         getBoundingClientRect: () => box(0, 0, viewport.width, viewport.height),
         closest: () => layer,
     };
     const node = { nodeType: 1, closest: () => layer };
-    const range = { getClientRects: () => rects, intersectsNode: () => true };
+    const nodes = [...outside, ...rects].map(rect => ({ rect }));
+    const first = nodes[outside.length];
+    const last = nodes.at(-1);
+    const range = {
+        intersectsNode: item => item === layer || !outside.includes(item.rect),
+        startContainer: first, startOffset, endContainer: last, endOffset,
+    };
+    globalThis.NodeFilter = { SHOW_TEXT: 4 };
+    globalThis.document = {
+        createTreeWalker: () => {
+            const queue = [...nodes];
+            return { nextNode: () => queue.shift() ?? null };
+        },
+        createRange: () => ({
+            selectNodeContents(item) { this.item = item; },
+            setStart(item, offset) { this.start = [item, offset]; },
+            setEnd(item, offset) { this.end = [item, offset]; },
+            getClientRects() { return [this.item.rect]; },
+        }),
+    };
     globalThis.window = {
         getSelection: () => ({
             isCollapsed: false, rangeCount: 1, anchorNode: node, focusNode: node,
@@ -160,6 +158,13 @@ test('captured selection keeps one band per line from start to end', async () =>
         .map(rect => pdfRectToViewport(rect, viewport).map(Math.round))
         .sort((a, b) => a[1] - b[1]);
     assert.deepEqual(bands, [[60, 49, 90, 12], [10, 62, 180, 10], [10, 74, 110, 10]]);
+});
+
+test('captured selection ignores text outside the range', async () => {
+    const viewport = (await realPage()).getViewport({ scale: 1 });
+    const bands = captureWith([box(10, 50, 60, 60)], viewport, { outside: [box(10, 20, 90, 30)] })
+        .map(rect => pdfRectToViewport(rect, viewport).map(Math.round));
+    assert.deepEqual(bands, [[10, 50, 50, 10]]);
 });
 
 test('captured selection never bridges the gutter between columns', async () => {
@@ -252,4 +257,15 @@ test('hit testing follows zoom and rotation like the drawn outline', async () =>
     const rotated = page.getViewport({ scale: 1, rotation: 90 });
     assert.equal(commentAt([note], 1, rotated, [375, 30]), note);
     assert.equal(commentAt([note], 1, rotated, [30, 375]), null);
+});
+
+test('reveal scrolls to the corner that is top-left on screen at every rotation', async () => {
+    const page = await realPage();
+    const rect = [10, 370, 50, 380];
+    for (const rotation of [0, 90, 180, 270]) {
+        const viewport = page.getViewport({ scale: 2, rotation });
+        const [, , x, y] = topLeftDestination(rect, viewport);
+        const [left, top] = pdfRectToViewport(rect, viewport);
+        assert.deepEqual(viewport.convertToViewportPoint(x, y).map(Math.round), [left, top].map(Math.round));
+    }
 });
