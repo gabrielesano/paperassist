@@ -20,7 +20,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.serving import make_server
 
 from paperassist.library import Library
-from paperassist import inbox, picker, references, retrieval, settings
+from paperassist import inbox, location, paths, picker, references, retrieval, settings
 
 
 def _write_token(data_dir):
@@ -36,7 +36,8 @@ def _write_token(data_dir):
     return token
 
 
-def create_app(data_dir):
+def create_app(data_dir, source='default', switch=None):
+    """`switch(directory)` makes the running server serve another library; `source` says who chose this one."""
     data_dir = Path(data_dir).resolve()
     library = Library(data_dir)
     app = Flask(__name__, static_folder=None)
@@ -109,7 +110,7 @@ def create_app(data_dir):
     @app.get('/api/config')
     def config():
         current = settings.load(data_dir)
-        return jsonify(token=token, library_path=str(data_dir), providers=current.providers(),
+        return jsonify(token=token, library_path=str(data_dir), library_source=source, providers=current.providers(),
                        proxy=current.proxy, inbox=current.inbox)
 
     @app.get('/api/settings')
@@ -134,11 +135,43 @@ def create_app(data_dir):
         if not picker_lock.acquire(blocking=False):
             return jsonify(error='A folder window is already open.'), 409
         try:
-            return jsonify(path=picker.choose_folder(start or None))
+            title = body.get('title') if isinstance(body.get('title'), str) else None
+            return jsonify(path=picker.choose_folder(start or None, **({'title': title} if title else {})))
         except picker.PickerUnavailable as error:
             return jsonify(error=str(error)), 503
         finally:
             picker_lock.release()
+
+    @app.post('/api/library/inspect')
+    def inspect_library():
+        return jsonify(location.classify(data_dir, json_object().get('path')))
+
+    @app.post('/api/library/switch')
+    def switch_library():
+        if switch is None or source in paths.FIXED:
+            return jsonify(error=paths.FIXED.get(source, 'This server cannot change its library.')), 409
+        values = json_object()
+        answer = location.classify(data_dir, values.get('path'))
+        if answer['action'] not in ('open', 'move'):
+            return jsonify(error=answer['message']), 409
+        if values.get('action') != answer['action']:
+            return jsonify(error='The folder changed since it was checked. Try again.'), 409
+        if any(job['status'] in ('pending', 'running') for job in jobs.values()):
+            return jsonify(error='Wait for running tasks to finish.'), 409
+        target = Path(values['path'].strip()).expanduser().resolve()
+        if answer['action'] == 'open':
+            try:
+                with library_lock(target):
+                    pass
+            except LibraryInUse:
+                return jsonify(error='That library is open in another PaperAssist. Close it first.'), 409
+        else:
+            location.move(data_dir, target)
+        paths.save_library(target)
+        response = jsonify(path=str(target))
+        # The server stops only after this response has been sent.
+        response.call_on_close(lambda: switch(target))
+        return response
 
     @app.get('/api/documents')
     def documents():
@@ -346,16 +379,40 @@ def running_url(data_dir):
         return None
 
 
-def serve(host, port, data_dir, open_browser=False):
+def serve(host, port, data_dir, open_browser=False, source='default'):
     try:
         if not ipaddress.ip_address(host).is_loopback:
             raise ValueError
     except ValueError:
         if host != 'localhost':
             raise ValueError('The server must bind to a loopback address')
+    previous = None
+    while True:
+        try:
+            following = _serve_library(host, port, data_dir, open_browser, source)
+        except Exception as error:
+            if previous is None:
+                raise
+            # The library just chosen cannot start; go back to the one that worked.
+            print(f'Could not open {data_dir}: {error}', file=sys.stderr, flush=True)
+            paths.save_library(previous)
+            data_dir, previous = previous, None
+            continue
+        if following is None:
+            return
+        previous, data_dir, source, open_browser = data_dir, following, 'settings', False
+
+
+def _serve_library(host, port, data_dir, open_browser, source):
+    """Serve one library until stopped; return the library to serve next after a switch."""
+    chosen = []
+    def switch(directory):
+        chosen.append(directory)
+        # shutdown() waits for the serving loop, so it cannot run on the request thread's behalf inline.
+        threading.Thread(target=server.shutdown).start()
     with library_lock(data_dir):
         try:
-            server = make_server(host, port, create_app(data_dir), threaded=True)
+            server = make_server(host, port, create_app(data_dir, source, switch), threaded=True)
         except (OSError, SystemExit):  # Werkzeug exits when the port is taken
             raise RuntimeError(f'Cannot listen on {host}:{port}; it may be in use. Choose another with --port') from None
         url = f"http://{'[%s]' % host if ':' in host else host}:{server.server_port}"
@@ -366,12 +423,16 @@ def serve(host, port, data_dir, open_browser=False):
             # The socket already listens, so the browser's first request waits in the backlog.
             webbrowser.open(url)
         # A service manager stops with SIGTERM; treat it like Ctrl+C so the marker is removed.
-        previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+        # Only the main thread may install handlers.
+        main_thread = threading.current_thread() is threading.main_thread()
+        previous = signal.signal(signal.SIGTERM, signal.default_int_handler) if main_thread else None
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
-            signal.signal(signal.SIGTERM, previous)
+            if main_thread:
+                signal.signal(signal.SIGTERM, previous)
             server.server_close()
             marker.unlink(missing_ok=True)
+    return chosen[0] if chosen else None

@@ -288,12 +288,20 @@
                         </p>
                     </section>
                     <section class="settings-group">
-                        <h3>Library location</h3>
-                        <code id="sources-library" class="path"></code>
-                        <p class="source-help">
-                            Chosen at start-up with <code>--data-dir</code> or
-                            PAPERASSIST_DATA_DIR.
-                        </p>
+                        <label for="sources-library">Library location</label>
+                        <div class="folder-field">
+                            <input id="sources-library" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/home/you/PaperAssist" />
+                            <button id="sources-library-browse" type="button" aria-label="Browse for the library folder">Browse…</button>
+                            <button id="sources-library-use" type="button">Use this folder</button>
+                        </div>
+                        <p id="sources-library-note" class="source-help"></p>
+                        <div id="sources-library-confirm" class="location-confirm" role="group" aria-label="Confirm the library folder" hidden>
+                            <p id="sources-library-question"></p>
+                            <div class="acquire-actions">
+                                <button id="sources-library-yes" class="primary" type="button"></button
+                                ><button id="sources-library-no" type="button">Cancel</button>
+                            </div>
+                        </div>
                     </section>
                 </div>
                 <div class="acquire-actions sources-footer">

@@ -1000,6 +1000,23 @@ body {
     opacity: 0.6;
     cursor: default;
 }
+.folder-field input:disabled {
+    background: #eef1eb;
+}
+.location-confirm {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-left: 3px solid var(--teal);
+    background: #eef1eb;
+    border-radius: 3px;
+}
+.location-confirm p {
+    margin: 0 0 8px;
+    overflow-wrap: anywhere;
+}
+.location-confirm.refused {
+    border-left-color: #8a3a1c;
+}
 .source-row input.secret {
     -webkit-text-security: disc;
 }
@@ -1057,13 +1074,6 @@ body {
 .source-result.error,
 .sources-message.error {
     color: #8a3a1c;
-}
-.path {
-    display: block;
-    padding: 7px 9px;
-    background: #eef1eb;
-    border-radius: 3px;
-    overflow-wrap: anywhere;
 }
 .sources-footer {
     position: sticky;

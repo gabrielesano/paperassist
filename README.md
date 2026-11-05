@@ -53,10 +53,24 @@ PaperAssist prints its path when it starts, and the app shows it under
 | macOS | `~/Library/Application Support/PaperAssist` |
 | Windows | `%APPDATA%\PaperAssist` |
 
-Set `PAPERASSIST_DATA_DIR` to use another directory, or pass `--data-dir` to
-`serve` or `import`; the option wins over the variable. To back up or move a
-library, stop the app and copy the whole directory. It contains your API keys
-and email in `settings.json`, so keep backups private.
+To change it in the app, open **Sources**, choose a folder under **Library
+location** and click **Use this folder**:
+
+- a folder that already holds a PaperAssist library is opened, and the current
+  library stays where it is;
+- an empty or new folder receives the current library: PaperAssist copies every
+  file, checks the copy and then uses it. The old folder is kept; delete it
+  yourself once you are satisfied;
+- any other folder is refused, so PaperAssist never mixes its files with yours.
+
+The choice is stored per user, outside the library, in
+`~/.config/paperassist/config.json` (Linux),
+`~/Library/Preferences/PaperAssist/config.json` (macOS) or
+`%LOCALAPPDATA%\PaperAssist\config.json` (Windows). If that folder is missing
+at start-up, for example on an unplugged drive, PaperAssist stops with a message
+instead of starting an empty library. `--data-dir` (for `serve` or `import`)
+wins over `PAPERASSIST_DATA_DIR`, which wins over the choice made in the app;
+when either is set, the app shows the location as fixed.
 
 PDFs are stored in `originals/` under readable names:
 `Author_Year_Journal_Volume_Page.pdf` once a paper is identified, otherwise the
@@ -65,6 +79,9 @@ when two papers would share a name. You can browse this folder, but rename or
 move files only through PaperAssist: it identifies papers by content (SHA-256),
 and the catalog records each file name. Saved annotated versions live in
 `working/` under internal names.
+
+To back up a library, stop the app and copy the whole directory. It contains
+your API keys and email in `settings.json`, so keep backups private.
 
 ## Import and read
 

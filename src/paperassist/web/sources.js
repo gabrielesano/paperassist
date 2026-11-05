@@ -48,6 +48,24 @@ const element = (tag, text, className) => {
     return node;
 };
 const JSON_HEADERS = { "Content-Type": "application/json" };
+// Why the location cannot be changed from here when the user decided it at start-up.
+const FIXED_LOCATION = {
+    option: "Set by --data-dir when PaperAssist starts.",
+    environment: "Set by PAPERASSIST_DATA_DIR.",
+};
+const post = (api, path, values) =>
+    api(path, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(values) });
+
+// The server restarts on the same port after a switch, so the first requests may fail.
+async function waitForLibrary(api, path) {
+    for (let attempt = 0; attempt < 60; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        try {
+            if ((await api("/api/config")).library_path === path) return;
+        } catch {}
+    }
+    throw new Error("The new library did not start in time. Reload the page.");
+}
 
 function sourceStatus(source, view, providers, enabled) {
     if (!enabled) return "Turned off";
@@ -57,8 +75,9 @@ function sourceStatus(source, view, providers, enabled) {
     return providers[source.id]?.configured ? "Ready" : "Needs an email";
 }
 
-// `onSaved(config)` lets the page refresh what it derives from the settings.
-export function createSourcesDialog({ api, onSaved }) {
+// `onSaved(config)` lets the page refresh what it derives from the settings;
+// `canLeave()` is false while open papers hold unsaved edits.
+export function createSourcesDialog({ api, onSaved, canLeave = () => true }) {
     const dialog = $("#sources-dialog"), message = $("#sources-message");
     let view = null, rows = [];
 
@@ -132,11 +151,31 @@ export function createSourcesDialog({ api, onSaved }) {
         return entry;
     }
 
+    // The location is not part of Save: it belongs to the user, not to one library's settings.json.
+    let plan = null;
+    const confirmBox = $("#sources-library-confirm");
+    const locationButtons = ["browse", "use", "yes", "no"].map((id) => $(`#sources-library-${id}`));
+    const setLocationBusy = (busy) => locationButtons.forEach((button) => (button.disabled = busy));
+
+    function closeConfirm() {
+        plan = null;
+        confirmBox.hidden = true;
+    }
+
+    function showLocation(config) {
+        const reason = FIXED_LOCATION[config.library_source];
+        field("library").value = config.library_path;
+        field("library").disabled = Boolean(reason);
+        setLocationBusy(Boolean(reason));
+        $("#sources-library-note").textContent = reason ?? "PaperAssist remembers this choice for your user account.";
+        closeConfirm();
+    }
+
     async function refresh() {
         const [settings, config] = await Promise.all([api("/api/settings"), api("/api/config")]);
         view = settings;
         for (const name of ["email", "proxy", "inbox"]) field(name).value = view[name];
-        $("#sources-library").textContent = config.library_path;
+        showLocation(config);
         rows = SOURCES.map((source) => renderRow(source, config.providers));
         $("#sources-list").replaceChildren(...rows.map((entry) => entry.row));
         return config;
@@ -207,6 +246,71 @@ export function createSourcesDialog({ api, onSaved }) {
             say(error.message, true);
         } finally {
             button.disabled = false;
+        }
+    };
+
+    $("#sources-library-browse").onclick = async () => {
+        setLocationBusy(true);
+        closeConfirm();
+        say("Choose a folder in the window that opened.");
+        try {
+            const { path } = await post(api, "/api/choose-folder", {
+                start: field("library").value.trim(),
+                title: "Library folder",
+            });
+            if (path) field("library").value = path;
+            say(path ? 'Folder selected. Choose "Use this folder" to continue.' : "");
+        } catch (error) {
+            say(error.message, true);
+        } finally {
+            setLocationBusy(false);
+        }
+    };
+    field("library").oninput = closeConfirm;
+    field("library").onkeydown = (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        $("#sources-library-use").click();
+    };
+
+    // Ask the server what the folder means first, so the user confirms a concrete outcome.
+    $("#sources-library-use").onclick = async () => {
+        say("");
+        if (!canLeave()) return say("Save or discard changes in open papers first.", true);
+        if (Object.keys(changes()).length) return say("Save the other changes in this dialog first.", true);
+        try {
+            plan = await post(api, "/api/library/inspect", { path: field("library").value });
+        } catch (error) {
+            return say(error.message, true);
+        }
+        const actionable = ["open", "move"].includes(plan.action);
+        $("#sources-library-question").textContent = plan.message;
+        confirmBox.classList.toggle("refused", !actionable);
+        $("#sources-library-yes").hidden = !actionable;
+        $("#sources-library-yes").textContent = plan.action === "move" ? "Move library" : "Open library";
+        $("#sources-library-no").textContent = actionable ? "Cancel" : "OK";
+        confirmBox.hidden = false;
+        confirmBox.scrollIntoView({ block: "nearest" });
+        (actionable ? $("#sources-library-yes") : $("#sources-library-no")).focus();
+    };
+    $("#sources-library-no").onclick = closeConfirm;
+    $("#sources-library-yes").onclick = async () => {
+        if (!canLeave()) {
+            closeConfirm();
+            return say("Save or discard changes in open papers first.", true);
+        }
+        const { action } = plan;
+        setLocationBusy(true);
+        say(action === "move" ? "Copying and checking the library…" : "Opening the library…");
+        try {
+            const { path } = await post(api, "/api/library/switch", { path: field("library").value, action });
+            say("Restarting with the new library…");
+            await waitForLibrary(api, path);
+            location.reload();
+        } catch (error) {
+            say(error.message, true);
+            setLocationBusy(false);
+            closeConfirm();
         }
     };
 

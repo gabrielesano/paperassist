@@ -1235,7 +1235,11 @@ function switchDetail() {
     if (state.detail === "references") renderReferences();
     else showComments();
 }
-const openSources = createSourcesDialog({ api, onSaved: applyConfig });
+const openSources = createSourcesDialog({
+    api,
+    onSaved: applyConfig,
+    canLeave: () => !hasUnsavedEdits(),
+});
 $("#library-button").onclick = $("#welcome-library").onclick = library;
 $("#search").oninput = () => listLibrary();
 $("#files").onchange = (e) => importFiles(e.target.files);
@@ -1348,10 +1352,13 @@ window.addEventListener("keydown", (event) => {
         saveReader(currentReader());
     }
 });
-window.addEventListener("beforeunload", (event) => {
-    if (state.tabs.some((tab) => [tab.main, tab.preview].some(
+function hasUnsavedEdits() {
+    return state.tabs.some((tab) => [tab.main, tab.preview].some(
         (reader) => reader && (reader.dirty || reader.saving),
-    ))) {
+    ));
+}
+window.addEventListener("beforeunload", (event) => {
+    if (hasUnsavedEdits()) {
         event.preventDefault();
         event.returnValue = "";
     }

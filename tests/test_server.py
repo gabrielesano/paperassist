@@ -1,10 +1,18 @@
+import io
+import json
+import socket
 import tempfile
+import threading
 import time
+import urllib.request
 from pathlib import Path
 import os
 import unittest
+from unittest.mock import patch
 
-from paperassist.server import create_app
+from paperassist import paths
+from paperassist.library import Library
+from paperassist.server import create_app, library_lock, running_url, serve
 
 
 class ServerTests(unittest.TestCase):
@@ -120,3 +128,170 @@ class ServerTests(unittest.TestCase):
             with redirect_stderr(message):
                 self.assertEqual(main(['import', 'missing.pdf', '--data-dir', self.directory.name]), 1)
             self.assertIn('Library is in use', message.getvalue())
+
+
+class LibraryLocationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        # The real per-user config must never be read or written.
+        patcher = patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.root / 'config')})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop('PAPERASSIST_DATA_DIR', None)
+        self.current = self.root / 'current'
+        Library(self.current)
+        (self.current / 'originals').mkdir(exist_ok=True)
+        (self.current / 'originals' / 'a.pdf').write_bytes(b'%PDF one')
+        self.switched = []
+        self.client = create_app(self.current, 'default', self.switched.append).test_client()
+        self.headers = {'X-PaperAssist-Token': self.client.get('/api/config').json['token']}
+
+    def post(self, route, **values):
+        response = self.client.post(f'/api/library/{route}', json=values, headers=self.headers)
+        response.close()  # the switch runs once the response is closed, as it is after sending
+        return response
+
+    def test_config_reports_how_the_location_was_set(self):
+        self.assertEqual(self.client.get('/api/config').json['library_source'], 'default')
+        fixed = create_app(self.current, 'option').test_client()
+        self.assertEqual(fixed.get('/api/config').json['library_source'], 'option')
+
+    def test_routes_require_the_token(self):
+        for route in ('inspect', 'switch'):
+            response = self.client.post(f'/api/library/{route}', json={'path': str(self.root / 'x'), 'action': 'move'})
+            self.assertEqual(response.status_code, 403)
+
+    def test_inspect_says_what_would_happen(self):
+        answer = self.post('inspect', path=str(self.root / 'new')).json
+        self.assertEqual((answer['action'], answer['files']), ('move', 3))  # database, token, one PDF
+        self.assertEqual(self.post('inspect', path=str(self.current)).json['action'], 'current')
+        self.assertEqual(self.post('inspect', path=str(self.current / 'inside')).json['action'], 'refuse')
+
+    def test_moving_copies_the_library_saves_the_choice_and_then_switches(self):
+        target = self.root / 'moved'
+        response = self.post('switch', path=str(target), action='move')
+        self.assertEqual(response.json['path'], str(target))
+        self.assertEqual((target / 'originals' / 'a.pdf').read_bytes(), b'%PDF one')
+        self.assertTrue((self.current / 'originals' / 'a.pdf').exists())
+        self.assertEqual(paths.saved_library(), target)
+        self.assertEqual(self.switched, [target])
+
+    def test_opening_a_library_leaves_the_current_one_alone(self):
+        other = self.root / 'other'
+        Library(other)
+        self.assertEqual(self.post('switch', path=str(other), action='open').status_code, 200)
+        self.assertEqual(paths.saved_library(), other)
+        self.assertEqual(self.switched, [other])
+
+    def test_refused_and_stale_requests_change_nothing(self):
+        other = self.root / 'other'
+        Library(other)
+        for values in ({'path': str(self.current), 'action': 'open'}, {'path': str(self.current / 'in'), 'action': 'move'},
+                       {'path': str(other), 'action': 'move'}, {'path': str(self.root / 'new'), 'action': 'open'}):
+            self.assertEqual(self.post('switch', **values).status_code, 409, values)
+        self.assertFalse(paths.config_file().exists())
+        self.assertFalse((self.root / 'new').exists())
+        self.assertEqual(self.switched, [])
+
+    def test_a_location_chosen_at_start_up_cannot_change(self):
+        for source in ('option', 'environment'):
+            client = create_app(self.current, source, self.switched.append).test_client()
+            response = client.post('/api/library/switch', json={'path': str(self.root / 'x'), 'action': 'move'}, headers=self.headers)
+            self.assertEqual((response.status_code, response.json['error']), (409, paths.FIXED[source]))
+        self.assertFalse((self.root / 'x').exists())
+
+    def test_running_tasks_block_the_switch(self):
+        release = threading.Event()
+        with patch.object(Library, 'import_paths', lambda *args, **kwargs: release.wait(5)):
+            self.client.post('/api/import', json={'paths': ['x']}, headers=self.headers)
+            response = self.post('switch', path=str(self.root / 'new'), action='move')
+            release.set()
+        self.assertEqual((response.status_code, response.json['error']), (409, 'Wait for running tasks to finish.'))
+        self.assertFalse((self.root / 'new').exists())
+
+    def test_a_library_open_elsewhere_cannot_be_switched_to(self):
+        other = self.root / 'other'
+        Library(other)
+        with library_lock(other):
+            response = self.post('switch', path=str(other), action='open')
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('another PaperAssist', response.json['error'])
+        self.assertFalse(paths.config_file().exists())
+
+    def test_the_folder_chooser_can_be_titled(self):
+        with patch('paperassist.server.picker.choose_folder', return_value='/chosen') as chooser:
+            self.client.post('/api/choose-folder', json={'start': '/here', 'title': 'Library folder'}, headers=self.headers)
+            self.client.post('/api/choose-folder', json={}, headers=self.headers)
+        self.assertEqual([call.args for call in chooser.call_args_list], [('/here',), (None,)])
+        self.assertEqual(chooser.call_args_list[0].kwargs, {'title': 'Library folder'})
+        self.assertEqual(chooser.call_args_list[1].kwargs, {})
+
+
+class ServeSwitchTests(unittest.TestCase):
+    def test_the_running_server_moves_to_the_chosen_library_on_the_same_port(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        first, second = root / 'first', root / 'second'
+        Library(second)
+        patcher = patch.dict(os.environ, {'XDG_CONFIG_HOME': str(root / 'config')})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        servers = []
+        from werkzeug.serving import make_server
+        def recording(*args, **kwargs):
+            servers.append(make_server(*args, **kwargs))
+            return servers[-1]
+        def call(url, route, body=None, token=''):
+            request = urllib.request.Request(url + route, data=body and json.dumps(body).encode(), method='POST' if body else 'GET',
+                                             headers={'Content-Type': 'application/json', 'X-PaperAssist-Token': token})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return json.load(response)
+        with patch('paperassist.server.make_server', recording), patch('sys.stdout', new=io.StringIO()):
+            with socket.socket() as probe:  # a fixed port, because the new library must reuse it
+                probe.bind(('127.0.0.1', 0))
+                port = probe.getsockname()[1]
+            thread = threading.Thread(target=serve, args=('127.0.0.1', port, first, False, 'default'))
+            thread.start()
+            try:
+                while not (first / '.server.json').exists():
+                    time.sleep(.01)
+                url = running_url(first)
+                old = call(url, '/api/config')
+                self.assertEqual((old['library_path'], old['library_source']), (str(first), 'default'))
+                call(url, '/api/library/switch', {'path': str(second), 'action': 'open'}, old['token'])
+                for _ in range(500):
+                    try:
+                        new = call(url, '/api/config')
+                        if new['library_path'] == str(second):
+                            break
+                    except OSError:
+                        pass
+                    time.sleep(.01)
+                self.assertEqual((new['library_path'], new['library_source']), (str(second), 'settings'))
+                self.assertNotEqual(new['token'], old['token'])
+                self.assertEqual(running_url(second), url)
+                self.assertFalse((first / '.server.json').exists())
+                with library_lock(first):  # the old library was released
+                    pass
+                self.assertEqual(paths.saved_library(), second)
+            finally:
+                servers[-1].shutdown()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse((second / '.server.json').exists())
+
+    def test_a_library_that_cannot_start_sends_the_server_back_to_the_previous_one(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'XDG_CONFIG_HOME': tmp}), \
+             patch('paperassist.server._serve_library', side_effect=[Path('/broken'), RuntimeError('damaged'), None]) as run, \
+             patch('sys.stderr', new=io.StringIO()) as errors:
+            serve('127.0.0.1', 0, Path('/good'), False)
+            self.assertEqual([call.args[2] for call in run.call_args_list], [Path('/good'), Path('/broken'), Path('/good')])
+            self.assertEqual(paths.saved_library(), Path('/good'))
+        self.assertIn('Could not open /broken: damaged', errors.getvalue())
+
+
+if __name__ == '__main__':
+    unittest.main()
