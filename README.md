@@ -111,6 +111,13 @@ reference that is already in your library shows it in a split below (or beside) 
 paper you are reading, so you can consult it without losing your place. A quick-view
 PDF can be moved into its own tab. Drag the divider to resize the split.
 
+Click a reference card, or its citation count, to step through where the paper cites
+it: each click centres the next citation in the reader and outlines it briefly,
+wrapping after the last. Citations are found through the PDF's own links when it has
+them, otherwise by searching the text; if neither gives a position, the page opens.
+The title still opens the reference. For a missing reference, the first click opens
+its details and later clicks step.
+
 If a reference is missing, **Find open access** searches for a legal copy; you can
 also tick several entries in **Reference PDFs** and search them together. Each
 source reports its own outcome, and a failed search never proves a paper is behind a

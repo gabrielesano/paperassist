@@ -415,6 +415,40 @@ button:hover,
     font-size: 11px;
     font-weight: 700;
 }
+/* The count is a control only when there are citations to visit; it keeps the look of a
+   label. Only the title shows a pointer, so the link to the quick view stands out from the
+   rest of the card, which steps through citations. */
+.ref-count {
+    color: inherit;
+    font: inherit;
+    padding: 0 3px;
+    margin: 0 -3px;
+    border-radius: 3px;
+    font-variant-numeric: tabular-nums;
+    cursor: default;
+}
+.reference-title:hover {
+    text-decoration: underline;
+}
+.citation-note:not(:empty) {
+    margin-top: 5px;
+}
+.citation-flash {
+    position: absolute;
+    z-index: 6;
+    pointer-events: none;
+    box-sizing: content-box;
+    margin: -2px 0 0 -3px;
+    padding: 2px 3px;
+    border-radius: 3px;
+    outline: 2px solid #2c8278;
+    background: #2c827830;
+    animation: citation-flash 1.5s ease-out forwards;
+}
+@keyframes citation-flash {
+    0%, 55% { opacity: 1; }
+    100% { opacity: 0; }
+}
 .reference-title {
     display: block;
     text-align: left;

@@ -9,6 +9,13 @@ import {
 } from "./comments.js";
 import { SOURCES, SOURCE_NAMES, createSourcesDialog, proxyUrl } from "./sources.js";
 import { installShortcuts } from "./shortcuts.js";
+import {
+    citationPosition,
+    locateCitations,
+    nextCitationIndex,
+    readingPosition,
+    revealCitation,
+} from "./citation-steps.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const LAYOUT_KEY = "paperassist-quick-view-layout";
@@ -663,6 +670,62 @@ function count(ref) {
         ? "Count unavailable"
         : `${ref.citation_count} ${ref.count_status === "complete" ? "citations" : "detected"}`;
 }
+const hasCitations = (ref) => Boolean(ref.destinations?.length || ref.occurrences?.length);
+// Stepping shows where the reader is in the series; otherwise the detected count.
+function updateCount(node, ref) {
+    const series = state.current?.citationSeries;
+    const stepping = series?.refId === ref.id;
+    node.textContent = stepping ? `${series.index + 1} of ${series.total}` : count(ref);
+    node.setAttribute("aria-label",
+        `Go to the next citation in the text${stepping || ref.citation_count != null ? `, ${node.textContent}` : ""}`);
+}
+function refreshCounts() {
+    for (const node of document.querySelectorAll("button.ref-count")) {
+        const ref = state.references.find((item) => String(item.id) === node.closest(".reference")?.dataset.referenceId);
+        if (ref) updateCount(node, ref);
+    }
+}
+const referenceRow = (ref) =>
+    [...document.querySelectorAll(".reference")].find((row) => row.dataset.referenceId === String(ref.id));
+let noteTimer;
+function citationNote(ref, text) {
+    const note = referenceRow(ref)?.querySelector(".citation-note");
+    if (!note) return;
+    note.textContent = text;
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => note.replaceChildren(), 3500);
+}
+// Only the main reader of the current tab moves; the quick view is never scrolled.
+async function stepCitation(ref) {
+    const tab = state.current;
+    const reader = tab?.main;
+    if (!reader?.pdf || !reader.viewer.pagesCount) return citationNote(ref, "The paper is still loading");
+    if (tab.stepping) return;
+    tab.stepping = true;
+    try {
+        const list = await locateCitations(reader, ref);
+        if (state.current !== tab) return;
+        if (!list.length) return citationNote(ref, "No citations found in the text");
+        const series = tab.citationSeries?.refId === ref.id ? tab.citationSeries : null;
+        const index = nextCitationIndex(
+            list.map((citation) => citationPosition(reader, citation)), series?.index, readingPosition(reader));
+        tab.citationSeries = { refId: ref.id, index, total: list.length };
+        const exact = revealCitation(reader, list[index]);
+        refreshCounts();
+        if (!exact) citationNote(ref, `Exact position not found; showing page ${list[index].page}`);
+    } catch (e) {
+        console.error(e);
+        citationNote(ref, "Citations could not be read from this PDF");
+    } finally {
+        tab.stepping = false;
+    }
+}
+// A missing reference first opens its details; a click on the body of any card then steps.
+function cardClick(ref, { focusCount = false } = {}) {
+    if (ref.local_document_id || state.expandedRef === ref.id) return stepCitation(ref);
+    openReference(ref);
+    if (focusCount) referenceRow(ref)?.querySelector("button.ref-count")?.focus();
+}
 function providerSummary() {
     if (!state.providers) return "Checking sources…";
     const names = (list) => list.map((source) => source.name).join(", ");
@@ -785,9 +848,22 @@ function renderReferences() {
         const row = el("div", "", `reference ${referenceTone(ref)}${state.expandedRef === ref.id ? " expanded" : ""}`);
         row.dataset.referenceId = ref.id;
         const top = el("div", "", "ref-top");
-        top.append(el("span", ref.label || "Reference"), el("span", count(ref)));
+        let total = el("span", count(ref));
+        if (hasCitations(ref)) {
+            total = el("button", "", "ref-count");
+            updateCount(total, ref);
+            total.onclick = () => cardClick(ref, { focusCount: true });
+        }
+        top.append(el("span", ref.label || "Reference"), total);
         const name = el("button", ref.title || ref.raw || "Unidentified reference", "reference-title");
-        name.onclick = () => openReference(ref);
+        name.onclick = () => (!ref.local_document_id && state.expandedRef === ref.id ? stepCitation(ref) : openReference(ref));
+        // Buttons and links keep their own actions; a drag that selected card text is not a click.
+        row.onclick = (event) => {
+            const selection = document.getSelection();
+            if (event.target.closest("button, a, input, select, textarea")) return;
+            if (!selection.isCollapsed && row.contains(selection.anchorNode)) return;
+            cardClick(ref);
+        };
         row.append(top, name, el("div", [ref.authors, ref.year, ref.doi && `DOI ${ref.doi}`].filter(Boolean).join(" · "), "reference-meta"));
         row.append(el("div", state.searching?.id === ref.id ? state.searching.message : referenceStatus(ref), "reference-status"));
         if (ref.local_document_id && ref.local_conflict)
@@ -852,6 +928,9 @@ function renderReferences() {
             }
             row.append(actions);
         }
+        const note = el("div", "", "reference-meta citation-note");
+        note.setAttribute("role", "status");
+        row.append(note);
         host.append(row);
     }
 }
@@ -929,7 +1008,7 @@ async function openReference(ref) {
         state.detail = "references";
         setPanel("details", true);
         switchDetail();
-        [...document.querySelectorAll(".reference")].find((row) => row.dataset.referenceId === String(ref.id))?.scrollIntoView({ block: "nearest" });
+        referenceRow(ref)?.scrollIntoView({ block: "nearest" });
         return;
     }
     try {
