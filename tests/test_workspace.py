@@ -18,7 +18,8 @@ class WorkspaceTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        # Windows may hand out an 8.3 short name; the workspace resolves its paths.
+        self.root = Path(tmp.name).resolve()
         config = patch('paperassist.paths.config_file', return_value=self.root / 'config.json')
         config.start()
         self.addCleanup(config.stop)
