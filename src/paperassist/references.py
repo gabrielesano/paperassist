@@ -35,7 +35,7 @@ SECOND_AUTHOR = rf"(?:[^\W\d_]+\s+(?={PARTICLE}\s))?(?:{PARTICLE}\s+)*[^\W\d_]+(
 AFTER_NAME = re.compile(r'[^\W\d_]{2}\s*(?:&|\band)\s+$', re.I)
 SPACING_ACCENT = re.compile(r'\s*([´¨˜ˆˇ˚¸])\s*([A-Za-zı])')
 COMBINING = {'´': '\u0301', '¨': '\u0308', '˜': '\u0303', 'ˆ': '\u0302', 'ˇ': '\u030c', '˚': '\u030a', '¸': '\u0327'}
-DESTINATION_VERSION = 3
+DESTINATION_VERSION = 4
 # Sections printed after the references. Bare words must fill the line, so a wrapped title such as
 # "Table of integrals" stays in its entry.
 END_HEADING = re.compile(
@@ -399,7 +399,8 @@ def map_destinations(reader, pages, refs):
                 fragments = sorted((x, text) for x, y, _, text in lines
                                    if abs(y - baseline) < 0.5 and left - 3 <= x < left + 240)
                 line = _normalize(''.join(text for _, text in fragments))
-                matches = [ref for raw, ref in entries if len(line) >= 20 and raw.startswith(line)]
+                # A short line could start several entries; a short complete entry cannot.
+                matches = [ref for raw, ref in entries if raw.startswith(line) and (len(line) >= 20 or raw == line)]
                 if len(matches) == 1:
                     matches[0]['destinations'].append(name)
 

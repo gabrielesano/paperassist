@@ -363,6 +363,28 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(refs[2]['destinations'], ['brown'])
         self.assertTrue(all(not ref['destinations'] for ref in refs[3:]))
 
+    def test_short_complete_entry_gets_its_destination_but_short_prefix_does_not(self):
+        class Destination:
+            typ, left = '/XYZ', 43
+            def __init__(self, top):
+                self.top = top
+
+        class Page:
+            def extract_text(self, visitor_text):
+                for text, y in [('Reale, F. 2014, LRSP, 11, 4', 516.8), ('Short, A. 1999, ApJ,', 507.7)]:
+                    visitor_text(text, [1, 0, 0, 1, 0, 0], [8, 0, 0, 8, 43, y], None, 1)
+
+        class Reader:
+            pages = [Page()]
+            named_destinations = {'bib74': Destination(526), 'wrapped': Destination(517)}
+            def get_destination_page_number(self, destination):
+                return 0
+
+        refs = [{'raw': 'Reale, F. 2014, LRSP, 11, 4'}, {'raw': 'Short, A. 1999, ApJ, 512, 377'}]
+        map_destinations(Reader(), ['References'], refs)
+        self.assertEqual(refs[0]['destinations'], ['bib74'])
+        self.assertEqual(refs[1]['destinations'], [])
+
     def test_cached_analysis_migrates_once_preserving_manual_link(self):
         class Page:
             def extract_text(self, **kwargs):
