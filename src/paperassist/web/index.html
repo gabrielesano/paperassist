@@ -10,11 +10,6 @@
         <script type="importmap">
             { "imports": { "pdfjs-lib": "/vendor/pdfjs/build/pdf.mjs" } }
         </script>
-        <script type="module">
-            // Before the first paint, so the interface does not jump to its saved size.
-            import { applyZoom } from "/preferences.js";
-            applyZoom();
-        </script>
         <script type="module" src="/app.js"></script>
     </head>
     <body>

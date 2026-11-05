@@ -1,0 +1,29 @@
+[
+  {
+    "anchor": {
+      "pages": [
+        {
+          "page": 1,
+          "rects": [
+            [
+              49.99797504378283,
+              556.4814783491204,
+              415.54458153185203,
+              574.1648342354532
+            ],
+            [
+              49.99797504378283,
+              526.4649864682002,
+              306.15912859327113,
+              544.1483423545332
+            ]
+          ]
+        }
+      ],
+      "version": 1
+    },
+    "page": 1,
+    "quote": "A phrase comment anchors this synthetic sentence.\nSecond line of the comment anchor.",
+    "text": "Synthetic phrase comment for native compatibility."
+  }
+]

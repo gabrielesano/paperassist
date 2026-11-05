@@ -33,6 +33,8 @@ let sharedWorker;
 export class Reader {
     constructor(doc, host, api, callbacks, initial = {}) {
         this.doc = doc;
+        this.initial = initial;
+        this.restoring = true;
         this.readOnly = initial.readOnly || false;
         this.api = api;
         this.callbacks = callbacks;
@@ -231,6 +233,8 @@ export class Reader {
         this.bus.on("pagesinit", () => {
             this.viewer.currentScaleValue = this.fitsWidth() ? "page-width" : initial.scale || "page-width";
             this.viewer.currentPageNumber = initial.page || 1;
+            this.restoring = false;
+            this.callbacks.position(this);
         });
         this.bus.on("pagechanging", () => {
             this.remember();
@@ -238,6 +242,29 @@ export class Reader {
         this.bus.on("scalechanging", () => this.remember());
     }
     async open() {
+        const key = `paperassist-view-${this.doc.id}`;
+        try {
+            let legacy;
+            try { legacy = JSON.parse(localStorage.getItem(key)); } catch {}
+            let saved;
+            try {
+                saved = await this.api(`/api/documents/${this.doc.id}/view`);
+            } catch (error) {
+                if (error.status !== 404) throw error;
+                this.legacyView = true;
+                saved = legacy;
+            }
+            if (saved === null && legacy?.page && legacy?.scale) {
+                saved = await this.api(`/api/documents/${this.doc.id}/view?if_missing=1`, {
+                    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(legacy),
+                });
+            }
+            // Promotion carries the current pane's position, including unsaved navigation.
+            if (!this.initial.page) Object.assign(this.initial, saved || {});
+        } catch (error) {
+            this.callbacks.error(`Reading position unavailable: ${error.message}`);
+        }
+        if (this.closed) return;
         sharedWorker ??= new pdfjs.PDFWorker();
         this.loadingTask = pdfjs.getDocument({
             worker: sharedWorker,
@@ -319,14 +346,19 @@ export class Reader {
         return this.kind === "preview" && this.layout === "side" && !this.zoomed;
     }
     remember() {
-        if (!this.pdf) return;
-        localStorage.setItem(
-            `paperassist-view-${this.doc.id}`,
-            JSON.stringify({
-                page: this.viewer.currentPageNumber,
-                scale: this.viewer.currentScaleValue,
-            }),
-        );
+        if (!this.pdf || this.restoring) return;
+        const view = { page: this.viewer.currentPageNumber, scale: this.viewer.currentScaleValue };
+        if (this.legacyView) {
+            // Older running servers keep working until their owner elects to restart.
+            try { localStorage.setItem(`paperassist-view-${this.doc.id}`, JSON.stringify(view)); } catch {}
+        } else {
+            // Keep rapid page/zoom changes in order without ever saving PDF edits.
+            this.viewWrite = (this.viewWrite || Promise.resolve()).then(() =>
+                this.api(`/api/documents/${this.doc.id}/view`, {
+                    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(view),
+                }),
+            ).catch((error) => this.callbacks.error(`Could not save reading position: ${error.message}`));
+        }
         this.callbacks.position(this);
     }
     // PDF.js edits a saved annotation only inside an editor mode, but when the user clicked
@@ -462,6 +494,7 @@ export class Reader {
         this.viewer.setDocument(null);
         this.find.setDocument(null);
         this.links.setDocument(null);
+        await this.viewWrite;
         await this.loadingTask?.destroy();
         this.element.remove();
         return true;

@@ -7,6 +7,8 @@ import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import paths
+
 SOURCES = ('crossref', 'ads', 'arxiv', 'openalex', 'semantic_scholar', 'core', 'unpaywall')
 KEYS = ('ads', 'core', 'semantic_scholar', 'openalex')
 # What a source cannot run without. OpenAlex and Semantic Scholar keys and the Crossref
@@ -144,3 +146,29 @@ def update(data_dir, changes):
             json.dump(data, file, indent=2)
         os.replace(temporary, path)
     return Settings(data)
+
+
+def preferences():
+    """Interface choices follow the user across libraries; missing keys allow browser migration."""
+    value = paths.load_config().get('preferences')
+    return value if isinstance(value, dict) else {}
+
+
+def update_preferences(changes, only_if_missing=False):
+    checks = {'ui_zoom': lambda value: type(value) in (int, float) and value in (.8, .9, 1, 1.1, 1.25, 1.5),
+              'quick_view_layout': lambda value: value in ('stacked', 'side'),
+              'outline_expanded': lambda value: isinstance(value, bool),
+              'details_expanded': lambda value: isinstance(value, bool)}
+    if not isinstance(changes, dict) or set(changes) - checks.keys():
+        raise ValueError('Unknown interface preference')
+    if any(not checks[name](value) for name, value in changes.items()):
+        raise ValueError('Invalid interface preference')
+
+    def merge(data):
+        current = data.get('preferences')
+        if not isinstance(current, dict):
+            current = {}
+        updated = {**changes, **current} if only_if_missing else {**current, **changes}
+        return {**data, 'preferences': updated}
+
+    return paths.update_config(merge)['preferences']

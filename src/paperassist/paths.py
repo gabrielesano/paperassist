@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 # Why the controls in the app are fixed when the user already decided at start-up.
@@ -11,6 +12,7 @@ FIXED = {
     'option': 'Set by --data-dir when PaperAssist starts.',
     'environment': 'Set by PAPERASSIST_DATA_DIR.',
 }
+_CONFIG_WRITE = threading.Lock()
 
 
 def _xdg(variable, fallback):
@@ -38,21 +40,40 @@ def config_file():
     return _xdg('XDG_CONFIG_HOME', ('.config',)) / 'config.json'
 
 
+def load_config():
+    try:
+        data = json.loads(config_file().read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def saved_library():
     try:
-        library = json.loads(config_file().read_text(encoding='utf-8'))['library']
+        library = load_config()['library']
     except (OSError, ValueError, KeyError, TypeError):
         return None
     return Path(library) if isinstance(library, str) and os.path.isabs(library) else None
 
 
 def save_library(directory):
+    update_config(lambda data: {**data, 'library': str(directory)})
+
+
+def update_config(change):
+    with _CONFIG_WRITE:
+        data = change(load_config())
+        _save_config(data)
+        return data
+
+
+def _save_config(data):
     path = config_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Replace atomically so a crash never leaves half a file that hides the choice.
     descriptor, name = tempfile.mkstemp(dir=path.parent, prefix='config.', suffix='.tmp')
     with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
-        json.dump({'library': str(directory)}, file)
+        json.dump(data, file, indent=2)
     os.replace(name, path)
 
 

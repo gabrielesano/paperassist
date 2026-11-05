@@ -8,7 +8,7 @@ import {
     clearCommentIndicators,
 } from "./comments.js";
 import { SOURCES, SOURCE_NAMES, createSourcesDialog, proxyUrl } from "./sources.js";
-import { createPreferencesDialog } from "./preferences.js";
+import { createPreferencesDialog, applyZoom, loadInterfacePreferences, saveInterfacePreferences } from "./preferences.js";
 import { installAppMenu } from "./app-menu.js";
 import { installShortcuts } from "./shortcuts.js";
 import { referenceMatcher } from "./reference-filter.js";
@@ -28,15 +28,7 @@ const desktop = installDesktopBridge({
 });
 
 const $ = (selector, root = document) => root.querySelector(selector);
-const LAYOUT_KEY = "paperassist-quick-view-layout";
 const MIN_SIDE_WIDTH = 720;
-function readLayoutPreference() {
-    try {
-        return localStorage.getItem(LAYOUT_KEY) === "side" ? "side" : "stacked";
-    } catch {
-        return "stacked";
-    }
-}
 const state = {
     tool: "select-tool",
     token: "",
@@ -59,7 +51,7 @@ const state = {
     editDoc: null,
     selectedComment: null,
     undo: null,
-    layout: readLayoutPreference(),
+    layout: "stacked",
 };
 const byId = (id) =>
     state.tabs.find(
@@ -85,7 +77,7 @@ async function api(path, options = {}) {
             const body = await response.json();
             message = body.error || body.message || message;
         } catch {}
-        throw new Error(message);
+        throw Object.assign(new Error(message), { status: response.status });
     }
     return response.status === 204 ? null : response.json();
 }
@@ -238,9 +230,7 @@ const callbacks = {
     },
     toggleLayout() {
         state.layout = state.layout === "side" ? "stacked" : "side";
-        try {
-            localStorage.setItem(LAYOUT_KEY, state.layout);
-        } catch {}
+        savePreference({ quick_view_layout: state.layout });
         applyLayout();
     },
     citation(reader, text, destination) {
@@ -317,15 +307,6 @@ const callbacks = {
         return true;
     },
 };
-function stored(doc) {
-    try {
-        return (
-            JSON.parse(localStorage.getItem(`paperassist-view-${doc.id}`)) || {}
-        );
-    } catch {
-        return {};
-    }
-}
 // The saved preference stays; a reader too narrow for two columns shows the stacked layout.
 function applyLayout() {
     const canSplitSide = $("#readers").clientWidth >= MIN_SIDE_WIDTH;
@@ -342,7 +323,7 @@ function makeReader(doc, host, initial) {
         host,
         api,
         callbacks,
-        initial || stored(doc),
+        initial || {},
     );
     reader.bus.on("annotationeditormodechanged", ({ mode }) => {
         if (reader.modePending !== null && reader.modePending !== mode) return;
@@ -577,7 +558,7 @@ async function preview(doc) {
         const decisions = await prepareClose([tab.preview]);
         if (!decisions || !(await closeReader(tab.preview, decisions.get(tab.preview)))) return;
     }
-    const initial = owner ? { ...stored(doc), readOnly: true } : undefined;
+    const initial = owner ? { readOnly: true } : undefined;
     tab.preview = makeReader(doc, tab.stack, initial);
     tab.preview.setKind("preview", owner?.dirty ? "Last saved version" : undefined);
     applyLayout();
@@ -1943,12 +1924,10 @@ $("#comment-tool").onpointerdown = () => {
 };
 $("#comment-tool").onclick = comment;
 const panelNames = ["outline", "details"];
-function setPanel(name, expanded) {
+function setPanel(name, expanded, persist = true) {
     const workspace = $(".workspace");
     workspace.classList.toggle(`${name}-collapsed`, !expanded);
-    try {
-        localStorage.setItem(`paperassist-${name}-expanded`, String(expanded));
-    } catch {}
+    if (persist) savePreference({ [`${name}_expanded`]: expanded });
     // One toolbar button serves both columns, so it reports whether both are visible.
     const both = panelNames.every(
         (panel) => !workspace.classList.contains(`${panel}-collapsed`),
@@ -1958,13 +1937,6 @@ function setPanel(name, expanded) {
     button.setAttribute("aria-expanded", String(both));
     button.setAttribute("aria-label", label);
     button.title = label;
-}
-for (const name of panelNames) {
-    let saved = null;
-    try {
-        saved = localStorage.getItem(`paperassist-${name}-expanded`);
-    } catch {}
-    setPanel(name, saved === null ? true : saved === "true");
 }
 $("#panels-button").onclick = () => {
     const show = $("#panels-button").getAttribute("aria-expanded") !== "true";
@@ -2035,11 +2007,23 @@ function applyConfig(config) {
     // Without a paper the panel keeps its "Open a paper" message.
     if (state.current && state.detail === "references") renderReferences();
 }
+function savePreference(changes) {
+    return saveInterfacePreferences(api, changes)
+        .catch((error) => report(`Could not save preferences: ${error.message}`));
+}
+async function loadPreferences() {
+    const saved = await loadInterfacePreferences(api);
+    applyZoom(saved.ui_zoom ?? 1);
+    state.layout = saved.quick_view_layout ?? "stacked";
+    for (const name of panelNames) setPanel(name, saved[`${name}_expanded`] ?? true, false);
+    applyLayout();
+}
 refreshToolbar();
 api("/api/config")
-    .then((config) => {
+    .then(async (config) => {
         state.token = config.token;
         applyConfig(config);
+        await loadPreferences();
     })
     .catch((error) => report(`Could not connect: ${error.message}`));
 installShortcuts({ currentReader, mainReader, previewReader, openPreferences });

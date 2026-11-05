@@ -1,6 +1,5 @@
 // The Preferences dialog: the size of the app chrome and the two folders PaperAssist uses.
 
-const ZOOM_KEY = "paperassist-ui-zoom";
 export const ZOOM_CHOICES = [0.8, 0.9, 1, 1.1, 1.25, 1.5];
 
 // Only listed sizes are accepted, so a stale or hand-edited value cannot break the layout.
@@ -9,18 +8,64 @@ export function parseZoom(stored) {
     return ZOOM_CHOICES.includes(value) ? value : 1;
 }
 
+let currentZoom = 1;
 export function readZoom() {
-    try {
-        return parseZoom(localStorage.getItem(ZOOM_KEY));
-    } catch {
-        return 1;
-    }
+    return currentZoom;
 }
 
 // The stylesheet scales the toolbar, tabs, side panels and dialogs by this property and
 // leaves the PDF viewers alone: PDF.js geometry must not be distorted by an ancestor.
 export function applyZoom(value = readZoom()) {
-    document.documentElement.style.setProperty("--ui-zoom", String(value));
+    currentZoom = parseZoom(value);
+    document.documentElement.style.setProperty("--ui-zoom", String(currentZoom));
+}
+
+const PREFERENCE_KEYS = {
+    ui_zoom: "paperassist-ui-zoom",
+    quick_view_layout: "paperassist-quick-view-layout",
+    outline_expanded: "paperassist-outline-expanded",
+    details_expanded: "paperassist-details-expanded",
+};
+function legacyPreferences() {
+    const values = {};
+    try {
+        for (const [name, key] of Object.entries(PREFERENCE_KEYS)) {
+            const stored = localStorage.getItem(key);
+            if (stored === null) continue;
+            if (name === "ui_zoom") values[name] = parseZoom(stored);
+            else if (name === "quick_view_layout" && ["side", "stacked"].includes(stored)) values[name] = stored;
+            else if (name.endsWith("_expanded") && ["true", "false"].includes(stored)) values[name] = stored === "true";
+        }
+    } catch {}
+    return values;
+}
+export async function loadInterfacePreferences(api) {
+    const legacy = legacyPreferences();
+    let saved;
+    try {
+        saved = await api("/api/preferences");
+    } catch (error) {
+        // Source JS can reach a still-running server from before the backend upgrade.
+        if (error.status === 404) return legacy;
+        throw error;
+    }
+    const missing = Object.fromEntries(Object.entries(legacy).filter(([name]) => !(name in saved)));
+    if (Object.keys(missing).length) saved = await api("/api/preferences?if_missing=1", {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(missing),
+    });
+    return saved;
+}
+export async function saveInterfacePreferences(api, changes) {
+    try {
+        return await api("/api/preferences", {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+        });
+    } catch (error) {
+        if (error.status !== 404) throw error;
+        try {
+            for (const [name, value] of Object.entries(changes)) localStorage.setItem(PREFERENCE_KEYS[name], String(value));
+        } catch {}
+    }
 }
 
 const $ = (selector) => document.querySelector(selector);
@@ -59,12 +104,14 @@ export function createPreferencesDialog({ api, onSaved, canLeave = () => true })
 
     size.replaceChildren(...ZOOM_CHOICES.map((value) => new Option(`${Math.round(value * 100)}%`, String(value))));
     // A size applies at once; it is a view preference, not part of a library's settings.
-    size.onchange = () => {
+    size.onchange = async () => {
         const value = parseZoom(size.value);
         applyZoom(value);
         try {
-            localStorage.setItem(ZOOM_KEY, String(value));
-        } catch {}
+            await saveInterfacePreferences(api, { ui_zoom: value });
+        } catch (error) {
+            say(`Could not save interface size: ${error.message}`, true);
+        }
     };
 
     // The location is not part of Save: it belongs to the user, not to one library's settings.json.

@@ -3,6 +3,7 @@
 import hashlib
 from contextlib import contextmanager
 import json
+import math
 import os
 import re
 import sqlite3
@@ -71,6 +72,10 @@ class Library:
                     scheme TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(scheme, value)
                 );
                 CREATE TABLE IF NOT EXISTS notes (
+                    document_id INTEGER PRIMARY KEY REFERENCES documents(id),
+                    content TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS document_views (
                     document_id INTEGER PRIMARY KEY REFERENCES documents(id),
                     content TEXT NOT NULL
                 );
@@ -420,6 +425,33 @@ class Library:
         with self._connect() as db:
             row = db.execute("SELECT content FROM notes WHERE document_id = ?", (document_id,)).fetchone()
         return json.loads(row[0]) if row else []
+
+    def get_view(self, document_id: int) -> dict | None:
+        self.get_document(document_id)
+        with self._connect() as db:
+            row = db.execute("SELECT content FROM document_views WHERE document_id = ?", (document_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_view(self, document_id: int, view: dict, only_if_missing=False) -> dict:
+        doc = self.get_document(document_id)
+        if not isinstance(view, dict) or set(view) != {'page', 'scale'}:
+            raise ValueError('View must contain page and scale')
+        page, scale = view['page'], view['scale']
+        if type(page) is not int or not 1 <= page <= doc['pages']:
+            raise ValueError('Page must be a page number in this PDF')
+        if scale not in ('auto', 'page-width', 'page-fit', 'page-actual'):
+            try:
+                number = float(scale)
+            except (TypeError, ValueError):
+                raise ValueError('Invalid zoom scale') from None
+            if isinstance(scale, bool) or not math.isfinite(number) or not 0 < number <= 100:
+                raise ValueError('Invalid zoom scale')
+        with self._lock, self._connect() as db:
+            conflict = 'DO NOTHING' if only_if_missing else 'DO UPDATE SET content = excluded.content'
+            db.execute(f"INSERT INTO document_views VALUES (?, ?) ON CONFLICT(document_id) {conflict}",
+                       (document_id, json.dumps(view)))
+            row = db.execute("SELECT content FROM document_views WHERE document_id = ?", (document_id,)).fetchone()
+        return json.loads(row[0])
 
     def save_notes(self, document_id: int, notes: list) -> list:
         if not isinstance(notes, list):
