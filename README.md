@@ -31,12 +31,28 @@ python -m venv .venv
 .venv/bin/paperassist
 ```
 
+### Desktop development preview
+
+From a checkout, install and launch the desktop window:
+
+```bash
+.venv/bin/python -m pip install -e '.[desktop]'
+.venv/bin/paperassist desktop
+```
+
+`paperassist-desktop` also launches it. If the library already has a running
+server, the window attaches to it and leaves it running on close. Otherwise it
+starts and stops its own server. Modified PDFs and comment drafts offer **Save**,
+**Discard**, or **Cancel**. Windows/macOS are unverified. See the
+[plan](docs/development/desktop-plan.md) and [verification](docs/development/desktop-verification.md).
+
 ### Command-line options
 
 | Command | What it does |
 | --- | --- |
 | `paperassist` | Start the local server and open the reader in your browser |
 | `paperassist serve [--open] [--host H] [--port N] [--data-dir DIR]` | Start the server without opening a browser (defaults to `127.0.0.1:8765`) |
+| `paperassist desktop [--port N] [--data-dir DIR]` | Open a dedicated desktop window (requires the desktop extra) |
 | `paperassist import PATH... [--data-dir DIR]` | Import PDF files or folders recursively from the terminal |
 
 Only one server runs per library at a time. If your library is already open, running `paperassist` simply opens a browser tab to the running instance. While the app is running, add new papers from **Library** inside the browser rather than running `paperassist import` in parallel.
@@ -180,7 +196,7 @@ python -m venv .venv
 npm ci && node --test tests/*.test.mjs
 ```
 
-The Python test suite runs completely offline without a browser or private PDF corpus. The Node test suite exercises frontend modules against the pinned `pdfjs-dist` version in `package-lock.json` (matching the vendored viewer build in `src/paperassist/web/vendor/pdfjs`).
+The Python test suite runs completely offline without a browser or private PDF corpus. The Node test suite exercises frontend modules against the pinned `pdfjs-dist` version in `package-lock.json` (matching the vendored viewer build in `src/paperassist/web/vendor/pdfjs`). The reader uses the official legacy build for embedded-WebView compatibility; [vendoring details](src/paperassist/web/vendor/pdfjs/README.md) record its provenance. See [desktop verification](docs/development/desktop-verification.md) for the opt-in real-WebView smoke test and remaining platform checks.
 
 For architecture details and design decisions, see:
 - [Product specification](docs/specification.md)

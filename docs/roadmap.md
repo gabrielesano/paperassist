@@ -11,8 +11,10 @@ records are in [development/](development/).
    highlights, comments, independent panes, internal tabs and save/reopen proof.
 3. Server and references: local API, controlled background work, citation analysis,
    shared local resolution, selected open-access retrieval and web-search fallback.
-4. Distribution: one-command install, per-user library location, Windows, macOS and
-   Linux support, continuous integration and user documentation.
+4. Desktop window: source preview with safe close and existing-server attachment;
+   complete interactive and Windows/macOS checks, then file delivery, PDF
+   associations and standalone builds per OS/architecture.
+   See the [desktop plan](development/desktop-plan.md).
 
 ## Acceptance sequence
 
@@ -22,6 +24,7 @@ records are in [development/](development/).
 - Verify local citation ranking and visibly partial results against manually checked examples.
 - Exercise local-file reuse, download selection, recoverable failures and search fallback.
 - Check accessibility, narrow-window layout, active-document focus, and English UI.
+- Verify desktop close/reopen, existing-server attachment and platform installation.
 
 ## Later extensions
 

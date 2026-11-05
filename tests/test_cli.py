@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from paperassist import paths
-from paperassist.cli import main
+from paperassist.cli import desktop_main, main
 from paperassist.server import LibraryInUse, library_lock, running_url, serve
 
 
@@ -96,6 +96,12 @@ class SavedLibraryTests(unittest.TestCase):
         self.assertFalse(library.exists())
         self.assertIn('missing', stderr.getvalue())
 
+    def test_desktop_also_refuses_a_missing_chosen_library(self):
+        paths.save_library(self.root / 'unplugged')
+        with redirect_stderr(io.StringIO()), patch('paperassist.cli._desktop') as desktop:
+            self.assertEqual(main(['desktop']), 1)
+        desktop.assert_not_called()
+
     def test_unreadable_or_relative_choices_are_ignored(self):
         self.assertEqual(paths.locate()[1], 'default')
         paths.config_file().parent.mkdir(parents=True)
@@ -129,6 +135,21 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(main(['import', 'a.pdf', '--data-dir', str(self.directory)]), 0)
         importer.assert_called_once_with(['a.pdf'])
         self.assertTrue((self.directory / 'library.sqlite3').exists())
+
+    def test_desktop_uses_the_resolved_library_and_explicit_port(self):
+        with patch('paperassist.cli._desktop', return_value=0) as desktop:
+            self.assertEqual(main(['desktop', '--data-dir', str(self.directory), '--port', '9000']), 0)
+        desktop.assert_called_once_with(self.directory, 'option', 9000)
+
+    def test_desktop_entry_point_uses_the_same_command_path(self):
+        with patch('paperassist.cli._desktop', return_value=0) as desktop, \
+             patch('paperassist.cli.locate', return_value=(self.directory, 'default')):
+            self.assertEqual(desktop_main([]), 0)
+        desktop.assert_called_once_with(self.directory, 'default', 8765)
+
+    def test_desktop_returns_the_runtime_exit_code(self):
+        with patch('paperassist.desktop.run', return_value=1):
+            self.assertEqual(main(['desktop', '--data-dir', str(self.directory)]), 1)
 
     def test_running_server_is_reported_and_reused(self):
         (self.directory / '.server.json').write_text(json.dumps({'url': 'http://127.0.0.1:8765'}), encoding='utf-8')

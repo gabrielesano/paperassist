@@ -10,6 +10,7 @@ import {
 import { SOURCES, SOURCE_NAMES, createSourcesDialog, proxyUrl } from "./sources.js";
 import { installShortcuts } from "./shortcuts.js";
 import { referenceMatcher } from "./reference-filter.js";
+import { installDesktopBridge } from "./desktop.js";
 import {
     citationPosition,
     locateCitations,
@@ -17,6 +18,12 @@ import {
     readingPosition,
     revealCitation,
 } from "./citation-steps.js";
+
+const desktop = installDesktopBridge({
+    window,
+    prepareClose: async () => !!(await prepareClose(state.tabs.flatMap((tab) => [tab.preview, tab.main]))),
+    onError: (error) => report(`Could not close the window: ${error.message}`),
+});
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const LAYOUT_KEY = "paperassist-quick-view-layout";
@@ -457,9 +464,11 @@ async function saveReader(reader) {
     refreshToolbar();
     return saved;
 }
-function askUnsaved(reader) {
+function askUnsaved(reader, kind) {
     const dialog = $("#unsaved-dialog");
-    $("#unsaved-message").textContent = `Save changes to ${tabTitle(reader.doc)} before closing?`;
+    $("#unsaved-message").textContent = kind === "comment"
+        ? `Save the comment on ${tabTitle(reader.doc)} before closing?`
+        : `Save changes to ${tabTitle(reader.doc)} before closing?`;
     return new Promise((resolve) => {
         const finish = (result) => {
             dialog.close();
@@ -475,24 +484,38 @@ function askUnsaved(reader) {
         dialog.showModal();
     });
 }
+let preparingClose = false;
 async function prepareClose(readers) {
-    const decisions = new Map();
-    for (const reader of readers.filter(Boolean)) {
-        reader.commitEdits();
-        if (reader.saving) {
-            report("Wait for the PDF save to finish before closing.");
-            return null;
+    if (preparingClose) return null;
+    preparingClose = true;
+    try {
+        const decisions = new Map();
+        for (const reader of readers.filter(Boolean)) {
+            reader.commitEdits();
+            const draft = commentDraft?.reader === reader ? commentDraft : null;
+            if (reader.saving || draft?.saving) {
+                report("Wait for the save to finish before closing.");
+                return null;
+            }
+            if (draft?.text?.trim()) {
+                const choice = await askUnsaved(reader, "comment");
+                if (choice === "cancel") return null;
+                if (choice === "save" && !(await saveCommentDraft(draft))) return null;
+            }
+            if (!reader.dirty) continue;
+            const choice = await askUnsaved(reader);
+            if (choice === "cancel") return null;
+            if (choice === "save" && !(await saveReader(reader))) return null;
+            decisions.set(reader, choice === "discard");
         }
-        if (!reader.dirty) continue;
-        const choice = await askUnsaved(reader);
-        if (choice === "cancel") return null;
-        if (choice === "save" && !(await saveReader(reader))) return null;
-        decisions.set(reader, choice === "discard");
+        return decisions;
+    } finally {
+        preparingClose = false;
     }
-    return decisions;
 }
 async function closeReader(reader, discard = false) {
     if (!(await reader.close({ discard }))) return false;
+    if (commentDraft?.reader === reader) commentDraft = null;
     clearCommentAnchor(reader);
     clearCommentIndicators(reader);
     return true;
@@ -1298,6 +1321,41 @@ async function loadCommentIndicators(reader) {
     }
 }
 let commentDraft = null;
+async function saveCommentDraft(draft) {
+    if (!draft || draft.saving || !draft.text?.trim()) return false;
+    draft.saving = true;
+    const selector = ".comment-composer textarea, .comment-composer button";
+    const controls = document.querySelectorAll(selector);
+    for (const control of controls) control.disabled = true;
+    try {
+        const latest = await api(`/api/documents/${draft.reader.doc.id}/notes`);
+        const updated = Array.isArray(latest) ? latest : latest.notes;
+        updated.push({
+            page: draft.page,
+            text: draft.text.trim(),
+            ...(draft.quote ? { quote: draft.quote, anchor: draft.anchor } : {}),
+        });
+        await api(`/api/documents/${draft.reader.doc.id}/notes`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(updated),
+        });
+        updateCommentIndicators(draft.reader, updated);
+        clearUndo();
+        commentDraft = null;
+        clearCommentAnchor(draft.reader);
+        updateEditorOptions();
+        if (currentReader() === draft.reader && state.detail === "comments") showComments();
+        return true;
+    } catch (error) {
+        report(`Could not save comment: ${error.message}`);
+        return false;
+    } finally {
+        draft.saving = false;
+        for (const control of document.querySelectorAll(selector))
+            control.disabled = false;
+    }
+}
 let pendingAnchor = null;
 async function showComments() {
     const reader = currentReader(),
@@ -1319,6 +1377,7 @@ async function showComments() {
             text.placeholder = "Write a comment…";
             text.setAttribute("aria-label", "Comment text");
             text.value = commentDraft.text || "";
+            text.disabled = !!commentDraft.saving;
             text.oninput = () => {
                 commentDraft.text = text.value;
             };
@@ -1327,6 +1386,7 @@ async function showComments() {
             save.type = "submit";
             const cancel = el("button", "Cancel");
             cancel.type = "button";
+            save.disabled = cancel.disabled = !!commentDraft.saving;
             cancel.onclick = () => {
                 commentDraft = null;
                 clearCommentAnchor(reader);
@@ -1339,43 +1399,9 @@ async function showComments() {
                 event.preventDefault();
                 const draft = commentDraft;
                 if (!draft || !text.value.trim()) return;
-                save.disabled = true;
-                try {
-                    const latest = await api(
-                        `/api/documents/${draft.reader.doc.id}/notes`,
-                    );
-                    const updated = Array.isArray(latest)
-                        ? latest
-                        : latest.notes;
-                    updated.push({
-                        page: draft.page,
-                        text: text.value.trim(),
-                        ...(draft.quote
-                            ? { quote: draft.quote, anchor: draft.anchor }
-                            : {}),
-                    });
-                    await api(`/api/documents/${draft.reader.doc.id}/notes`, {
-                        method: "PUT",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(updated),
-                    });
-                    updateCommentIndicators(draft.reader, updated);
-                    clearUndo();
-                    commentDraft = null;
-                    clearCommentAnchor(draft.reader);
-                    updateEditorOptions();
-                    if (
-                        currentReader() === draft.reader &&
-                        state.detail === "comments"
-                    )
-                        showComments();
-                } catch (error) {
-                    status.textContent = `Could not save: ${error.message}`;
-                    save.disabled = false;
-                }
+                draft.text = text.value;
+                await saveCommentDraft(draft);
             };
-            const status = el("p", "", "status");
-            form.append(status);
             host.append(form);
             text.focus();
         } else {
@@ -1515,7 +1541,7 @@ function fillDraftHead(head) {
 // panels (which collapses it) keeps the last phrase instead of dropping the anchor.
 function setDraftAnchor(selected) {
     const draft = commentDraft;
-    if (!draft || !selected) return;
+    if (!draft || draft.saving || !selected) return;
     if (selected.quote === draft.quote &&
         JSON.stringify(selected.anchor) === JSON.stringify(draft.anchor)) return;
     Object.assign(draft, {
@@ -1534,12 +1560,14 @@ document.addEventListener("selectionchange", () => {
     if (!commentDraft || !state.commentTool) return;
     clearTimeout(selectionTimer);
     selectionTimer = setTimeout(() => {
-        if (commentDraft?.reader === currentReader() && state.commentTool)
-            setDraftAnchor(captureCommentAnchor(commentDraft.reader));
+        const draft = commentDraft;
+        if (draft && draft.reader === currentReader() && state.commentTool)
+            setDraftAnchor(captureCommentAnchor(draft.reader));
     }, 150);
 });
 
 function comment() {
+    if (commentDraft?.saving) return;
     const reader = currentReader();
     if (!reader?.pdf) return;
     const selected =
@@ -1718,12 +1746,13 @@ window.addEventListener("keydown", (event) => {
     }
 });
 function hasUnsavedEdits() {
-    return state.tabs.some((tab) => [tab.main, tab.preview].some(
-        (reader) => reader && (reader.dirty || reader.saving),
-    ));
+    return !!(commentDraft?.text?.trim() || commentDraft?.saving) ||
+        state.tabs.some((tab) => [tab.main, tab.preview].some(
+            (reader) => reader && (reader.dirty || reader.saving),
+        ));
 }
 window.addEventListener("beforeunload", (event) => {
-    if (hasUnsavedEdits()) {
+    if (!desktop.allowsUnload() && hasUnsavedEdits()) {
         event.preventDefault();
         event.returnValue = "";
     }

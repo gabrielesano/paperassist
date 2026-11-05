@@ -18,8 +18,15 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 
+[project.optional-dependencies]
+desktop = [
+    "pywebview[qt]>=6.2,<7; sys_platform == 'linux'",
+    "pywebview>=6.2,<7; sys_platform != 'linux'",
+]
+
 [project.scripts]
 paperassist = "paperassist.cli:main"
+paperassist-desktop = "paperassist.cli:desktop_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

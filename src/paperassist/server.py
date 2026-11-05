@@ -36,7 +36,7 @@ def _write_token(data_dir):
     return token
 
 
-def create_app(data_dir, source='default', switch=None):
+def create_app(data_dir, source='default', switch=None, choose_folder=None):
     """`switch(directory)` makes the running server serve another library; `source` says who chose this one."""
     data_dir = Path(data_dir).resolve()
     library = Library(data_dir)
@@ -50,6 +50,13 @@ def create_app(data_dir, source='default', switch=None):
     download_lock = threading.Lock()
     picker_lock = threading.Lock()
     web = Path(__file__).parent / 'web'
+
+    def shutdown_jobs():
+        for cancel in list(cancellations.values()):
+            cancel.set()
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    app.extensions['paperassist_shutdown'] = shutdown_jobs
 
     @app.before_request
     def protect():
@@ -126,7 +133,7 @@ def create_app(data_dir, source='default', switch=None):
         return jsonify(retrieval.check(settings.load(data_dir)))
 
     @app.post('/api/choose-folder')
-    def choose_folder():
+    def choose_folder_route():
         body = request.get_json(silent=True)
         start = body.get('start') if isinstance(body, dict) else None
         if not isinstance(start, (str, type(None))):
@@ -135,8 +142,8 @@ def create_app(data_dir, source='default', switch=None):
         if not picker_lock.acquire(blocking=False):
             return jsonify(error='A folder window is already open.'), 409
         try:
-            title = body.get('title') if isinstance(body.get('title'), str) else None
-            return jsonify(path=picker.choose_folder(start or None, **({'title': title} if title else {})))
+            title = body.get('title') if isinstance(body, dict) and isinstance(body.get('title'), str) else None
+            return jsonify(path=(choose_folder or picker.choose_folder)(start or None, **({'title': title} if title else {})))
         except picker.PickerUnavailable as error:
             return jsonify(error=str(error)), 503
         finally:
@@ -384,7 +391,7 @@ def running_url(data_dir):
         return None
 
 
-def serve(host, port, data_dir, open_browser=False, source='default'):
+def serve(host, port, data_dir, open_browser=False, source='default', *, choose_folder=None, on_listen=None):
     try:
         if not ipaddress.ip_address(host).is_loopback:
             raise ValueError
@@ -394,7 +401,8 @@ def serve(host, port, data_dir, open_browser=False, source='default'):
     previous = None
     while True:
         try:
-            following = _serve_library(host, port, data_dir, open_browser, source)
+            following = _serve_library(host, port, data_dir, open_browser, source,
+                                       choose_folder=choose_folder, on_listen=on_listen)
         except Exception as error:
             if previous is None:
                 raise
@@ -408,7 +416,7 @@ def serve(host, port, data_dir, open_browser=False, source='default'):
         previous, data_dir, source, open_browser = data_dir, following, 'settings', False
 
 
-def _serve_library(host, port, data_dir, open_browser, source):
+def _serve_library(host, port, data_dir, open_browser, source, *, choose_folder=None, on_listen=None):
     """Serve one library until stopped; return the library to serve next after a switch."""
     chosen = []
     def switch(directory):
@@ -416,28 +424,36 @@ def _serve_library(host, port, data_dir, open_browser, source):
         # shutdown() waits for the serving loop, so it cannot run on the request thread's behalf inline.
         threading.Thread(target=server.shutdown).start()
     with library_lock(data_dir):
+        app = create_app(data_dir, source, switch, choose_folder)
         try:
-            server = make_server(host, port, create_app(data_dir, source, switch), threaded=True)
-        except (OSError, SystemExit):  # Werkzeug exits when the port is taken
+            server = make_server(host, port, app, threaded=True)
+            # Do not release library ownership while a request can still write to it.
+            server.daemon_threads = False
+        except (OSError, SystemExit):
+            app.extensions['paperassist_shutdown']()  # Werkzeug exits when the port is taken
             raise RuntimeError(f'Cannot listen on {host}:{port}; it may be in use. Choose another with --port') from None
-        url = f"http://{'[%s]' % host if ':' in host else host}:{server.server_port}"
         marker = Path(data_dir) / '.server.json'
-        marker.write_text(json.dumps({'url': url}), encoding='utf-8')
-        print(f'Library: {Path(data_dir).resolve()}\nPaperAssist is running at {url} (press Ctrl+C to stop)', flush=True)
-        if open_browser:
-            # The socket already listens, so the browser's first request waits in the backlog.
-            webbrowser.open(url)
-        # A service manager stops with SIGTERM; treat it like Ctrl+C so the marker is removed.
-        # Only the main thread may install handlers.
         main_thread = threading.current_thread() is threading.main_thread()
-        previous = signal.signal(signal.SIGTERM, signal.default_int_handler) if main_thread else None
+        previous = None
         try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
+            url = f"http://{'[%s]' % host if ':' in host else host}:{server.server_port}"
+            marker.write_text(json.dumps({'url': url}), encoding='utf-8')
+            print(f'Library: {Path(data_dir).resolve()}\nPaperAssist is running at {url} (press Ctrl+C to stop)', flush=True)
+            if open_browser:
+                # The socket listens already; the first browser request waits in its backlog.
+                webbrowser.open(url)
             if main_thread:
+                previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+            if on_listen:
+                on_listen(server)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+        finally:
+            if previous is not None:
                 signal.signal(signal.SIGTERM, previous)
             server.server_close()
+            app.extensions['paperassist_shutdown']()
             marker.unlink(missing_ok=True)
     return chosen[0] if chosen else None

@@ -3,6 +3,7 @@ import { mergeHighlightLines } from "./highlight-lines.js";
 import { setupSplitResize } from "./split-resize.js";
 import {
     EventBus,
+    LinkTarget,
     PDFLinkService,
     PDFFindController,
     PDFViewer,
@@ -199,7 +200,11 @@ export class Reader {
         this.bus.on("annotationeditorparamschanged", () => {
             queueMicrotask(() => this.reportSelection());
         });
-        this.links = new PDFLinkService({ eventBus: this.bus });
+        this.links = new PDFLinkService({
+            eventBus: this.bus,
+            externalLinkTarget: LinkTarget.BLANK,
+            externalLinkRel: "noopener noreferrer",
+        });
         this.find = new PDFFindController({
             linkService: this.links,
             eventBus: this.bus,
@@ -209,6 +214,9 @@ export class Reader {
             eventBus: this.bus,
             linkService: this.links,
             findController: this.find,
+            // Chromium < 148 (QtWebEngine): PDF.js's selection drawing can fill the page with its
+            // stretched .endOfContent helper at fractional scales; use native selection there.
+            enableSelectionRendering: !(Number(/\bChrome\/(\d+)/.exec(navigator.userAgent)?.[1]) < 148),
             annotationEditorMode: this.readOnly
                 ? pdfjs.AnnotationEditorType.DISABLE
                 : pdfjs.AnnotationEditorType.NONE,
