@@ -1,5 +1,6 @@
 """Search links, Crossref identification and conservative open-access retrieval."""
 
+import difflib
 import html
 import http.client
 import ipaddress
@@ -16,6 +17,8 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 from urllib.request import Request, urlopen
 from io import BytesIO
+
+from pypdf import PdfReader
 
 from paperassist.citation import fingerprint, fold, generic_publication, journal_code, journal_name, pdf_name, publication, same_surname
 from paperassist.settings import Settings
@@ -68,6 +71,9 @@ def _download_pdf(url):
                 if not location:
                     raise ValueError('Redirect has no destination')
                 url = urljoin(url, location)
+                if not url.startswith('https://'):
+                    # Publisher DOI links often pass through plain HTTP; that is a page for the browser, not an error.
+                    raise Blocked('The link redirects to an address that cannot be fetched automatically.')
                 continue
             if response.status in (401, 403):
                 raise Blocked(f'The site refused the automatic download (HTTP {response.status}).')
@@ -177,23 +183,29 @@ def identify(ref, cfg=None):
     return next((outcome for outcome in outcomes if outcome[0] != 'not_found'), outcomes[0])
 
 
+def _crossref_items(cfg, year, **query):
+    query = {**query, 'select': CROSSREF_FIELDS, 'filter': f'type:journal-article,from-pub-date:{int(year) - 1},until-pub-date:{int(year) + 1}'}
+    try:
+        return json.loads(_get(_crossref_url(cfg, 'works', **query), cfg))['message']['items']
+    except HTTPError as error:
+        if error.code != 404:
+            raise
+        return []
+
+
 def _crossref_lookup(cfg, raw, surname, year, volume, page, journal):
     def page_agrees(item):
         # Some journals (e.g. Living Reviews) deposit no page; then the journal itself must agree.
         pages = _crossref_pages(item)
         return page in pages or bool(journal) and not pages and journal_code((item.get('container-title') or [''])[0]) == journal
-    query = {'query.bibliographic': unicodedata.normalize('NFKC', raw)[:300], 'rows': 5, 'select': CROSSREF_FIELDS,
-             'filter': f'type:journal-article,from-pub-date:{int(year) - 1},until-pub-date:{int(year) + 1}'}
-    try:
-        items = json.loads(_get(_crossref_url(cfg, 'works', **query), cfg))['message']['items']
-    except HTTPError as error:
-        if error.code != 404:
-            raise
-        items = []
+    items = _crossref_items(cfg, year, **{'query.bibliographic': unicodedata.normalize('NFKC', raw)[:300], 'rows': 5})
     agreeing = {item['DOI'].lower(): item for item in items
                 if int(year) in _crossref_years(item) and item.get('volume') == volume
                 and page_agrees(item)
                 and same_surname((item.get('author') or [{}])[0].get('family', ''), surname)}
+    relaxed = False
+    if not agreeing and journal == 'SCI' and re.fullmatch(r'[A-Z]\d+', page):
+        agreeing, relaxed = _science_electronic(cfg, surname, year, volume), True
     if not agreeing:
         return 'not_found', f'Crossref has no record matching year {year}, volume {volume}, page {page} and first author {surname}.', None
     if len(agreeing) > 1:
@@ -201,11 +213,72 @@ def _crossref_lookup(cfg, raw, surname, year, volume, page, journal):
     record = _crossref_record(next(iter(agreeing.values())))
     record.update(year=int(year), publication=fingerprint(journal, volume, page, year), checked_at=datetime.now(timezone.utc).isoformat(),
                   evidence={'year': year, 'volume': volume, 'page': page, 'first_author': record['first_author']})
+    if relaxed:
+        record['evidence']['page_check'] = 'relaxed: ADS-style page of an electronic article'
+        return 'found', 'Crossref has one Science article by this first author, volume and year; the ADS-style page could not be compared.', record
     return 'found', 'Crossref record agrees on year, volume, page and first author.', record
+
+
+def _science_electronic(cfg, surname, year, volume):
+    """Science articles are cited from ADS with a page ID such as D315, while Crossref only knows their electronic ID.
+
+    That ID cannot be compared with the page, so the match rests on journal, volume, year and
+    first author, and only an electronic-ID article without a printed page qualifies.
+    """
+    items = _crossref_items(cfg, year, **{'query.author': surname, 'query.container-title': 'Science', 'rows': 20})
+    return {item['DOI'].lower(): item for item in items
+            if journal_code((item.get('container-title') or [''])[0]) == 'SCI' and item.get('volume') == volume
+            and int(year) in _crossref_years(item) and not item.get('page') and item.get('article-number')
+            and same_surname((item.get('author') or [{}])[0].get('family', ''), surname)}
 
 
 def _squash(text):
     return re.sub(r'[^a-z0-9]', '', fold(_text(text)))
+
+
+def _words(title):
+    """Title tokens that survive typesetting: LaTeX, Greek letters, hyphens and punctuation drop out."""
+    text = unicodedata.normalize('NFKC', _text(title))
+    text = re.sub(r'\\(?:mathrm|mathit|mathbf|textrm|textit|textbf|text|emph|rm|it|bf)\b', ' ', text)
+    text = re.sub(r'\\([A-Za-z]+)', r' \1 ', text)
+    text = ''.join(f' {unicodedata.name(c).rsplit(" ", 1)[1].lower()} ' if unicodedata.name(c, '').startswith('GREEK') and c.isalpha() else c
+                   for c in text)
+    return re.findall(r'[a-z0-9]+', fold(text))
+
+
+GREEK_NAMES = {unicodedata.name(chr(code)).rsplit(' ', 1)[1].lower() for code in range(0x3b1, 0x3ca)}
+
+
+def _similar(a, b):
+    """High token overlap, but a differing number or "I"/"II" marks another paper of a series."""
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    changed = [word for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != 'equal' for word in a[i1:i2] + b[j1:j2]]
+    return matcher.ratio() >= 0.9 and not any(re.fullmatch(r'\d+|[ivx]+|[b-z]', word) for word in changed)
+
+
+def same_title(a, b):
+    """Equal up to typesetting, a trailing period, or a subtitle that only one source prints."""
+    if _similar(_words(a), _words(b)):
+        return True
+    # Compare the part before the first colon only when it is long enough to be distinctive.
+    heads = [_words(re.split(r'\s*[:\u2014]\s+', title, maxsplit=1)[0]) for title in (a, b)]
+    return min(map(len, heads)) >= 4 and _similar(*heads)
+
+
+def _all_caps(text):
+    letters = [c for c in text if c.isalpha()]
+    return len(letters) >= 4 and not any(c.islower() for c in letters)
+
+
+def _restore_case(identity, spelling):
+    """IOP deposits older ApJ titles in capitals, and no rule can tell an acronym from a word.
+
+    The matched arXiv record keeps the authors' own case, so it replaces the title only when it
+    spells exactly the same letters. Otherwise the title stays as deposited.
+    """
+    spelling, title = ' '.join(spelling.split()), identity.get('title') or ''
+    if _all_caps(title) and not _all_caps(spelling) and _squash(spelling) == _squash(title):
+        identity['title'] = spelling  # in place: the caller reports and stores this same identity
 
 
 def _arxiv_id(ref):
@@ -232,9 +305,10 @@ def _arxiv_pdf(ref, cfg):
     else:
         if doi:
             queries.append({'search_query': 'all:"' + doi + '"', 'max_results': 20})
-        if title and ascii_surname:
-            words = ' '.join(re.findall(r'\w+', title))
-            queries.append({'search_query': f'ti:"{words}" AND au:"{ascii_surname}"', 'max_results': 20})
+        if title and ascii_surname and _words(title):
+            # A phrase would miss typesetting variants, so ask for the longest plain words instead.
+            words = sorted({w for w in _words(title) if len(w) > 3 and w.isascii() and w not in GREEK_NAMES}, key=lambda w: (-len(w), w))[:6]
+            queries.append({'search_query': ' AND '.join([f'au:"{ascii_surname}"', *(f'ti:{w}' for w in words)]), 'max_results': 20})
         elif ascii_surname and cited:
             # The journal reference is free text, so match the volume loosely and verify below.
             queries.append({'search_query': f'au:"{ascii_surname}" AND jr:"{cited[1]}"', 'max_results': 100})
@@ -257,13 +331,15 @@ def _arxiv_pdf(ref, cfg):
             by_id = bool(arxiv_id) and re.sub(r'v\d+$', '', entry_id.lower()) == re.sub(r'v\d+$', '', arxiv_id.lower())
             by_doi = bool(doi) and entry.findtext('arxiv:doi', default='', namespaces=ns).strip().casefold() == doi.casefold()
             by_title = bool(title) and first_author and year is not None and abs(published - year) <= 1 \
-                and _squash(entry.findtext('atom:title', default='', namespaces=ns)) == _squash(title)
+                and same_title(entry.findtext('atom:title', default='', namespaces=ns), title)
             journal_ref = entry.findtext('arxiv:journal_ref', default='', namespaces=ns)
             by_journal = bool(cited) and first_author and publication(journal_ref, cited[3]) == cited
             if by_id or by_doi or by_title or by_journal:
-                matches[re.sub(r'v\d+$', '', entry_id)] = entry_id
+                matches[re.sub(r'v\d+$', '', entry_id)] = (entry_id, entry.findtext('atom:title', default='', namespaces=ns))
         if len(matches) == 1:
-            return 'found', 'Matching arXiv record found.', ['https://arxiv.org/pdf/' + quote(next(iter(matches.values())), safe='/')]
+            entry_id, spelling = next(iter(matches.values()))
+            _restore_case(identity, spelling)
+            return 'found', 'Matching arXiv record found.', ['https://arxiv.org/pdf/' + quote(entry_id, safe='/')]
         if matches:
             status, message = 'ambiguous', 'Several arXiv records match; choose the PDF manually.'
     return status, message, None
@@ -439,7 +515,24 @@ def check(cfg):
     return results
 
 
-def _fetch_pdf(urls):
+class Mismatch(ValueError):
+    """The PDF is readable but its first page does not name the expected first author."""
+
+
+def _names_author(data, surname):
+    """Whether the first two pages name the author; None when they hold no text to check (a scan)."""
+    if not surname:
+        return True
+    squash = lambda text: re.sub(r'[\W_]', '', fold(text))  # also joins small caps such as "H OOD"
+    try:
+        text = squash(' '.join(page.extract_text() or '' for page in PdfReader(BytesIO(data)).pages[:2]))
+    except Exception:
+        return None
+    return squash(surname) in text if len(text) >= 40 else None
+
+
+def _fetch_pdf(urls, surname=None):
+    """The first link that really is a PDF by `surname`: (bytes, True) or (bytes, None) when unreadable."""
     errors = []
     for url in urls:
         try:
@@ -447,9 +540,13 @@ def _fetch_pdf(urls):
             if len(data) > MAX_PDF:
                 raise ValueError('Download exceeds the size limit')
             if data.startswith(b'%PDF-'):
-                return data
+                names_author = _names_author(data, surname)
+                if names_author is False:
+                    raise Mismatch(surname)
+                return data, names_author
             # Landing pages and captchas answer 200 with HTML; that is a refusal, not a broken link.
-            if b'<html' in data[:2048].lower() or b'<!doctype html' in data[:2048].lower():
+            head = data[:2048].lower().lstrip()
+            if head.startswith(b'<') or b'<html' in head:
                 raise Blocked('The link opens a web page, not a PDF.')
             raise ValueError('Download is not a PDF')
         except Blocked as blocked:
@@ -458,7 +555,8 @@ def _fetch_pdf(urls):
         except Exception as caught:
             errors.append(caught)
     # Only when every link was refused is the cause permanent; a timeout elsewhere may still pass.
-    raise errors[0] if all(isinstance(error, Blocked) for error in errors) else errors[-1]
+    kinds = {type(error) for error in errors}
+    raise errors[0] if len(kinds) == 1 and kinds <= {Blocked, Mismatch} else errors[-1]
 
 
 def _failure(error):
@@ -523,6 +621,8 @@ def _summary(status, lead, attempts, provider=None):
     names = lambda wanted: [NAMES[a['provider']] for a in attempts if a['status'] in wanted and a['provider'] != 'crossref']
     if status == 'downloaded':
         text = f'Downloaded from {NAMES[provider]}.'
+        if any(a.get('checked') is False for a in attempts):
+            text += ' Its first page has no text, so the author could not be checked; review it.'
     elif status == 'local':
         text = 'Already in the library.'
     elif status == 'ambiguous':
@@ -536,10 +636,14 @@ def _summary(status, lead, attempts, provider=None):
         # The identification attempts come first; a disabled source says less than a real "no record".
         return 'Not identified. ' + next((a['message'] for a in attempts if a['status'] in ('needs_identification', 'not_found')), attempts[0]['message'])
     elif status == 'not_found':
-        text = f'No open-access PDF on {_join(names({"not_found"}), "or")}.'
+        text = f'No open-access PDF on {_join(names({"not_found"}), "or")}.' if names({'not_found'}) else ''
+        if names({'mismatch'}):
+            # The file was fetched but is another paper, so it is reported, not imported.
+            text = f'{text} The PDF from {_join(names({"mismatch"}), "and")} did not name the first author, so it was not imported.'.strip()
     else:
-        parts = [f'{NAMES[a["provider"]]} found no match' if a['status'] == 'not_found' else f'{NAMES[a["provider"]]} failed ({a["message"]})'
-                 for a in attempts if a['status'] in ('not_found', 'error') and (a['provider'] != 'crossref' or a['status'] == 'error')]
+        parts = [f'{NAMES[a["provider"]]} found no match' if a['status'] == 'not_found' else f'{NAMES[a["provider"]]} returned another paper' if a['status'] == 'mismatch'
+                 else f'{NAMES[a["provider"]]} failed ({a["message"]})'
+                 for a in attempts if a['status'] in ('not_found', 'mismatch', 'error') and (a['provider'] != 'crossref' or a['status'] == 'error')]
         text = '; '.join(parts) + '. Try again later or search the web.'
     # Unconfigured providers are a setup fact the UI states once, not part of each result.
     return f'{lead} {text}'.strip()
@@ -605,19 +709,22 @@ def download(library, ref, progress=None, settings=None):
         try:
             status, message, urls = lookup(ref, cfg)
             if urls:
-                data = _fetch_pdf(urls)
                 surname = ref.get('authors') or (identity or {}).get('first_author')
+                data, checked = _fetch_pdf(urls, surname)
                 filename = pdf_name(surname, (identity or {}).get('year') or str(ref.get('year') or '')[:4],
                                     (identity or {}).get('publication')) if identity and surname else 'download.pdf'
                 document = library.import_stream(BytesIO(data), filename)
-                if identity:
+                # A scan has no text to compare, so it stays unverified and reviewable.
+                if identity and checked:
                     library.apply_verified(document['id'], identity, filename)
-                attempts.append({'provider': name, 'status': 'downloaded', 'message': message})
+                attempts.append({'provider': name, 'status': 'downloaded', 'message': message, **({} if checked else {'checked': False})})
                 return _result('downloaded', lead, attempts, identity, document_id=document['id'], provider=name)
         except Exception as error:
             status, message = 'error', _failure(error)
             if isinstance(error, Blocked):
                 status, link = 'blocked', {'url': error.url}
+            if isinstance(error, Mismatch):
+                status, message = 'mismatch', f'The PDF from {NAMES[name]} does not name {error} on its first page.'
         attempts.append({'provider': name, 'status': status, 'message': message, **link})
     statuses = {attempt['status'] for attempt in attempts}
     # Ambiguity needs the user; a blocked link needs the browser; a failed provider makes "not found" inconclusive.

@@ -18,7 +18,7 @@ JOURNALS = {
     'SoPh': ['SoPh', 'Sol Phys', 'Solar Physics'],
     'Natur': ['Natur', 'Nature'],
     'Sci': ['Sci', 'Science'],
-    'LRSP': ['LRSP', 'Living Rev Sol Phys', 'Liv Rev Sol Phys', 'Living Reviews in Solar Physics'],
+    'LRSP': ['LRSP', 'Living Rev Sol Phys', 'Living Rev Solar Phys', 'Liv Rev Sol Phys', 'Living Reviews in Solar Physics'],
     'JCoPh': ['JCoPh', 'J Comput Phys', 'Journal of Computational Physics'],
     'PhRvL': ['PhRvL', 'Phys Rev Lett', 'Physical Review Letters'],
     'PhRvE': ['PhRvE', 'Phys Rev E', 'Physical Review E'],

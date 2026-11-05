@@ -13,6 +13,7 @@ class CitationTests(unittest.TestCase):
             'Wedemeyer 2012, Nature, 486, 505': 'Natur 486, 505 (2012)',
             'De Pontieu 2014, Sci, 346, D315': 'Sci 346, D315 (2014)',
             'Reale 2014, Liv. Rev. Sol. Phys., 11, 4': 'LRSP 11, 4 (2014)',
+            'Chen, P. F. 2011, Living Rev. Solar Phys., 8, 1': 'LRSP 8, 1 (2011)',
             'Powell 1999, JCoPh, 154, 284': 'JCoPh 154, 284 (1999)',
             'Powell 1999, J. Comput. Phys., 154, 284': 'JCoPh 154, 284 (1999)',
             'Smith 2007, PhRvL, 99, 021101': 'PhRvL 99, 021101 (2007)',
@@ -38,6 +39,7 @@ class CitationTests(unittest.TestCase):
     def test_journal_code_reads_publisher_names(self):
         self.assertEqual(journal_code('The Astrophysical Journal'), 'APJ')
         self.assertEqual(journal_code('Astronomy &amp; Astrophysics'), 'A&A')
+        self.assertEqual(journal_code('Living Rev. Solar Phys.'), journal_code('Living Reviews in Solar Physics'))
         self.assertIsNone(journal_code('Journal of Imaginary Results'))
 
     def test_surnames_ignore_case_diacritics_and_particles(self):

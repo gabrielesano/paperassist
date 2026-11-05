@@ -15,6 +15,26 @@ RSPTA = {'raw': 'Bareford, P. K., & Hood, A. W. 2015, Phil. Trans. R. Soc. Lond.
 REF = {'raw': 'Rappazzo, A. F., Velli, M., & Einaudi, G. 2013, ApJ, 771, 76', 'authors': 'Rappazzo', 'year': '2013'}
 
 
+def text_pdf(*lines):
+    """A one-page PDF with a real text layer (none when no lines), built by hand because pypdf cannot draw text."""
+    escape = lambda text: text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    body = 'BT /F1 10 Tf 12 TL 20 760 Td ' + ' '.join(f'({escape(line)}) Tj T*' for line in lines) + ' ET'
+    objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+               '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+               f'<< /Length {len(body)} >>\nstream\n{body}\nendstream', '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
+    out, offsets = b'%PDF-1.4\n', []
+    for number, content in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f'{number} 0 obj\n{content}\nendobj\n'.encode()
+    xref = len(out)
+    out += f'xref\n0 {len(objects) + 1}\n0000000000 65535 f \n'.encode() + b''.join(f'{o:010d} 00000 n \n'.encode() for o in offsets)
+    return out + f'trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
+
+
+# Names every author the tests cite, in the small-caps spacing that real preprints extract with.
+PDF = text_pdf('A. F. R APPAZZO, M. V ELLI AND G. E INAUDI. Guarrasi, Yeates, Hood and Bareford also appear here.')
+
+
 def feed(doi='10.1234/test', identifier='2401.12345v1', extra=''):
     return f'''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
       <entry><id>https://arxiv.org/abs/{identifier}</id><arxiv:doi>{doi}</arxiv:doi>{extra}</entry>
@@ -85,7 +105,7 @@ class RetrievalTests(Base):
     def test_matching_doi_downloads_arxiv(self):
         library = self.library()
         with patch('paperassist.retrieval.urlopen', Network(arxiv=feed())), \
-             patch('paperassist.retrieval._download_pdf', return_value=b'%PDF-1.7\ncontent') as pdf:
+             patch('paperassist.retrieval._download_pdf', return_value=PDF) as pdf:
             result = download(library, {'doi': '10.1234/test'})
         self.assertEqual(result['document_id'], 42)
         self.assertEqual(ran(result), [('arxiv', 'downloaded')])
@@ -93,7 +113,7 @@ class RetrievalTests(Base):
 
     def test_arxiv_id_and_mismatch(self):
         with patch('paperassist.retrieval.urlopen', Network(arxiv=feed())), \
-             patch('paperassist.retrieval._download_pdf', return_value=b'%PDF-1.7'):
+             patch('paperassist.retrieval._download_pdf', return_value=PDF):
             self.assertEqual(download(self.library(7), {'title': 'arXiv:2401.12345'})['document_id'], 7)
         with patch('paperassist.retrieval.urlopen', Network(arxiv=feed('10.9999/other'))):
             result = download(self.library(), {'doi': '10.1234/test'})
@@ -136,7 +156,7 @@ class RetrievalTests(Base):
         ref = {'authors': 'Guarrasi', 'year': '2014', 'raw': 'Guarrasi, F. 2014, A&A 564, A48'}
         network = Network(arxiv=xml(entry))
         with patch('paperassist.retrieval.urlopen', network), \
-             patch('paperassist.retrieval._download_pdf', return_value=b'%PDF-1.7'):
+             patch('paperassist.retrieval._download_pdf', return_value=PDF):
             self.assertEqual(download(self.library(), ref)['status'], 'downloaded')
         query = parse_qs(urlsplit(next(u for u in network.urls if 'arxiv' in u)).query)['search_query'][0]
         self.assertEqual(query, 'au:"guarrasi" AND jr:"564"')  # volume, not the journal name
@@ -168,6 +188,42 @@ class RetrievalTests(Base):
             retrieval._CACHE.clear()
             with patch('paperassist.retrieval.urlopen', Network(arxiv=entry(**changed))):
                 self.assertEqual(retrieval._arxiv_pdf(ref, Settings())[0], 'not_found', changed)
+
+    def test_arxiv_title_match_tolerates_typesetting_but_not_another_paper(self):
+        same = [('Nanoflares in a twisted loop', 'Nanoflares in a twisted loop.'),
+                ('Multi-threaded loops: a heated debate', 'Multi threaded loops, a heated debate'),
+                ('The Ly\u03b1 emission of solar flares in AR 11302', 'The Ly$\\alpha$ emission of solar flares in AR 11302'),
+                ('Heating of the solar corona by $\\mathrm{MHD}$ waves in loops', 'Heating of the solar corona by MHD waves in loops'),
+                ('Energy release in coronal loops and nanoflares: a statistical study', 'Energy release in coronal loops and nanoflares'),
+                ('Energy release in coronal loops and nanoflares', 'Energy release in coronal loops and nanoflares: a statistical study'),
+                ('FIELD LINES TWISTING IN A NOISY CORONA', 'Field lines twisting in a noisy corona')]
+        for a, b in same:
+            self.assertTrue(retrieval.same_title(a, b), (a, b))
+        different = [('Energy release in coronal loops. I. Heating', 'Energy release in coronal loops. II. Heating'),
+                     ('Energy release in coronal loops. I. Heating', 'Energy release in coronal loops. Heating'),
+                     ('Nanoflares in a twisted loop', 'Nanoflares in a twisted flux tube'),
+                     ('Coronal loops: a statistical study', 'Coronal loops'),  # head too short to be distinctive
+                     ('Waves in 2 solar loops', 'Waves in 3 solar loops'), ('', 'Anything at all here')]
+        for a, b in different:
+            self.assertFalse(retrieval.same_title(a, b), (a, b))
+
+    def test_arxiv_title_search_asks_for_words_not_a_phrase_and_stays_ambiguity_safe(self):
+        def entry(identifier, title='Multi-threaded loops: a heated debate.'):
+            return f'''<entry><id>https://arxiv.org/abs/{identifier}</id><published>2016-02-01T00:00:00Z</published>
+              <title>{title}</title><author><name>A. W. Hood</name></author></entry>'''
+        xml = lambda *entries: ('<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">'
+                                + ''.join(entries) + '</feed>').encode()
+        ref = {'raw': 'Hood, A. W. 2016, ApJ, 817, 5', 'authors': 'Hood', 'year': '2016',
+               'identity': {'title': 'Multi-threaded loops \u2014 a heated debate', 'year': 2016}}
+        network = Network(arxiv=xml(entry('1601.00001v1')))
+        with patch('paperassist.retrieval.urlopen', network):
+            status, _, urls = retrieval._arxiv_pdf(ref, Settings())
+        self.assertEqual((status, urls), ('found', ['https://arxiv.org/pdf/1601.00001v1']))
+        query = parse_qs(urlsplit(network.urls[0]).query)['search_query'][0]
+        self.assertEqual(query, 'au:"hood" AND ti:threaded AND ti:debate AND ti:heated AND ti:loops AND ti:multi')
+        retrieval._CACHE.clear()
+        with patch('paperassist.retrieval.urlopen', Network(arxiv=xml(entry('1601.00001v1'), entry('1601.00002v1')))):
+            self.assertEqual(retrieval._arxiv_pdf(ref, Settings())[0], 'ambiguous')
 
     def test_identify_accepts_only_one_fully_agreeing_record(self):
         with patch('paperassist.retrieval.urlopen', Network(crossref=crossref(work(), work(page='77')))):
@@ -216,7 +272,7 @@ class RetrievalTests(Base):
             {'is_oa': True, 'pdf_url': 'https://repo.example/a.pdf', 'source': {'type': 'repository'}}]}).encode()
         network = Network(crossref=crossref(work()), openalex=openalex)
         with patch('paperassist.retrieval.urlopen', network), \
-             patch('paperassist.retrieval._download_pdf', side_effect=[ValueError('HTTP 403'), b'%PDF-1.7']) as pdf:
+             patch('paperassist.retrieval._download_pdf', side_effect=[ValueError('HTTP 403'), PDF]) as pdf:
             result = download(library, REF)
         self.assertEqual((result['status'], result['provider']), ('downloaded', 'openalex'))
         self.assertEqual(result['identity']['doi'], '10.1088/0004-637x/771/2/76')
@@ -249,7 +305,7 @@ class RetrievalTests(Base):
         unpaywall = b'{"best_oa_location":{"url_for_pdf":"https://example.org/a.pdf"}}'
         with patch.dict(os.environ, {'PAPERASSIST_EMAIL': 'reader@example.org'}), \
              patch('paperassist.retrieval.urlopen', Network(arxiv=feed('10.9999/other'), unpaywall=unpaywall)), \
-             patch('paperassist.retrieval._download_pdf', return_value=b'%PDF-1.7'):
+             patch('paperassist.retrieval._download_pdf', return_value=PDF):
             result = download(self.library(), {'doi': '10.1234/test'})
         self.assertEqual(ran(result), [('arxiv', 'not_found'), ('openalex', 'not_found'), ('semantic_scholar', 'not_found'), ('unpaywall', 'downloaded')])
 
@@ -267,7 +323,7 @@ class RetrievalTests(Base):
 
     def search(self, ref, library=None, **routes):
         with patch('paperassist.retrieval.urlopen', Network(**routes)), \
-             patch('paperassist.retrieval._download_pdf', return_value=b'%PDF-1.7'):
+             patch('paperassist.retrieval._download_pdf', return_value=PDF):
             return download(library or self.library(), ref)
 
     def test_unknown_journal_is_identified_only_when_four_facts_agree(self):
@@ -288,6 +344,108 @@ class RetrievalTests(Base):
         with patch('paperassist.retrieval.urlopen', Network(crossref=crossref(item, twin))):
             status, message, _ = identify(ref)
         self.assertEqual((status, message), ('ambiguous', 'Several Crossref records match; choose the PDF manually.'))
+
+    def test_science_ads_page_id_is_identified_only_by_one_electronic_article(self):
+        ref = {'raw': 'De Pontieu, B., Rouppe van der Voort, L., McIntosh, S. W., et al. 2014, Sci, 346, D315',
+               'authors': 'De Pontieu', 'year': '2014'}
+
+        def science(doi, family='De Pontieu', article='1255732', page=None, container='Science'):
+            item = work(doi=doi, family=family, volume='346', year=2014, container=container, title='On the prevalence of small-scale twist')
+            del item['page']
+            return {**item, 'article-number': article, **({'page': page} if page else {})}
+
+        def run(*items):
+            retrieval._CACHE.clear()
+            # The bibliographic search finds nothing; the author and journal search has the candidates.
+            by_query = lambda url: crossref(*items) if 'query.author' in url else crossref()
+            with patch('paperassist.retrieval.urlopen', Network(crossref=by_query)) as network:
+                return identify(ref), network
+        (status, _, identity), network = run(science('10.1126/science.1255732'),
+                                              science('10.1126/science.1255757', family='Hansteen', article='1255757'))
+        self.assertEqual((status, identity['doi'], identity['publication']), ('found', '10.1126/science.1255732', ['SCI', '346', 'D315', '2014']))
+        self.assertIn('relaxed', identity['evidence']['page_check'])
+        self.assertIn('query.container-title=Science', network.urls[-1])
+        refusals = {'two articles': [science('10.1126/science.1255732'), science('10.1126/science.1255999', article='1255999')],
+                    'a printed page': [science('10.1126/science.346.6207.315', article=None, page='315-315')],
+                    'another journal': [science('10.1126/other', container='Nature')]}
+        for reason, items in refusals.items():
+            self.assertNotEqual(run(*items)[0][0], 'found', reason)
+        self.assertEqual(run(*refusals['two articles'])[0][0], 'ambiguous')
+
+    def test_page_id_relaxation_is_limited_to_science(self):
+        ref = {'raw': 'Rappazzo, A. F., Velli, M., & Einaudi, G. 2013, ApJ, 771, L2', 'authors': 'Rappazzo', 'year': '2013'}
+        item = work(volume='771', year=2013)
+        del item['page']
+        with patch('paperassist.retrieval.urlopen', Network(crossref=crossref({**item, 'article-number': '1255732'}))):
+            self.assertEqual(identify(ref)[0], 'not_found')
+
+    def test_all_caps_title_takes_the_arxiv_spelling_only_for_the_same_letters(self):
+        def run(arxiv_title, deposited='NANOFLARES IN A TWISTED LOOP'):
+            retrieval._CACHE.clear()
+            entry = f'''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom"><entry>
+              <id>https://arxiv.org/abs/1301.7678v2</id><published>2013-01-31T00:00:00Z</published><title>{arxiv_title}</title>
+              <author><name>A. F. Rappazzo</name></author></entry></feed>'''.encode()
+            identity = {'title': deposited, 'year': 2013}
+            with patch('paperassist.retrieval.urlopen', Network(arxiv=entry)):
+                status = retrieval._arxiv_pdf({**REF, 'identity': identity}, Settings())[0]
+            return status, identity['title']
+        self.assertEqual(run('Nanoflares in a\n Twisted Loop'), ('found', 'Nanoflares in a Twisted Loop'))
+        # A near-identical title still finds the PDF, but the deposited letters are not rewritten.
+        self.assertEqual(run('Nanoflares in a twisted loop of the solar corona seen by Hinode',
+                             'NANOFLARES IN A TWISTED LOOPS OF THE SOLAR CORONA SEEN BY HINODE'),
+                         ('found', 'NANOFLARES IN A TWISTED LOOPS OF THE SOLAR CORONA SEEN BY HINODE'))
+        self.assertEqual(run('NANOFLARES IN A TWISTED LOOP'), ('found', 'NANOFLARES IN A TWISTED LOOP'))
+        self.assertEqual(run('Nanoflares in a twisted loop', deposited='Nanoflares in a Twisted Loop'), ('found', 'Nanoflares in a Twisted Loop'))
+
+    def test_downloaded_arxiv_paper_is_verified_with_the_restored_title(self):
+        library = self.library(5)
+        entry = b'''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom"><entry>
+          <id>https://arxiv.org/abs/1301.7678v2</id><arxiv:doi>10.1088/0004-637x/771/2/76</arxiv:doi><title>Nanoflares in a Twisted Loop</title></entry></feed>'''
+        with patch('paperassist.retrieval.urlopen', Network(crossref=crossref(work(title='NANOFLARES IN A TWISTED LOOP')), arxiv=entry)), \
+             patch('paperassist.retrieval._download_pdf', return_value=PDF):
+            result = download(library, REF)
+        self.assertEqual(result['identity']['title'], 'Nanoflares in a Twisted Loop')
+        self.assertEqual(library.apply_verified.call_args.args[1]['title'], 'Nanoflares in a Twisted Loop')
+
+    def test_first_page_must_name_the_author_before_a_pdf_is_imported(self):
+        other = text_pdf('Another paper entirely, by Smith and Jones, about something unrelated to this reference.')
+        openalex = json.dumps({'locations': [{'is_oa': True, 'pdf_url': 'https://repo.example/a.pdf', 'source': {'type': 'repository'}}]}).encode()
+        unpaywall = b'{"best_oa_location":{"url_for_pdf":"https://other.example/b.pdf"}}'
+        routes = dict(crossref=crossref(work()), arxiv=feed('10.9999/other'), openalex=openalex, semantic_scholar=b'{}', unpaywall=unpaywall)
+        with patch.dict(os.environ, {'PAPERASSIST_EMAIL': 'reader@example.org'}):
+            # The first provider returns another paper, the next one the right paper.
+            library = self.library()
+            with patch('paperassist.retrieval.urlopen', Network(**routes)), \
+                 patch('paperassist.retrieval._download_pdf', side_effect=[other, PDF]):
+                result = download(library, REF)
+            self.assertEqual((result['status'], result['provider']), ('downloaded', 'unpaywall'))
+            self.assertEqual(self.attempt(result, 'openalex')['status'], 'mismatch')
+            self.assertEqual(self.attempt(result, 'openalex')['message'], 'The PDF from OpenAlex does not name Rappazzo on its first page.')
+            library.import_stream.assert_called_once()
+            library.apply_verified.assert_called_once()
+            # Every provider returns the wrong paper: nothing is imported and the summary says why.
+            retrieval._CACHE.clear()
+            library = self.library()
+            with patch('paperassist.retrieval.urlopen', Network(**routes)), \
+                 patch('paperassist.retrieval._download_pdf', return_value=other):
+                result = download(library, REF)
+        self.assertEqual(result['status'], 'not_found')
+        library.import_stream.assert_not_called()
+        self.assertEqual(result['summary'], 'Identified via Crossref (DOI 10.1088/0004-637x/771/2/76). No open-access PDF on arXiv or Semantic Scholar. '
+                                            'The PDF from OpenAlex and Unpaywall did not name the first author, so it was not imported.')
+
+    def test_pdf_without_text_is_imported_but_not_verified(self):
+        library = self.library()
+        scan = text_pdf()
+        with patch('paperassist.retrieval.urlopen', Network(crossref=crossref(work()), openalex=json.dumps({'locations': [
+                {'is_oa': True, 'pdf_url': 'https://repo.example/a.pdf'}]}).encode())), \
+             patch('paperassist.retrieval._download_pdf', return_value=scan):
+            result = download(library, REF)
+        self.assertEqual(result['status'], 'downloaded')
+        library.import_stream.assert_called_once()
+        library.apply_verified.assert_not_called()
+        self.assertFalse(self.attempt(result, 'openalex')['checked'])
+        self.assertIn('could not be checked', result['summary'])
 
     def test_citation_tail_wins_over_a_later_journal_in_merged_text(self):
         ref = {'raw': 'Yeates, A. R., & Hornig, G. 2014, JPhCS, 544, 012002 7 The Astrophysical Journal, 817:5',
@@ -373,6 +531,20 @@ class RetrievalTests(Base):
                          ('blocked', 'The link opens a web page, not a PDF.'))
         self.assertIn('but the link opens a web page, not a PDF. Open it', result['summary'])
 
+    def test_bot_check_page_without_an_html_tag_is_blocked(self):
+        result = self.blocked_search({'return_value': b'<head><title>Bot Manager Captcha</title><script>var x = 1;</script>'})
+        self.assertEqual(result['status'], 'blocked')
+
+    def test_redirect_to_plain_http_is_a_page_for_the_browser(self):
+        response = Mock(status=302)
+        response.getheader.return_value = 'http://publisher.example/landing'
+        with patch('paperassist.retrieval.socket.getaddrinfo', return_value=[(0, 0, 0, '', ('93.184.216.34', 443))]), \
+             patch('paperassist.retrieval.socket.create_connection'), patch('paperassist.retrieval.ssl'), \
+             patch('paperassist.retrieval.http.client.HTTPSConnection') as connection:
+            connection.return_value.getresponse.return_value = response
+            with self.assertRaisesRegex(Blocked, 'cannot be fetched automatically'):
+                _download_pdf('https://doi.example/10.1/x')
+
     def test_http_refusal_is_detected_in_the_real_download(self):
         response = Mock(status=403)
         with patch('paperassist.retrieval.socket.getaddrinfo', return_value=[(0, 0, 0, '', ('93.184.216.34', 443))]), \
@@ -385,7 +557,7 @@ class RetrievalTests(Base):
     def test_other_provider_can_still_succeed_after_a_refusal(self):
         unpaywall = b'{"best_oa_location":{"url_for_pdf":"https://repo.example/a.pdf"}}'
         with patch.dict(os.environ, {'PAPERASSIST_EMAIL': 'reader@example.org'}):
-            result = self.blocked_search({'side_effect': [Blocked('The site refused the automatic download (HTTP 403).'), b'%PDF-1.7']},
+            result = self.blocked_search({'side_effect': [Blocked('The site refused the automatic download (HTTP 403).'), PDF]},
                                          unpaywall=unpaywall)
         self.assertEqual((result['status'], result['provider']), ('downloaded', 'unpaywall'))
         self.assertEqual(ran(result), [('crossref', 'found'), ('arxiv', 'not_found'), ('openalex', 'blocked'), ('semantic_scholar', 'not_found'), ('unpaywall', 'downloaded')])
@@ -440,7 +612,7 @@ def configured(**keys):
 class SourceTests(Base):
     """New open-access sources, their keys and the provider order."""
 
-    def run_download(self, routes, settings, ref=REF, library=None, pdf=b'%PDF-1.7'):
+    def run_download(self, routes, settings, ref=REF, library=None, pdf=PDF):
         network = Network(**routes)
         with patch('paperassist.retrieval.urlopen', network), \
              patch('paperassist.retrieval._download_pdf', return_value=pdf) as fetch:
