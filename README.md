@@ -49,10 +49,12 @@ Only one server runs per library at a time. If your library is already open, run
 
 PaperAssist extracts a paper's bibliography and ranks references in the right-hand **References** panel by how often they are cited in the paper you are currently reading.
 
-- **Consult cited papers in a split view:** Clicking a reference that is already in your library opens it in **Quick view** right below (or beside) your main paper. Drag the divider to resize the split, toggle **Side by side**, or click **Open in tab** to promote it to a full tab with its page and zoom intact.
+- **Stacked or side-by-side split view:** Clicking a reference that is already in your library opens it in **Quick view** right below your main paper, or **Side by side** with a single toggle—ideal when you hide the side panels (`B`) to compare two papers across the full width of your screen. Drag the divider to resize either split, or click **Open in tab** to promote the cited paper to its own tab with page and zoom intact.
 - **Independent controls for both panes:** Whenever Quick view is open, the top toolbar shows a dedicated **Second paper** bar with its own page jumper, search box, and zoom controls—so navigating the cited paper never disturbs the main paper.
 - **Step through every in-text mention:** Click a reference card (or its citation count badge) to jump from one in-text citation to the next. Each click centers the passage and briefly outlines the citation, wrapping around after the last one.
 - **Filter and nickname tabs:** Use **Filter references** (`/` key) to narrow long bibliographies by author, year, title, label, or DOI (ignoring case and accents; each tab remembers its own filter). Double-click any open tab—or focus it and press `F2`—to give it a short nickname like *"Vance 2022"* without altering its bibliographic title or filename on disk.
+
+![Side-by-side Quick view with side panels hidden, showing the main paper on the left and the cited paper beside it on the right](docs/screenshots/workspace-side-by-side.png)
 
 ### Find missing references—via open access or your own downloads
 
