@@ -80,7 +80,7 @@ When you open a paper for the first time, PaperAssist shows which cited works ar
 
 - **Open-access lookup:** Tick multiple entries in **Reference PDFs**—or click **Find open access** on a single reference card—to check legal open-access sources (Crossref, arXiv, OpenAlex, Semantic Scholar, Unpaywall, NASA ADS, and CORE). Every provider reports its own outcome clearly: a timeout or unindexed reference is reported honestly, never disguised as proof of a paywall.
 - **Web search & library proxy links:** Unresolved references offer prefilled web and PDF searches, plus one-click links through your institution's **Library proxy** if you configure one.
-- **Manual downloads without filename chaos:** Point **Folder for manual downloads** (in **Sources**) at the folder where you save publisher PDFs from your browser. Clicking **Check folder** on a reference identifies the citation, finds the matching file in that folder, and copies it into your library under a clean name like `Antolin_2012_ApJ_745_152.pdf`—leaving your downloads folder completely untouched. If PaperAssist picks the wrong match, **Change PDF** fixes the link in two clicks.
+- **Manual downloads without filename chaos:** Point **Folder for manual downloads** (in **Preferences**) at the folder where you save publisher PDFs from your browser. Clicking **Check folder** on a reference identifies the citation, finds the matching file in that folder, and copies it into your library under a clean name like `Antolin_2012_ApJ_745_152.pdf`—leaving your downloads folder completely untouched. If PaperAssist picks the wrong match, **Change PDF** fixes the link in two clicks.
 
 ### Highlight, draw, and attach notes to exact phrases
 
@@ -105,7 +105,7 @@ Open **Library** (`L` key) to search your collection by title, author, year, or 
 
 ## Keyboard shortcuts
 
-Press `?` anywhere in the reader (or click the keyboard icon in the top bar) to view all shortcuts. On macOS, use `Cmd` in place of `Ctrl`. Letter shortcuts pause automatically whenever you are typing in an input field or have a dialog open.
+Press `?` anywhere in the reader (or click the keyboard icon in the top bar) to view all shortcuts. Click **PaperAssist** at the top left for the application menu: **Preferences** (`Ctrl+,`), **Sources**, **Keyboard shortcuts** and **About**. On macOS, use `Cmd` in place of `Ctrl`. Letter shortcuts pause automatically whenever you are typing in an input field or have a dialog open.
 
 | Keys | Action |
 | --- | --- |
@@ -118,6 +118,7 @@ Press `?` anywhere in the reader (or click the keyboard icon in the top bar) to 
 | `Ctrl+Z`, `Ctrl+Shift+Z` (`Ctrl+Y`) | Undo or redo annotation changes |
 | `Ctrl+S` | Save PDF annotations |
 | `L` | Open **Library** |
+| `Ctrl+,` | Open **Preferences** |
 | `,` and `.`, `X`, `F2` | Switch tabs, close the current tab, or rename the focused tab |
 | `B` | Hide or restore both side panels for distraction-free reading |
 | `O`, `1`, `2` | Jump to **Outline**, **References**, or **Comments** |
@@ -125,11 +126,15 @@ Press `?` anywhere in the reader (or click the keyboard icon in the top bar) to 
 
 When **Quick view** is open, page navigation, `G`, `Ctrl+F`, and zoom shortcuts act on whichever paper pane you clicked last.
 
+### Interface size
+
+**Preferences → Interface size** scales the toolbar, tabs, side panels, dialogs and menu from 80% to 150% and remembers the choice in this browser. Papers keep their own zoom controls.
+
 ---
 
 ## Where your library lives & backups
 
-Everything PaperAssist manages—your copied PDFs, saved annotated revisions, comments, settings, and SQLite catalog—lives inside a single folder on disk. PaperAssist prints this path on startup and displays it in **Sources → Library location**.
+Everything PaperAssist manages—your copied PDFs, saved annotated revisions, comments, settings, and SQLite catalog—lives inside a single folder on disk. PaperAssist prints this path on startup and displays it in **Preferences → Library location**.
 
 | Operating system | Default library folder |
 | --- | --- |
@@ -143,7 +148,7 @@ Inside the library folder:
 
 ### Moving or switching libraries
 
-Open **Sources**, pick a folder under **Library location**, and click **Use this folder**:
+Open **Preferences**, pick a folder under **Library location**, and click **Use this folder**:
 
 - **Existing PaperAssist library:** PaperAssist switches to it and leaves your previous library untouched.
 - **Empty or new folder:** PaperAssist copies your entire current library there, verifies every file, and switches over. Your old folder is left intact until you choose to delete it yourself.
@@ -174,7 +179,7 @@ Open **Sources** to toggle lookup providers and add optional API keys or contact
 If the corresponding field in **Sources** is left blank, PaperAssist also checks the `PAPERASSIST_EMAIL` and `OPENALEX_API_KEY` environment variables.
 
 - **Library proxy:** Optional `https://...` prefix (or template containing `{url}`) for your university's proxy. PaperAssist uses it strictly to build links that *you* click in your browser—it never runs automated downloads through your institutional session.
-- **Folder for manual downloads:** A read-only watch folder (pickable with **Browse…** via `zenity`, `kdialog`, or `Tk`) where you drop PDFs downloaded by hand so **Check folder** can verify and copy them into your library.
+- **Folder for manual downloads (in Preferences):** A read-only watch folder (pickable with **Browse…** via `zenity`, `kdialog`, or `Tk`) where you drop PDFs downloaded by hand so **Check folder** can verify and copy them into your library.
 
 ---
 

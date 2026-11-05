@@ -10,7 +10,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from paperassist import paths
+from paperassist import __version__, paths
 from paperassist.library import Library
 from paperassist.server import create_app, library_lock, running_url, serve
 
@@ -29,6 +29,9 @@ class ServerTests(unittest.TestCase):
         headers = {'X-PaperAssist-Token': self.token, 'Origin': 'https://evil.example'}
         self.assertEqual(self.client.post('/api/import', json={'paths': []}, headers=headers).status_code, 403)
         self.assertEqual(self.client.get('/api/config', headers={'Host': 'evil.example'}).status_code, 403)
+
+    def test_config_reports_the_app_version(self):
+        self.assertEqual(self.client.get('/api/config').json['version'], __version__)
 
     def test_token_survives_restart_and_stays_private(self):
         again = create_app(self.directory.name).test_client()

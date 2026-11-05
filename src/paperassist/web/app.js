@@ -8,6 +8,8 @@ import {
     clearCommentIndicators,
 } from "./comments.js";
 import { SOURCES, SOURCE_NAMES, createSourcesDialog, proxyUrl } from "./sources.js";
+import { createPreferencesDialog } from "./preferences.js";
+import { installAppMenu } from "./app-menu.js";
 import { installShortcuts } from "./shortcuts.js";
 import { referenceMatcher } from "./reference-filter.js";
 import { installDesktopBridge } from "./desktop.js";
@@ -50,6 +52,8 @@ const state = {
     providers: null,
     proxy: "",
     inbox: "",
+    version: "",
+    libraryPath: "",
     folder: null,
     commentTool: false,
     editDoc: null,
@@ -1144,7 +1148,7 @@ async function showLinked(refId) {
     if (linked?.local_document_id) await openReference(linked);
 }
 async function checkFolder(ref) {
-    if (!state.inbox) return openSources("inbox");
+    if (!state.inbox) return openPreferences("inbox");
     const tab = state.current;
     state.folder = { id: ref.id, message: "Checking folder…", busy: true };
     renderReferences();
@@ -1604,10 +1608,21 @@ function switchDetail() {
     if (state.detail === "references") renderReferences();
     else showComments();
 }
-const openSources = createSourcesDialog({
+const openSources = createSourcesDialog({ api, onSaved: applyConfig });
+const openPreferences = createPreferencesDialog({
     api,
     onSaved: applyConfig,
     canLeave: () => !hasUnsavedEdits(),
+});
+installAppMenu({
+    preferences: () => openPreferences(),
+    sources: () => openSources(),
+    shortcuts: () => $("#shortcuts-button").click(),
+    about() {
+        $("#about-version").textContent = state.version;
+        $("#about-library").textContent = state.libraryPath;
+        $("#about-dialog").showModal();
+    },
 });
 $("#library-button").onclick = $("#welcome-library").onclick = library;
 $("#search").oninput = () => listLibrary();
@@ -2006,6 +2021,8 @@ function applyConfig(config) {
     state.providers = config.providers;
     state.proxy = config.proxy || "";
     state.inbox = config.inbox || "";
+    state.version = config.version;
+    state.libraryPath = config.library_path;
     if ($("#acquire-dialog").open) renderAcquire();
     // Without a paper the panel keeps its "Open a paper" message.
     if (state.current && state.detail === "references") renderReferences();
@@ -2017,4 +2034,4 @@ api("/api/config")
         applyConfig(config);
     })
     .catch((error) => report(`Could not connect: ${error.message}`));
-installShortcuts({ currentReader, mainReader, previewReader });
+installShortcuts({ currentReader, mainReader, previewReader, openPreferences });

@@ -10,6 +10,10 @@
     color: var(--ink);
     background: var(--surface);
     font-size: 14px;
+    /* Set by the interface size preference; see the zoom rules below. */
+    --ui-zoom: 1;
+    /* Dialog width limit in the dialog's own scaled pixels. */
+    --dialog-room: calc((100vw - 40px) / var(--ui-zoom));
 }
 * {
     box-sizing: border-box;
@@ -21,6 +25,7 @@ body {
 }
 button,
 input,
+select,
 textarea {
     font: inherit;
     color: inherit;
@@ -57,7 +62,9 @@ button:hover,
     align-items: center;
     font-weight: 700;
     letter-spacing: -0.02em;
-    margin-right: 16px;
+    margin-right: 10px;
+    padding: 4px 6px;
+    border-radius: 3px;
 }
 .brand-mark {
     display: grid;
@@ -523,8 +530,8 @@ button:hover,
     font-weight: 600;
 }
 dialog {
-    width: min(760px, calc(100vw - 40px));
-    max-height: 85vh;
+    width: min(760px, var(--dialog-room));
+    max-height: calc(85vh / var(--ui-zoom));
     border: 1px solid #c9d4ca;
     border-radius: 4px;
     padding: 25px 28px;
@@ -571,7 +578,7 @@ textarea {
 .library-list,
 .acquire-list {
     overflow: auto;
-    max-height: 50vh;
+    max-height: calc(50vh / var(--ui-zoom));
     margin-top: 15px;
     border-top: 1px solid var(--line);
 }
@@ -830,8 +837,8 @@ body {
 
 /* Panels occupy grid columns, so toggles never cover the reader. */
 .workspace {
-    --sidebar-width: min(210px, 28vw);
-    --details-width: min(290px, 35vw);
+    --sidebar-width: min(calc(210px * var(--ui-zoom)), 28vw);
+    --details-width: min(calc(290px * var(--ui-zoom)), 35vw);
     grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(
             --details-width
         );
@@ -906,8 +913,8 @@ body {
         width: 110px;
     }
     .workspace {
-        --sidebar-width: min(150px, 28vw);
-        --details-width: min(220px, 35vw);
+        --sidebar-width: min(calc(150px * var(--ui-zoom)), 28vw);
+        --details-width: min(calc(220px * var(--ui-zoom)), 35vw);
     }
     .workspace.outline-collapsed {
         --sidebar-width: 0px;
@@ -1034,21 +1041,21 @@ body {
 }
 
 /* The settings form scrolls under a fixed footer so Save stays reachable. */
-#sources-dialog {
-    width: min(680px, calc(100vw - 40px));
+.settings-dialog {
+    width: min(680px, var(--dialog-room));
     padding: 0;
 }
-#sources-dialog[open] {
+.settings-dialog[open] {
     display: flex;
 }
-#sources-form {
+.settings-form {
     display: flex;
     flex-direction: column;
     min-height: 0;
     width: 100%;
     padding: 25px 28px 0;
 }
-.sources-body {
+.settings-body {
     overflow-y: auto;
     min-height: 0;
     padding-right: 4px;
@@ -1167,17 +1174,17 @@ body {
     display: none;
 }
 .source-result.error,
-.sources-message.error {
+.settings-message.error {
     color: #8a3a1c;
 }
-.sources-footer {
+.settings-footer {
     position: sticky;
     bottom: 0;
     padding: 14px 0 20px;
     border-top: 1px solid var(--line);
     background: #fbfcf7;
 }
-.sources-message {
+.settings-message {
     flex: 1 1 200px;
     font-size: 12px;
     color: var(--muted);
@@ -1237,7 +1244,7 @@ select:focus-visible,
 }
 
 #shortcuts-dialog {
-    width: min(1040px, calc(100vw - 40px));
+    width: min(1040px, var(--dialog-room));
 }
 #shortcuts-dialog .dialog-head h2 {
     margin-bottom: 8px;
@@ -1326,4 +1333,70 @@ kbd {
 .zoom-label {
     min-width: 72px;
     text-align: center;
+}
+
+/* The interface size scales the app chrome only. The reader, and every ancestor of the PDF
+   viewers, stays unscaled so PDF.js text, highlights and selections keep their geometry. */
+.toolbar,
+.tabs,
+.app-sidebar,
+dialog,
+.app-menu {
+    zoom: var(--ui-zoom);
+}
+.settings-group select {
+    padding: 6px 9px;
+    border: 1px solid #ccd7cd;
+    background: #fff;
+    border-radius: 3px;
+}
+#about-dialog {
+    width: min(440px, var(--dialog-room));
+}
+#about-dialog p {
+    margin: 0 0 8px;
+}
+
+/* Positioned by app-menu.js just below the brand button. */
+.app-menu {
+    inset: auto;
+    margin: 0;
+    min-width: 240px;
+    padding: 4px;
+    border: 1px solid #c9d4ca;
+    border-radius: 4px;
+    background: #fbfcf7;
+    color: var(--ink);
+    box-shadow: 0 8px 24px #213d3126;
+}
+.app-menu button {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 24px;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 3px;
+    text-align: left;
+}
+.app-menu button:hover,
+.app-menu button:focus-visible {
+    background: #e8ece6;
+    color: var(--ink);
+}
+.app-menu button:focus-visible {
+    outline-offset: -2px;
+}
+.app-menu kbd {
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font-weight: 400;
+}
+.app-menu hr {
+    margin: 4px 0;
+    border: 0;
+    border-top: 1px solid var(--line);
 }

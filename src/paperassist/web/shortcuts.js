@@ -77,6 +77,8 @@ function editingAction(name) {
 export const shortcuts = [
     { group: "General", keys: [["?"]], label: "Show keyboard shortcuts", match: plain("?"),
         run: click("#shortcuts-button") },
+    { group: "General", keys: [["Mod", ","]], label: "Open Preferences", anywhere: true,
+        match: mod(","), run: (app) => app.openPreferences() },
     { group: "General", keys: [["Mod", "S"]], label: "Save the PDF" },
     { group: "General", keys: [["L"]], label: "Open the library", match: plain("l"),
         run: click("#library-button") },
@@ -189,7 +191,7 @@ export function shortcutFor(event, { typing = false, dialogOpen = false } = {}) 
         entry.match?.(event) && (entry.anywhere || !typing)) ?? null;
 }
 
-const isMac = () => /Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "");
+export const isMac = () => /Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "");
 
 export function renderShortcuts(host) {
     const names = { Mod: isMac() ? "⌘" : "Ctrl" };

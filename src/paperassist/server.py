@@ -20,7 +20,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.serving import make_server
 
 from paperassist.library import Library
-from paperassist import inbox, location, paths, picker, references, retrieval, settings
+from paperassist import __version__, inbox, location, paths, picker, references, retrieval, settings
 
 
 def _write_token(data_dir):
@@ -117,8 +117,8 @@ def create_app(data_dir, source='default', switch=None, choose_folder=None):
     @app.get('/api/config')
     def config():
         current = settings.load(data_dir)
-        return jsonify(token=token, library_path=str(data_dir), library_source=source, providers=current.providers(),
-                       proxy=current.proxy, inbox=current.inbox)
+        return jsonify(token=token, version=__version__, library_path=str(data_dir), library_source=source,
+                       providers=current.providers(), proxy=current.proxy, inbox=current.inbox)
 
     @app.get('/api/settings')
     def get_settings():

@@ -150,7 +150,7 @@ class InboxTests(unittest.TestCase):
         result = self.check()
         self.assertEqual((result['status'], result['summary']), ('none', f'No PDF in {self.folder} matches this reference. The reference could not be identified online.'))
         self.assertEqual(inbox.check_folder(self.library, self.source, '0', ''),
-                         {'status': 'not_configured', 'summary': 'Set a folder for manual downloads in Sources.'})
+                         {'status': 'not_configured', 'summary': 'Set a folder for manual downloads in Preferences.'})
 
     def test_only_regular_pdfs_directly_in_the_folder_are_scanned(self):
         self.reference({**REF, 'doi': DOI})

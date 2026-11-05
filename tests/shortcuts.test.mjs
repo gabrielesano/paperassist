@@ -26,6 +26,12 @@ test("Ctrl and Command shortcuts keep working while typing", () => {
     assert.equal(label(press("0", { ctrlKey: true })), "Fit the page width");
 });
 
+test("Ctrl or Command with a comma opens Preferences, also while typing", () => {
+    assert.equal(label(press(",", { ctrlKey: true }), { typing: true }), "Open Preferences");
+    assert.equal(label(press(",", { metaKey: true })), "Open Preferences");
+    assert.equal(label(press(",")), "Previous or next paper tab");
+});
+
 test("Undo is left to text fields, and redo accepts both layouts", () => {
     assert.equal(shortcutFor(press("z", { ctrlKey: true }), { typing: true }), null);
     assert.equal(label(press("z", { ctrlKey: true })), "Undo");

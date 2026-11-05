@@ -21,7 +21,7 @@ MAX_FILES = 50
 MAX_CANDIDATES = 5
 # A download made recently is plausibly the one the user wants even when it cannot be verified.
 RECENT = timedelta(days=14)
-NO_FOLDER = {'status': 'not_configured', 'summary': 'Set a folder for manual downloads in Sources.'}
+NO_FOLDER = {'status': 'not_configured', 'summary': 'Set a folder for manual downloads in Preferences.'}
 
 
 def _squash(text):

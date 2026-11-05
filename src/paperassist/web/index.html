@@ -10,13 +10,25 @@
         <script type="importmap">
             { "imports": { "pdfjs-lib": "/vendor/pdfjs/build/pdf.mjs" } }
         </script>
+        <script type="module">
+            // Before the first paint, so the interface does not jump to its saved size.
+            import { applyZoom } from "/preferences.js";
+            applyZoom();
+        </script>
         <script type="module" src="/app.js"></script>
     </head>
     <body>
         <header class="toolbar">
-            <div class="brand">
+            <button
+                id="brand-button"
+                class="brand"
+                popovertarget="app-menu"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-controls="app-menu"
+            >
                 <span class="brand-mark">P</span><span>PaperAssist</span>
-            </div>
+            </button>
             <button id="library-button" class="tool">Library</button>
             <button
                 id="panels-button"
@@ -128,6 +140,13 @@
                 ><button id="delete-annotation">Delete selected</button>
             </div>
         </header>
+        <div id="app-menu" class="app-menu" popover role="menu" aria-label="PaperAssist menu">
+            <button role="menuitem" data-action="preferences">Preferences…<kbd id="preferences-hint"></kbd></button>
+            <button role="menuitem" data-action="sources">Sources…</button>
+            <button role="menuitem" data-action="shortcuts">Keyboard shortcuts<kbd>?</kbd></button>
+            <hr role="separator" />
+            <button role="menuitem" data-action="about">About PaperAssist</button>
+        </div>
         <!-- Mounted before the toolbar spacer only while the tab has a quick view. -->
         <template id="second-paper-template">
             <div
@@ -315,8 +334,8 @@
             </div>
             <div id="acquire-list" class="acquire-list"></div>
         </dialog>
-        <dialog id="sources-dialog" aria-labelledby="sources-title">
-            <form id="sources-form" novalidate>
+        <dialog id="sources-dialog" class="settings-dialog" aria-labelledby="sources-title">
+            <form id="sources-form" class="settings-form" novalidate>
                 <div class="dialog-head">
                     <div>
                         <p class="eyebrow">REFERENCES</p>
@@ -326,7 +345,7 @@
                         ×
                     </button>
                 </div>
-                <div class="sources-body">
+                <div class="settings-body">
                     <section class="settings-group">
                         <label for="sources-email">Contact email</label>
                         <input id="sources-email" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="name@example.org" />
@@ -352,11 +371,40 @@
                             https://login.proxy.example.edu/login?url=
                         </p>
                     </section>
+                </div>
+                <div class="acquire-actions settings-footer">
+                    <button class="primary" type="submit">Save</button
+                    ><button id="sources-check" type="button">Check access</button
+                    ><button type="button" data-close="sources-dialog">Close</button
+                    ><span id="sources-message" class="settings-message" role="status"></span>
+                </div>
+            </form>
+        </dialog>
+        <dialog id="preferences-dialog" class="settings-dialog" aria-labelledby="preferences-title">
+            <form id="preferences-form" class="settings-form" novalidate>
+                <div class="dialog-head">
+                    <div>
+                        <p class="eyebrow">PAPERASSIST</p>
+                        <h2 id="preferences-title">Preferences</h2>
+                    </div>
+                    <button type="button" data-close="preferences-dialog" aria-label="Close">
+                        ×
+                    </button>
+                </div>
+                <div class="settings-body">
                     <section class="settings-group">
-                        <label for="sources-inbox">Folder for manual downloads</label>
+                        <label for="preferences-zoom">Interface size</label>
+                        <select id="preferences-zoom"></select>
+                        <p class="source-help">
+                            Applies at once to the toolbar, panels and dialogs on this
+                            computer. Documents keep their own zoom.
+                        </p>
+                    </section>
+                    <section class="settings-group">
+                        <label for="preferences-inbox">Folder for manual downloads</label>
                         <div class="folder-field">
-                            <input id="sources-inbox" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/home/you/Downloads/papers" />
-                            <button id="sources-browse" type="button" aria-label="Browse for the manual downloads folder">Browse…</button>
+                            <input id="preferences-inbox" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/home/you/Downloads/papers" />
+                            <button id="preferences-browse" type="button" aria-label="Browse for the manual downloads folder">Browse…</button>
                         </div>
                         <p class="source-help">
                             Save PDFs you download by hand here; PaperAssist copies
@@ -364,29 +412,44 @@
                         </p>
                     </section>
                     <section class="settings-group">
-                        <label for="sources-library">Library location</label>
+                        <label for="preferences-library">Library location</label>
                         <div class="folder-field">
-                            <input id="sources-library" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/home/you/PaperAssist" />
-                            <button id="sources-library-browse" type="button" aria-label="Browse for the library folder">Browse…</button>
-                            <button id="sources-library-use" type="button">Use this folder</button>
+                            <input id="preferences-library" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/home/you/PaperAssist" />
+                            <button id="preferences-library-browse" type="button" aria-label="Browse for the library folder">Browse…</button>
+                            <button id="preferences-library-use" type="button">Use this folder</button>
                         </div>
-                        <p id="sources-library-note" class="source-help"></p>
-                        <div id="sources-library-confirm" class="location-confirm" role="group" aria-label="Confirm the library folder" hidden>
-                            <p id="sources-library-question"></p>
+                        <p id="preferences-library-note" class="source-help"></p>
+                        <div id="preferences-library-confirm" class="location-confirm" role="group" aria-label="Confirm the library folder" hidden>
+                            <p id="preferences-library-question"></p>
                             <div class="acquire-actions">
-                                <button id="sources-library-yes" class="primary" type="button"></button
-                                ><button id="sources-library-no" type="button">Cancel</button>
+                                <button id="preferences-library-yes" class="primary" type="button"></button
+                                ><button id="preferences-library-no" type="button">Cancel</button>
                             </div>
                         </div>
                     </section>
                 </div>
-                <div class="acquire-actions sources-footer">
+                <div class="acquire-actions settings-footer">
                     <button class="primary" type="submit">Save</button
-                    ><button id="sources-check" type="button">Check access</button
-                    ><button type="button" data-close="sources-dialog">Close</button
-                    ><span id="sources-message" class="sources-message" role="status"></span>
+                    ><button type="button" data-close="preferences-dialog">Close</button
+                    ><span id="preferences-message" class="settings-message" role="status"></span>
                 </div>
             </form>
+        </dialog>
+        <dialog id="about-dialog" aria-labelledby="about-title">
+            <div class="dialog-head">
+                <div>
+                    <p class="eyebrow">PAPERASSIST</p>
+                    <h2 id="about-title">About PaperAssist</h2>
+                </div>
+                <button data-close="about-dialog" aria-label="Close">×</button>
+            </div>
+            <p>
+                PaperAssist <span id="about-version"></span>: a lightweight local
+                reader and shared library for research papers.
+            </p>
+            <p class="source-help">License: GPL-3.0-or-later</p>
+            <p class="source-help">PDF viewer: PDF.js (Apache-2.0)</p>
+            <p class="source-help">Library: <span id="about-library"></span></p>
         </dialog>
         <dialog id="metadata-dialog">
             <div class="dialog-head">
