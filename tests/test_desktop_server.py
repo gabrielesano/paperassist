@@ -28,7 +28,8 @@ class ManagedServerTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # The server reports resolved paths; Windows may hand out an 8.3 short temp path.
+        self.root = Path(temporary.name).resolve()
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             self.port = probe.getsockname()[1]
