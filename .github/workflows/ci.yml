@@ -19,8 +19,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install -e .
+      # Qt's offscreen platform needs a few system libraries that minimal Linux runners lack.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - run: python -m pip install -e ".[native]"
       - run: python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen  # the native reader tests open widgets without a display
 
   node:
     runs-on: ubuntu-latest
