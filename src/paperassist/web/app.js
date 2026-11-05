@@ -266,6 +266,8 @@ function makeReader(doc, host, initial) {
     );
     reader.bus.on("annotationeditormodechanged", ({ mode }) => {
         if (reader.modePending !== null && reader.modePending !== mode) return;
+        // Select only lends the mode to edit one saved annotation; the toolbar stays on Select.
+        if (reader.borrowed) return;
         const tool = Object.entries(editorModes).find(
             ([, value]) => value === mode,
         )?.[0];
