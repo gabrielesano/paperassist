@@ -26,6 +26,9 @@ pdfjs.AnnotationEditorUIManager.prototype.getSelectionBoxes = function (layer) {
 };
 
 pdfjs.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs/build/pdf.worker.mjs";
+// One worker serves every open paper instead of one parser thread (and its caches) per tab.
+// PDF.js leaves a worker it was handed alone when a document is destroyed.
+let sharedWorker;
 
 export class Reader {
     constructor(doc, host, api, callbacks, initial = {}) {
@@ -235,7 +238,9 @@ export class Reader {
         this.bus.on("scalechanging", () => this.remember());
     }
     async open() {
+        sharedWorker ??= new pdfjs.PDFWorker();
         this.loadingTask = pdfjs.getDocument({
+            worker: sharedWorker,
             url: `/api/documents/${this.doc.id}/pdf`,
             cMapUrl: "/vendor/pdfjs/cmaps/",
             cMapPacked: true,
@@ -292,13 +297,23 @@ export class Reader {
         const changed = layout !== this.layout;
         this.layout = layout;
         // A remembered fixed zoom can be wider than the half-width pane and clip the page.
-        if (changed && this.fitsWidth() && this.viewer.pagesCount)
-            this.viewer.currentScaleValue = "page-width";
+        if (changed) {
+            this.refit = true;
+            this.show();
+        }
         const toggle = this.element.querySelector(".layout-toggle");
         this.setSplitOrientation(side ? "vertical" : "horizontal");
         toggle.setAttribute("aria-pressed", String(side));
         toggle.disabled = !canSplitSide;
         toggle.title = canSplitSide ? "" : "The reader is too narrow for two columns";
+    }
+    // A hidden container has no width to fit or pages to see, so both wait for the tab to
+    // come back. update() draws the pages the reader left off at.
+    show() {
+        if (!this.container.offsetParent || !this.viewer.pagesCount) return;
+        if (this.refit && this.fitsWidth()) this.viewer.currentScaleValue = "page-width";
+        this.refit = false;
+        this.viewer.update();
     }
     fitsWidth() {
         return this.kind === "preview" && this.layout === "side" && !this.zoomed;
@@ -427,10 +442,21 @@ export class Reader {
         })();
         return this.savePromise;
     }
+    // A hidden tab or a closing reader gives its page canvases back now: PDF.js keeps the
+    // last 10 rendered pages per viewer, and a canvas dropped with its view lingers until GC.
+    // Editors are committed first; their annotations stay in PDF.js storage for the next render.
+    release() {
+        if (!this.pdf) return;
+        this.commitEdits();
+        for (let i = 0; i < this.pdf.numPages; i++) this.viewer.getPageView(i)?.reset();
+        // Rejects while a page is still rendering; the pages were reset, so that is harmless.
+        this.pdf.cleanup().catch(() => {});
+    }
     async close({ discard = false } = {}) {
         if (this.saving) return false;
         this.commitEdits();
         if (this.dirty && !discard) return false;
+        this.release();
         this.closed = true;
         this.events.abort();
         this.viewer.setDocument(null);

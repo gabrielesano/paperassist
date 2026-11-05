@@ -438,7 +438,15 @@ function selectTab(tab) {
     state.current = tab;
     state.active = tab.main;
     state.folder = null;
-    for (const entry of state.tabs) entry.stack.hidden = entry !== tab;
+    for (const entry of state.tabs) {
+        const hidden = entry !== tab;
+        if (entry.stack.hidden === hidden) continue;
+        entry.stack.hidden = hidden;
+        // A hidden viewer has no visible pages, so it cannot render by itself.
+        for (const reader of [entry.main, entry.preview])
+            if (hidden) reader?.release();
+            else reader?.show();
+    }
     renderTabs();
     refreshToolbar();
     showOutline();
