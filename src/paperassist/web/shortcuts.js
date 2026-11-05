@@ -20,11 +20,22 @@ const isRedo = (event) =>
     (mod("z")(event) && event.shiftKey) || (event.ctrlKey && !event.metaKey && lower(event) === "y");
 
 const click = (selector) => () => $(selector).click();
+// The toolbar has one control group per paper; keys use the group of the pane last clicked.
+export const controlId = (reader, name) => (reader?.kind === "preview" ? `second-${name}` : name);
+const control = (reader, name) => $(`#${controlId(reader, name)}`);
 // Page controls act on the paper, so without one they decline and the key keeps its default.
 const withReader = (action) => (app, event) => {
     const reader = app.currentReader();
     return reader?.pdf ? action(reader, event) : false;
 };
+const clickControl = (name) => withReader((reader) => control(reader, name).click());
+const focusControl = (name) => withReader((reader) => {
+    control(reader, name).focus();
+    control(reader, name).select();
+});
+// A field returns to the paper its own group drives, wherever the last click was.
+const fieldReader = (app, event) =>
+    event.target.closest?.("#second-paper") ? app.previewReader() : app.mainReader();
 
 function focusDocument(reader) {
     // Scroll keys need a focused scroller; the viewer is not focusable by itself.
@@ -73,42 +84,45 @@ export const shortcuts = [
     { group: "General", keys: [["Esc"]], label: "Return from Find or Page to the document",
         anywhere: true,
         match: (event) => event.key === "Escape" && event.target.closest?.(".toolbar input"),
-        run: withReader((reader, event) => {
+        run: (app, event) => {
+            const reader = fieldReader(app, event);
+            if (!reader?.pdf) return false;
             // Chrome would also clear a search field on Escape; the query stays for next/previous.
             event.preventDefault();
             focusDocument(reader);
-        }) },
+        } },
 
     { group: "Navigation", keys: [["N"], ["J"]], label: "Next page", match: plain("n", "j"),
-        run: click("#next-page") },
+        run: clickControl("next-page") },
     { group: "Navigation", keys: [["P"], ["K"]], label: "Previous page", match: plain("p", "k"),
-        run: click("#previous-page") },
+        run: clickControl("previous-page") },
     { group: "Navigation", keys: [["Home"]], label: "First page", match: plain("home"),
         run: withReader((reader) => { reader.viewer.currentPageNumber = 1; }) },
     { group: "Navigation", keys: [["End"]], label: "Last page", match: plain("end"),
         run: withReader((reader) => { reader.viewer.currentPageNumber = reader.pdf.numPages; }) },
     { group: "Navigation", keys: [["G"]], label: "Go to page: type a number, then Enter",
-        match: plain("g"),
-        run: withReader(() => { $("#page-input").focus(); $("#page-input").select(); }) },
+        match: plain("g"), run: focusControl("page-input") },
     // Not listed: lets the arrow and Space keys scroll right after choosing a page.
     { group: "Navigation", anywhere: true,
-        match: (event) => event.key === "Enter" && event.target.id === "page-input",
-        run: withReader((reader) => focusDocument(reader)) },
+        match: (event) => event.key === "Enter" && event.target.id?.endsWith("page-input"),
+        run: (app, event) => {
+            const reader = fieldReader(app, event);
+            return reader?.pdf ? focusDocument(reader) : false;
+        } },
     { group: "Navigation", keys: [["↑"], ["↓"]], label: "Scroll the document (click it, or Esc in a field)" },
     { group: "Navigation", keys: [["Space"], ["Shift", "Space"]], label: "Scroll a screen down or up" },
     { group: "Navigation", keys: [["Page Up"], ["Page Down"]], label: "Scroll a screen up or down" },
 
-    { group: "Find", keys: [["Mod", "F"]], label: "Find in the document", anywhere: true,
-        match: mod("f"),
-        run: withReader(() => { $("#find-input").focus(); $("#find-input").select(); }) },
+    { group: "Find", keys: [["Mod", "F"]], label: "Find in the paper you last clicked", anywhere: true,
+        match: mod("f"), run: focusControl("find-input") },
     { group: "Find", keys: [["Enter"], ["Shift", "Enter"]], label: "Next or previous match" },
 
     { group: "Zoom", keys: [["Mod", "+"], ["Mod", "="]], label: "Zoom in", anywhere: true,
-        match: mod("+", "="), run: withReader(click("#zoom-in")) },
+        match: mod("+", "="), run: clickControl("zoom-in") },
     { group: "Zoom", keys: [["Mod", "-"]], label: "Zoom out", anywhere: true,
-        match: mod("-"), run: withReader(click("#zoom-out")) },
+        match: mod("-"), run: clickControl("zoom-out") },
     { group: "Zoom", keys: [["Mod", "0"]], label: "Fit the page width", anywhere: true,
-        match: mod("0"), run: withReader(click("#zoom-label")) },
+        match: mod("0"), run: clickControl("zoom-label") },
 
     { group: "Annotations", keys: [["V"]], label: "Select tool", match: plain("v"),
         run: click("#select-tool") },

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { shortcutFor, shortcuts } from "../src/paperassist/web/shortcuts.js";
+import { controlId, shortcutFor, shortcuts } from "../src/paperassist/web/shortcuts.js";
 
 const press = (key, extra = {}) => ({ key, target: {}, ...extra });
 const label = (event, context) => shortcutFor(event, context)?.label;
@@ -21,7 +21,7 @@ test("plain letters are ignored in fields, dialogs and with modifiers", () => {
 });
 
 test("Ctrl and Command shortcuts keep working while typing", () => {
-    assert.equal(label(press("f", { ctrlKey: true }), { typing: true }), "Find in the document");
+    assert.equal(label(press("f", { ctrlKey: true }), { typing: true }), "Find in the paper you last clicked");
     assert.equal(label(press("=", { metaKey: true }), { typing: true }), "Zoom in");
     assert.equal(label(press("0", { ctrlKey: true })), "Fit the page width");
 });
@@ -37,6 +37,18 @@ test("Escape only leaves toolbar fields", () => {
     const inToolbar = { closest: (selector) => selector === ".toolbar input" };
     assert.ok(shortcutFor(press("Escape", { target: inToolbar }), { typing: true }));
     assert.equal(shortcutFor(press("Escape"), { typing: true }), null);
+});
+
+test("keys use the control group of the paper they act on", () => {
+    assert.equal(controlId({ kind: "main" }, "find-input"), "find-input");
+    assert.equal(controlId({ kind: "preview" }, "find-input"), "second-find-input");
+    assert.equal(controlId(undefined, "page-input"), "page-input");
+});
+
+test("Enter in either page field returns to the document", () => {
+    for (const id of ["page-input", "second-page-input"])
+        assert.ok(shortcutFor(press("Enter", { target: { id } }), { typing: true }), id);
+    assert.equal(shortcutFor(press("Enter", { target: { id: "find-input" } }), { typing: true }), null);
 });
 
 test("each active key combination has one meaning", () => {

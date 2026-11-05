@@ -280,7 +280,7 @@ button:hover,
     outline: 2px solid #416c5a;
     outline-offset: -2px;
 }
-/* Toolbar tools act on the active pane; mark it only when two panes compete. */
+/* Annotation tools act on the active pane; mark it only when two panes compete. */
 .reader-stack:has(.pane.preview) .pane.active::after {
     content: "";
     position: absolute;
@@ -1253,5 +1253,36 @@ kbd {
     font-size: 12px;
     font-weight: 600;
     line-height: 1.4;
+    text-align: center;
+}
+
+/* Second paper: one unit with its label. In the options row it is right-aligned in the free
+   space after the tool options, where it adds no height. */
+.second-paper {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 4px 8px;
+}
+.editor-options > .second-paper {
+    margin-left: auto;
+}
+.second-paper.wrapped .divider {
+    display: none;
+}
+.second-label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: #c6ceca;
+}
+/* Fixed widths keep the toolbar from re-wrapping while the page number or zoom text changes. */
+.page-total {
+    min-width: 4ch;
+}
+.zoom-label {
+    min-width: 72px;
     text-align: center;
 }

@@ -52,7 +52,7 @@
                         type="number"
                         min="1"
                         value="1" /></label
-                ><span id="page-total">/ –</span
+                ><span id="page-total" class="page-total">/ –</span
                 ><button id="next-page" aria-label="Next page">›</button>
             </div>
             <div class="tool-group find-controls">
@@ -71,6 +71,7 @@
                     −</button
                 ><button
                     id="zoom-label"
+                    class="zoom-label"
                     title="Fit page width"
                     aria-label="Fit page width"
                 >
@@ -86,7 +87,7 @@
                 ><button id="highlight-tool">Highlight</button
                 ><button id="comment-tool">Comment</button>
             </div>
-            <div class="toolbar-spacer"></div>
+            <div class="toolbar-spacer" id="toolbar-spacer"></div>
             <span
                 id="acquisition-status"
                 class="active-label"
@@ -127,6 +128,54 @@
                 ><button id="delete-annotation">Delete selected</button>
             </div>
         </header>
+        <!-- Mounted before the toolbar spacer only while the tab has a quick view. -->
+        <template id="second-paper-template">
+            <div
+                id="second-paper"
+                class="second-paper"
+                role="group"
+                aria-label="Second paper controls"
+            >
+                <span class="divider"></span>
+                <span class="second-label">Second paper:</span>
+                <div class="tool-group page-controls">
+                    <button id="second-previous-page" aria-label="Second paper: previous page">‹</button
+                    ><label
+                        ><span class="sr-only">Second paper: page number</span
+                        ><input
+                            id="second-page-input"
+                            type="number"
+                            min="1"
+                            value="1" /></label
+                    ><span id="second-page-total" class="page-total">/ –</span
+                    ><button id="second-next-page" aria-label="Second paper: next page">›</button>
+                </div>
+                <div class="tool-group find-controls">
+                    <input
+                        id="second-find-input"
+                        type="search"
+                        placeholder="Find"
+                        aria-label="Second paper: find in document"
+                    /><button id="second-find-previous" aria-label="Second paper: previous match">
+                        ↑</button
+                    ><button id="second-find-next" aria-label="Second paper: next match">↓</button>
+                </div>
+                <div class="tool-group">
+                    <button id="second-zoom-out" title="Zoom out" aria-label="Second paper: zoom out">
+                        −</button
+                    ><button
+                        id="second-zoom-label"
+                        class="zoom-label"
+                        title="Fit page width"
+                        aria-label="Second paper: fit page width"
+                    >
+                        Fit width</button
+                    ><button id="second-zoom-in" title="Zoom in" aria-label="Second paper: zoom in">
+                        +
+                    </button>
+                </div>
+            </div>
+        </template>
         <main class="workspace">
             <aside id="outline-panel" class="app-sidebar outline">
                 <div class="panel-heading">

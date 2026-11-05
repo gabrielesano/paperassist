@@ -93,6 +93,69 @@ function report(error) {
 function currentReader() {
     return state.active || state.current?.main;
 }
+// The page, find and zoom groups are bound to a paper, not to the clicked pane: the main
+// group always drives the tab's main paper and the Second paper group its quick view.
+const mainReader = () => state.current?.main;
+const previewReader = () => state.current?.preview;
+// Each reader keeps its own query, so a tab switch or a new quick view restores the right text.
+function refreshControls(prefix, reader) {
+    const control = (name) => $(`#${prefix}${name}`);
+    control("page-input").value = reader?.viewer.currentPageNumber || 1;
+    control("page-input").max = reader?.pdf?.numPages || 1;
+    control("page-total").textContent = `/ ${reader?.pdf?.numPages || "–"}`;
+    const query = reader?.findQuery ?? "";
+    if (control("find-input").value !== query) control("find-input").value = query;
+    control("zoom-label").textContent =
+        reader && Number.isFinite(reader.viewer.currentScale)
+            ? `${Math.round(reader.viewer.currentScale * 100)}%`
+            : "Fit width";
+}
+// Mounted rather than hidden, so a closed quick view leaves no controls to tab into.
+let secondPaperFor = null;
+function syncSecondPaper() {
+    const reader = previewReader() ?? null;
+    if (reader !== secondPaperFor) {
+        $("#second-paper")?.remove();
+        secondPaperFor = reader;
+        if (reader) {
+            $("#toolbar-spacer").before($("#second-paper-template").content.cloneNode(true));
+            wireControls("second-", previewReader);
+        }
+    }
+    if (reader) refreshControls("second-", reader);
+    placeSecondPaper();
+}
+// Opening a quick view must not change the toolbar height, so the group takes the first row if
+// it fits, else the free end of the options row, and wraps onto a row of its own only when
+// neither has room. Each choice is measured by trying it: moving a node forces layout but not a
+// paint, so the browser only ever shows the settled result. A line-start divider would hang.
+function placeSecondPaper() {
+    const group = $("#second-paper");
+    if (!group) return;
+    const options = $("#editor-options");
+    const focused = group.contains(document.activeElement) ? document.activeElement : null;
+    const firstRowBottom = () => $("#select-tool").parentElement.getBoundingClientRect().bottom;
+    // The save controls follow the group, so they must stay on the first row as well.
+    const rowFits = () =>
+        group.getBoundingClientRect().top < firstRowBottom() &&
+        $(".save-controls").getBoundingClientRect().top < firstRowBottom();
+    const place = (parent, before, wrapped) => {
+        parent.insertBefore(group, before);
+        group.classList.toggle("wrapped", wrapped);
+    };
+    place($(".toolbar"), $("#toolbar-spacer"), false);
+    if (!rowFits()) {
+        place(options, null, true);
+        if (options.scrollWidth > options.clientWidth)
+            place($(".toolbar"), $("#toolbar-spacer"), true);
+    }
+    // Moving a node drops focus, which would interrupt typing in the second find field.
+    focused?.focus({ preventScroll: true });
+}
+const placement = new ResizeObserver(placeSecondPaper);
+// The statuses beside Save change width and can push the row over its limit.
+for (const target of [".toolbar", ".save-controls", "#acquisition-status"])
+    placement.observe($(target));
 function refreshToolbar() {
     const reader = currentReader();
     updateEditorOptions();
@@ -103,9 +166,8 @@ function refreshToolbar() {
     // Commenting must leave the editor mode, which is impossible until the editors are ready.
     $("#comment-tool").disabled = !!reader && !reader.readOnly &&
         (!reader.editorReady || reader.modePending !== null);
-    $("#page-input").value = reader?.viewer.currentPageNumber || 1;
-    $("#page-input").max = reader?.pdf?.numPages || 1;
-    $("#page-total").textContent = `/ ${reader?.pdf?.numPages || "–"}`;
+    refreshControls("", mainReader());
+    syncSecondPaper();
     for (const pane of document.querySelectorAll(".pane"))
         pane.classList.toggle("active", pane === reader?.element);
     const status = $("#save-status");
@@ -119,10 +181,6 @@ function refreshToolbar() {
             : "Saved";
     status.title = reader?.error || "";
     $("#save-pdf").disabled = !reader || reader.readOnly || !reader.dirty || reader.saving;
-    $("#zoom-label").textContent =
-        reader && Number.isFinite(reader.viewer.currentScale)
-            ? `${Math.round(reader.viewer.currentScale * 100)}%`
-            : "Fit width";
 }
 const callbacks = {
     activate(reader) {
@@ -152,7 +210,7 @@ const callbacks = {
         refreshToolbar();
     },
     position(reader) {
-        if (reader === currentReader()) refreshToolbar();
+        if (reader === mainReader() || reader === previewReader()) refreshToolbar();
     },
     status() {
         refreshToolbar();
@@ -1577,18 +1635,6 @@ window.addEventListener("beforeunload", (event) => {
         event.returnValue = "";
     }
 });
-const zoom = (change) => {
-    const reader = currentReader();
-    if (!reader) return;
-    reader.zoomed = true;
-    change(reader.viewer);
-};
-$("#zoom-in").onclick = () => zoom((viewer) => viewer.increaseScale());
-$("#zoom-out").onclick = () => zoom((viewer) => viewer.decreaseScale());
-$("#zoom-label").onclick = () => {
-    if (currentReader())
-        currentReader().viewer.currentScaleValue = "page-width";
-};
 const editorModes = {
     "select-tool": pdfjs.AnnotationEditorType.NONE,
     "ink-tool": pdfjs.AnnotationEditorType.INK,
@@ -1667,6 +1713,8 @@ function updateEditorOptions() {
             chip.dataset.color.toLowerCase() === color,
         );
     }
+    // Showing or hiding controls changes how much room the Second paper group has.
+    placeSecondPaper();
 }
 
 function setParam(type, value) {
@@ -1779,54 +1827,59 @@ $("#panels-button").onclick = () => {
 };
 $("#outline-toggle").onclick = () => setPanel("outline", false);
 $("#details-toggle").onclick = () => setPanel("details", false);
-$("#previous-page").onclick = () => {
-    const reader = currentReader();
-    if (reader)
-        reader.viewer.currentPageNumber = Math.max(
-            1,
-            reader.viewer.currentPageNumber - 1,
-        );
-};
-$("#next-page").onclick = () => {
-    const reader = currentReader();
-    if (reader?.pdf)
-        reader.viewer.currentPageNumber = Math.min(
-            reader.pdf.numPages,
-            reader.viewer.currentPageNumber + 1,
-        );
-};
-$("#page-input").onchange = (event) => {
-    const reader = currentReader();
-    if (reader?.pdf)
-        reader.viewer.currentPageNumber = Math.max(
-            1,
-            Math.min(reader.pdf.numPages, Number(event.target.value) || 1),
-        );
-};
-function find(type = "", backwards = false) {
-    const reader = currentReader();
-    if (!reader) return;
-    reader.bus.dispatch("find", {
-        source: reader,
-        type,
-        query: $("#find-input").value,
-        phraseSearch: true,
-        highlightAll: true,
-        findPrevious: backwards,
-        caseSensitive: false,
-        entireWord: false,
-        matchDiacritics: false,
-    });
+// Both groups share these handlers; `getReader` says which paper a group drives.
+function wireControls(prefix, getReader) {
+    const control = (name) => $(`#${prefix}${name}`);
+    const goTo = (page) => {
+        const reader = getReader();
+        if (reader?.pdf)
+            reader.viewer.currentPageNumber = Math.max(1, Math.min(reader.pdf.numPages, page));
+    };
+    const zoom = (change) => {
+        const reader = getReader();
+        if (!reader) return;
+        reader.zoomed = true;
+        change(reader.viewer);
+    };
+    const find = (type = "", backwards = false) => {
+        const reader = getReader();
+        if (!reader) return;
+        reader.bus.dispatch("find", {
+            source: reader,
+            type,
+            query: control("find-input").value,
+            phraseSearch: true,
+            highlightAll: true,
+            findPrevious: backwards,
+            caseSensitive: false,
+            entireWord: false,
+            matchDiacritics: false,
+        });
+    };
+    control("previous-page").onclick = () => goTo((getReader()?.viewer.currentPageNumber ?? 1) - 1);
+    control("next-page").onclick = () => goTo((getReader()?.viewer.currentPageNumber ?? 1) + 1);
+    control("page-input").onchange = (event) => goTo(Number(event.target.value) || 1);
+    control("find-input").oninput = (event) => {
+        const reader = getReader();
+        if (reader) reader.findQuery = event.target.value;
+        find();
+    };
+    control("find-input").onkeydown = (event) => {
+        if (event.key === "Enter") {
+            event.preventDefault();
+            find("again", event.shiftKey);
+        }
+    };
+    control("find-next").onclick = () => find("again");
+    control("find-previous").onclick = () => find("again", true);
+    control("zoom-in").onclick = () => zoom((viewer) => viewer.increaseScale());
+    control("zoom-out").onclick = () => zoom((viewer) => viewer.decreaseScale());
+    control("zoom-label").onclick = () => {
+        const reader = getReader();
+        if (reader) reader.viewer.currentScaleValue = "page-width";
+    };
 }
-$("#find-input").oninput = () => find();
-$("#find-input").onkeydown = (event) => {
-    if (event.key === "Enter") {
-        event.preventDefault();
-        find("again", event.shiftKey);
-    }
-};
-$("#find-next").onclick = () => find("again");
-$("#find-previous").onclick = () => find("again", true);
+wireControls("", mainReader);
 function applyConfig(config) {
     state.providers = config.providers;
     state.proxy = config.proxy || "";
@@ -1842,4 +1895,4 @@ api("/api/config")
         applyConfig(config);
     })
     .catch((error) => report(`Could not connect: ${error.message}`));
-installShortcuts({ currentReader });
+installShortcuts({ currentReader, mainReader, previewReader });

@@ -112,6 +112,11 @@ reference that is already in your library shows it in a split below (or beside) 
 paper you are reading, so you can consult it without losing your place. A quick-view
 PDF can be moved into its own tab. Drag the divider to resize the split.
 
+While a quick view is open, the toolbar gains a **Second paper** group with its own
+page, find and zoom controls. The first set always drives the main paper, the second
+one the quick view, whichever pane you clicked last; annotation tools still follow the
+last clicked pane.
+
 Click a reference card, or its citation count, to step through where the paper cites
 it: each click centres the next citation in the reader and outlines it briefly,
 wrapping after the last. Citations are found through the PDF's own links when it has
@@ -133,7 +138,10 @@ Press `?` or use the keyboard button in the toolbar for the full list. The main 
 - `N`/`J` and `P`/`K` next and previous page; `Home`/`End` first and last page; `G`
   goes to a page number; `Esc` in a toolbar field returns to the document, where the
   arrow, Space and Page Up/Down keys scroll.
-- `Ctrl+F` finds in the open paper; `Ctrl` with `+`, `-` or `0` zooms and fits the width.
+- `Ctrl+F` finds in the paper you last clicked; `Ctrl` with `+`, `-` or `0` zooms and
+  fits the width. With a quick view open, page, find and zoom keys (and `G`) use the
+  last clicked pane and its toolbar group; `Esc` in a Second paper field returns to the
+  quick view.
 - `V`, `D`, `H`, `C` choose Select, Draw, Highlight and Comment; `Ctrl+Z` and
   `Ctrl+Shift+Z` (or `Ctrl+Y`) undo and redo annotation edits; `Ctrl+S` saves.
 - `L` opens the library; `,` and `.` switch tabs; `X` closes the tab; `B` hides the
