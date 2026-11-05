@@ -322,7 +322,8 @@ def create_app(data_dir, source='default', switch=None):
         library.get_document(document_id)
         def check(job, cancel):
             with download_lock:
-                return inbox.check_folder(library, document_id, reference_id, settings.load(data_dir).inbox)
+                cfg = settings.load(data_dir)
+                return inbox.check_folder(library, document_id, reference_id, cfg.inbox, cfg)
         return submit(check)
 
     @app.post('/api/documents/<document_id>/references/<reference_id>/link-file')

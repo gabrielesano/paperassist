@@ -164,8 +164,12 @@ corresponding setting is empty.
   institution's access service. It is used only to build links that you click;
   PaperAssist never downloads through it.
 - **Folder for manual downloads** is where you save PDFs obtained yourself. **Check
-  access** on a reference looks there and links a matching file, which keeps
-  publisher downloads under your control.
+  folder** on a reference first identifies it (Crossref, and ADS when configured),
+  then looks there and links a matching PDF, which keeps publisher downloads under
+  your control. The library keeps a copy named after the paper, such as
+  `Antolin_2012_ApJ_745_152.pdf`, never the browser's download name; the folder
+  itself is never changed. A PDF you pick by hand gets the same name but stays
+  marked for review.
   **Browse…** opens your system's folder window (zenity or kdialog on Linux when
   installed, otherwise Tk); the chosen folder is kept when you press **Save**.
 

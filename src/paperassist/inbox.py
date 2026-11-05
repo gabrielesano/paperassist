@@ -1,7 +1,8 @@
 """Link PDFs the user downloaded by hand into a watched folder.
 
 The folder is only ever read: files are verified against the reference, then a copy is
-imported into the library. Nothing in the folder is written, moved or deleted.
+imported into the library under a deterministic name (author, year, journal reference),
+never the browser's download name. Nothing in the folder is written, moved or deleted.
 """
 
 import hashlib
@@ -11,9 +12,10 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from paperassist import references
+from paperassist import references, retrieval
 from paperassist.citation import fold, pdf_name, publication
 from paperassist.retrieval import DOI_PATTERN, MAX_PDF, _arxiv_id
+from paperassist.settings import Settings
 
 MAX_FILES = 50
 MAX_CANDIDATES = 5
@@ -78,23 +80,49 @@ def _verdict(ref, file):
 
 
 def _library_name(ref, original):
+    """The identified paper's name, else one read from the citation, else the download name."""
     identity = ref.get('identity') or {}
-    surname = ref.get('authors') or identity.get('first_author')
-    return pdf_name(surname, identity.get('year') or str(ref.get('year') or '')[:4], identity.get('publication')) \
-        if identity and surname else original
+    year = str(identity.get('year') or ref.get('year') or '')[:4]
+    surname = identity.get('first_author') or ref.get('authors')
+    if not surname:
+        return original  # a bare year would be a meaningless file name
+    fingerprint = identity.get('publication') if identity else publication(ref.get('raw') or '', year)
+    return pdf_name(surname, year, fingerprint)
 
 
-def _import(library, document_id, ref, path, verified):
+def _import(library, document_id, ref, path, verified, note=''):
     name = _library_name(ref, path.name)
     with path.open('rb') as stream:
         document = library.import_stream(stream, name)
-    if verified and ref.get('identity'):
-        library.apply_verified(document['id'], ref['identity'], name)
+    # A duplicate that is still unreviewed can now be verified; a user correction is never touched.
+    if verified and ref.get('identity') and document['metadata_status'] == 'needs_review':
+        document = library.apply_verified(document['id'], ref['identity'], name)
     references.link(library, document_id, ref['id'], document['id'])
-    summary = f'Linked from your folder: {path.name}.'
+    stored = document['filename']
+    summary = f'Linked from your folder as {stored}' + (f' (was {path.name}).' if stored != path.name else '.')
+    summary += note if verified else ' Chosen by hand, not verified.'
     references.set_retrieval(library, document_id, ref['id'], {'version': 2, 'status': 'local', 'summary': summary,
                                                                 'attempts': [], 'document_id': document['id']})
     return document, summary
+
+
+def _identify(library, document_id, ref, cfg):
+    """Identify an unidentified reference like a search does, keeping the result for later actions.
+
+    Returns the reference and a note for the summary when identification did not succeed.
+    """
+    if ref.get('identity'):
+        return ref, ''
+    try:
+        identity = retrieval._identity(ref, [], cfg)
+    except Exception:
+        identity = None  # network or lookup trouble must not break the folder check
+    if not identity:
+        return ref, ' The reference could not be identified online.'
+    # Keep an earlier search result visible; only the identity is new.
+    previous = ref.get('retrieval') or {'version': 2, 'status': 'identified', 'summary': '', 'attempts': []}
+    references.set_retrieval(library, document_id, ref['id'], {**previous, 'identity': identity})
+    return {**ref, 'identity': identity, 'doi': ref.get('doi') or identity.get('doi', '')}, ''
 
 
 def _find_reference(library, document_id, reference_id):
@@ -109,26 +137,26 @@ def _candidate(entry):
             'modified': datetime.fromtimestamp(entry['mtime'], timezone.utc).isoformat()}
 
 
-def check_folder(library, document_id, reference_id, folder):
+def check_folder(library, document_id, reference_id, folder, cfg=None):
     if not folder:
         return NO_FOLDER
-    ref = _find_reference(library, document_id, reference_id)
+    ref, note = _identify(library, document_id, _find_reference(library, document_id, reference_id), cfg or Settings())
     verdicts = [(entry, _verdict(ref, {**entry, **_read(entry['path'])})) for entry in _scan(Path(folder))]
     verified = [entry for entry, verdict in verdicts if verdict == 'verified']
     # The same paper downloaded twice is one candidate, not an ambiguity.
     unique = list({hashlib.sha256(entry['path'].read_bytes()).hexdigest(): entry for entry in verified}.values()) if len(verified) > 1 else verified
     if len(unique) > 1:
         return {'status': 'ambiguous', 'candidates': [_candidate(e) for e in unique[:MAX_CANDIDATES]],
-                'summary': 'Several PDFs in your folder match this reference; choose one.'}
+                'summary': 'Several PDFs in your folder match this reference; choose one.' + note}
     if unique:
-        document, summary = _import(library, document_id, ref, unique[0]['path'], True)
+        document, summary = _import(library, document_id, ref, unique[0]['path'], True, note)
         return {'status': 'linked', 'document_id': document['id'], 'filename': document['filename'], 'summary': summary}
     recent = datetime.now(timezone.utc).timestamp() - RECENT.total_seconds()
     open_ones = [e for e, verdict in verdicts if verdict in ('unmatched', 'unreadable') and e['mtime'] >= recent]
     if open_ones:
         return {'status': 'unverified', 'candidates': [_candidate(e) for e in open_ones[:MAX_CANDIDATES]],
-                'summary': 'No PDF could be verified automatically; choose one if it is the right paper.'}
-    return {'status': 'none', 'summary': f'No PDF in {folder} matches this reference.'}
+                'summary': 'No PDF could be verified automatically; choose one if it is the right paper.' + note}
+    return {'status': 'none', 'summary': f'No PDF in {folder} matches this reference.' + note}
 
 
 def link_file(library, document_id, reference_id, folder, name):

@@ -5,6 +5,7 @@ import time
 import unittest
 from io import BytesIO
 from pathlib import Path
+from unittest import mock
 
 from paperassist import inbox, references
 from paperassist.library import Library
@@ -39,6 +40,10 @@ class InboxTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # No test may reach Crossref; a test that wants an identity sets the mock's return value.
+        patcher = mock.patch('paperassist.retrieval._identity', return_value=None)
+        self.identify = patcher.start()
+        self.addCleanup(patcher.stop)
         root = Path(self.tmp.name)
         self.folder = root / 'downloads'
         self.folder.mkdir()
@@ -62,6 +67,9 @@ class InboxTests(unittest.TestCase):
     def check(self):
         return inbox.check_folder(self.library, self.source, '0', str(self.folder))
 
+    def stored(self):
+        return sorted(p.name for p in self.library.originals.iterdir())
+
     def current(self):
         return references.get(self.library, self.source)['references'][0]
 
@@ -71,12 +79,13 @@ class InboxTests(unittest.TestCase):
         self.put('paper.pdf', text_pdf(FILLER, f'Rappazzo et al. doi:{DOI}'))
         before = self.snapshot()
         result = self.check()
-        self.assertEqual((result['status'], result['summary']), ('linked', 'Linked from your folder: paper.pdf.'))
+        self.assertEqual((result['status'], result['summary']),
+                         ('linked', 'Linked from your folder as Rappazzo_2013_ApJ_771_76.pdf (was paper.pdf). The reference could not be identified online.'))
         ref = self.current()
         self.assertEqual((ref['local_document_id'], ref['manual_link']), (result['document_id'], True))
         self.assertEqual((ref['retrieval']['version'], ref['retrieval']['status'], ref['retrieval']['summary']),
-                         (2, 'local', 'Linked from your folder: paper.pdf.'))
-        self.assertEqual(self.library.get_document(result['document_id'])['filename'], 'paper.pdf')
+                         (2, 'local', result['summary']))
+        self.assertEqual(self.library.get_document(result['document_id'])['filename'], 'Rappazzo_2013_ApJ_771_76.pdf')
         self.assertEqual(self.snapshot(), before)
 
     def test_title_and_first_author_verify_and_name_the_copy_from_the_identity(self):
@@ -88,7 +97,7 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(result['status'], 'linked')
         document = self.library.get_document(result['document_id'])
         self.assertEqual((result['filename'], document['filename']), ('Rappazzo_2013_ApJ_771_76.pdf',) * 2)
-        self.assertEqual(result['summary'], 'Linked from your folder: download (3).pdf.')
+        self.assertEqual(result['summary'], 'Linked from your folder as Rappazzo_2013_ApJ_771_76.pdf (was download (3).pdf).')
 
     def test_title_without_the_first_author_is_not_enough(self):
         self.reference({**REF, 'identity': {'provider': 'crossref', 'doi': DOI, 'title': TITLE, 'first_author': 'Rappazzo', 'year': 2013}})
@@ -130,12 +139,16 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(len(self.library.list_documents()), 1)
         ref = inbox.link_file(self.library, self.source, '0', str(self.folder), 'scan.pdf')
         self.assertEqual((ref['manual_link'], ref['retrieval']['status']), (True, 'local'))
-        self.assertEqual(self.library.get_document(ref['local_document_id'])['filename'], 'scan.pdf')
+        document = self.library.get_document(ref['local_document_id'])
+        self.assertEqual((document['filename'], document['metadata_status']), ('Rappazzo_2013_ApJ_771_76.pdf', 'needs_review'))
+        self.assertIn('Rappazzo_2013_ApJ_771_76.pdf', self.stored())
+        self.assertEqual(ref['retrieval']['summary'],
+                         'Linked from your folder as Rappazzo_2013_ApJ_771_76.pdf (was scan.pdf). Chosen by hand, not verified.')
 
     def test_nothing_matching_and_no_folder(self):
         self.put('old.pdf', text_pdf(FILLER, 'Unrelated.'), age=90 * 86400)
         result = self.check()
-        self.assertEqual((result['status'], result['summary']), ('none', f'No PDF in {self.folder} matches this reference.'))
+        self.assertEqual((result['status'], result['summary']), ('none', f'No PDF in {self.folder} matches this reference. The reference could not be identified online.'))
         self.assertEqual(inbox.check_folder(self.library, self.source, '0', ''),
                          {'status': 'not_configured', 'summary': 'Set a folder for manual downloads in Sources.'})
 
@@ -165,9 +178,102 @@ class InboxTests(unittest.TestCase):
             inbox.link_file(self.library, self.source, '0', '', 'x.pdf')
         self.assertEqual(len(self.library.list_documents()), 1)
 
+    def test_an_unidentified_reference_is_identified_then_verified_and_stored_under_its_name(self):
+        identity = {'provider': 'crossref', 'doi': DOI, 'title': TITLE, 'first_author': 'Rappazzo', 'year': 2013,
+                    'authors': 'A. F. Rappazzo, M. Velli', 'publication': ['APJ', '771', '76', '2013'], 'journal': 'ApJ'}
+        self.identify.return_value = identity
+        # Only the identified DOI can verify this file: the reference itself carries none.
+        self.put('1-s2.0-S0000-main.pdf', text_pdf(FILLER, f'doi:{DOI}'))
+        before = self.snapshot()
+        result = self.check()
+        self.assertEqual(result['summary'], 'Linked from your folder as Rappazzo_2013_ApJ_771_76.pdf (was 1-s2.0-S0000-main.pdf).')
+        ref = self.current()
+        self.assertEqual((ref['identity'], ref['doi']), (identity, DOI))
+        document = self.library.get_document(result['document_id'])
+        self.assertEqual((document['metadata_status'], document['title']), ('verified', TITLE))
+        self.assertEqual(self.stored(), ['Rappazzo_2013_ApJ_771_76.pdf', 'source.pdf'])
+        self.assertEqual(self.snapshot(), before)
 
+    def test_a_stored_identity_is_not_looked_up_again(self):
+        self.reference({**REF, 'identity': {'provider': 'crossref', 'doi': DOI, 'first_author': 'Rappazzo', 'year': 2013}})
+        self.check()
+        self.identify.assert_not_called()
+
+    def test_identity_found_without_a_match_is_kept_for_later(self):
+        self.identify.return_value = {'provider': 'crossref', 'doi': DOI, 'first_author': 'Rappazzo', 'year': 2013}
+        self.put('old.pdf', text_pdf(FILLER, 'Unrelated.'), age=90 * 86400)
+        result = self.check()
+        self.assertEqual((result['status'], result['summary']), ('none', f'No PDF in {self.folder} matches this reference.'))
+        self.assertEqual(self.current()['identity']['doi'], DOI)
+
+    def test_failed_or_erroring_identification_falls_back_to_the_citation(self):
+        self.reference({**REF, 'doi': DOI})
+        self.identify.side_effect = OSError('offline')
+        self.put('paper.pdf', text_pdf(FILLER, f'Rappazzo et al. doi:{DOI}'))
+        result = self.check()
+        self.assertEqual(result['status'], 'linked')
+        self.assertEqual(result['filename'], 'Rappazzo_2013_ApJ_771_76.pdf')
+        self.assertTrue(result['summary'].endswith('The reference could not be identified online.'))
+        self.assertNotIn('identity', self.current())
+        # Without an identity the file is linked by name only and its metadata stays reviewable.
+        self.assertEqual(self.library.get_document(result['document_id'])['metadata_status'], 'needs_review')
+
+    def test_a_citation_without_a_journal_reference_gives_author_and_year(self):
+        self.reference({**REF, 'raw': 'Rappazzo, A. F. 2013, a private communication', 'doi': DOI})
+        self.put('paper.pdf', text_pdf(FILLER, f'Rappazzo doi:{DOI}'))
+        self.assertEqual(self.check()['filename'], 'Rappazzo_2013.pdf')
+
+    def test_the_download_name_is_kept_only_without_a_surname(self):
+        self.reference({**REF, 'authors': '', 'year': '', 'doi': DOI})
+        self.put('Some Download.pdf', text_pdf(FILLER, f'doi:{DOI}'))
+        result = self.check()
+        self.assertEqual(result['filename'], 'Some Download.pdf')
+        self.assertIn('Some_Download.pdf', self.stored())
+
+    def test_a_duplicate_already_in_the_library_is_linked_and_verified_once(self):
+        identity = {'provider': 'crossref', 'doi': DOI, 'title': TITLE, 'first_author': 'Rappazzo', 'year': 2013,
+                    'publication': ['APJ', '771', '76', '2013']}
+        self.reference({**REF, 'identity': identity})
+        data = text_pdf(FILLER, f'Rappazzo doi:{DOI}')
+        existing = self.library.import_stream(BytesIO(data), 'download.pdf')
+        self.put('copy.pdf', data)
+        result = self.check()
+        self.assertEqual(result['document_id'], existing['id'])
+        self.assertEqual(len(self.library.list_documents()), 2)
+        self.assertEqual(self.library.get_document(existing['id'])['metadata_status'], 'verified')
+        self.assertIn('Rappazzo_2013_ApJ_771_76.pdf', self.stored())
+
+    def test_a_corrected_duplicate_is_linked_but_never_changed(self):
+        self.reference({**REF, 'identity': {'provider': 'crossref', 'doi': DOI, 'title': TITLE, 'first_author': 'Rappazzo', 'year': 2013}})
+        data = text_pdf(FILLER, f'Rappazzo doi:{DOI}')
+        existing = self.library.import_stream(BytesIO(data), 'mine.pdf')
+        self.library.update_metadata(existing['id'], {'title': 'My own title'}, status='corrected')
+        self.put('copy.pdf', data)
+        result = self.check()
+        document = self.library.get_document(existing['id'])
+        self.assertEqual((result['document_id'], document['title'], document['metadata_status']), (existing['id'], 'My own title', 'corrected'))
+
+    def test_a_picked_file_with_an_identity_is_named_but_not_verified(self):
+        self.reference({**REF, 'identity': {'provider': 'crossref', 'doi': DOI, 'title': TITLE, 'first_author': 'Rappazzo',
+                                            'year': 2013, 'publication': ['APJ', '771', '76', '2013']}})
+        self.put('scan.pdf', pdf() + b'\n%scan')
+        ref = inbox.link_file(self.library, self.source, '0', str(self.folder), 'scan.pdf')
+        document = self.library.get_document(ref['local_document_id'])
+        self.assertEqual((document['filename'], document['metadata_status']), ('Rappazzo_2013_ApJ_771_76.pdf', 'needs_review'))
+        self.assertIn('Rappazzo_2013_ApJ_771_76.pdf', self.stored())
+        self.assertTrue(ref['retrieval']['summary'].endswith('Chosen by hand, not verified.'))
+
+    def test_the_folder_files_keep_their_bytes_and_modification_time(self):
+        self.put('a.pdf', text_pdf(FILLER, f'Rappazzo doi:{DOI}'), age=3600)
+        self.reference({**REF, 'doi': DOI})
+        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.folder.iterdir()}
+        self.check()
+        self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.folder.iterdir()}, before)
+
+
+@mock.patch('paperassist.retrieval._identity', return_value=None)
 class InboxEndpointTests(unittest.TestCase):
-    def test_check_folder_runs_as_a_job_and_link_file_returns_the_reference(self):
+    def test_check_folder_runs_as_a_job_and_link_file_returns_the_reference(self, identify):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -200,3 +306,5 @@ class InboxEndpointTests(unittest.TestCase):
         self.assertEqual(linked.status_code, 200)
         self.assertEqual(linked.json['retrieval']['status'], 'local')
         self.assertEqual(linked.json['local_document_id'], 2)
+        # The job passes the stored settings on, so identification can use the email and ADS token.
+        self.assertEqual(identify.call_args.args[2].inbox, str(folder))
