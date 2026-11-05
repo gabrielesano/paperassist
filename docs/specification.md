@@ -156,7 +156,8 @@ and preserves explicit manual associations.
 ## Persistence and retrieval
 
 Keep immutable originals separate from working annotated PDFs and per-view state.
-PDF.js native ink/highlight persistence must survive closing and reopening; custom
+Ink and highlights are standard PDF annotations that survive closing and reopening
+and stay readable by other viewers, including those written by the web reader; custom
 comments may use a sidecar database model. Test the actual round trip before relying
 on editor internals. A single save authority/revision check must prevent two views
 of one PDF from overwriting each other's edits. Failed saves must be visible.
@@ -164,8 +165,8 @@ PDF writes require explicit Save or Ctrl/Cmd+S. Timers, close, navigation, previ
 and tab promotion must never save implicitly. Display the current save state.
 Closing or replacing a modified pane offers Save, Discard and Cancel; cancellation
 keeps the reader and edits. Collect decisions before closing a multi-pane tab.
-A failed save keeps the unsaved state and requires an explicit retry. Browser
-exit warns about pending work. Read-only previews may show the last saved version
+A failed save keeps the unsaved state and requires an explicit retry. Quitting
+the application warns about pending work. Read-only previews may show the last saved version
 of an open modified PDF, clearly labeled; its editable tab retains unsaved edits.
 
 Use a single local backend per library with an effective process lock and per-work
@@ -189,11 +190,24 @@ searches only on request. Support linking a manually obtained local PDF.
 
 ## Technical direction
 
-Python and SQLite handle library data and retrieval. A small local HTTP app serves
-HTML/CSS and vanilla JavaScript modules. Use a pinned, locally served PDF.js viewer
-and its capable native layers/editors. A small backend library is appropriate when
-it removes substantial HTTP plumbing. Bind to loopback, serve documents by controlled
-IDs, and protect write requests from unrelated web pages.
+Python and SQLite handle library data and retrieval. The interface is a native
+desktop application: Qt Widgets through PySide6, with MuPDF through PyMuPDF for
+rendering, text, search, links and annotations. It calls the Python library modules
+directly, without an HTTP layer. Pages render in a separate process so the interface
+stays responsive, and only pages near the visible area keep their pixels. MuPDF is
+AGPL-3.0; distributed builds include the corresponding source, as the GPL requires.
+
+Resource use is a product requirement. Measure memory, render time and interface
+stalls with real papers for reader changes; a lighter design is worth extra setup.
+A browser engine measured 1.1-2.2 GiB with four papers open, the native prototype
+0.3-0.5 GiB.
+
+During the migration the web interface stays usable with its current guarantees:
+a loopback HTTP app serves HTML/CSS, vanilla JavaScript modules and a pinned, locally
+served PDF.js viewer, documents are served by controlled IDs, and write requests are
+protected from unrelated web pages. It is removed, with the HTTP server and the
+pywebview window, once the native interface passes the parity checklist in
+docs/development/native-migration.md.
 
 Evaluate a targeted parser such as pypdf for background bulk metadata extraction,
 independent of the reader tab. Test bounds on problematic files; limiting page count
@@ -214,6 +228,8 @@ ambiguous or incomplete results, invalid downloads and Google fallback.
 
 ## Primary references
 
+- [PyMuPDF documentation](https://pymupdf.readthedocs.io/)
+- [Qt for Python (PySide6)](https://doc.qt.io/qtforpython-6/)
 - [PDF.js component example](https://github.com/mozilla/pdf.js/blob/master/examples/components/simpleviewer.mjs)
 - [PDF.js document API](https://mozilla.github.io/pdf.js/api/draft/module-pdfjsLib-PDFDocumentProxy.html)
 - [pypdf metadata](https://pypdf.readthedocs.io/en/stable/user/metadata.html)

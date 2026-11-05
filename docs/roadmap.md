@@ -7,14 +7,18 @@ records are in [development/](development/).
 
 1. Library and import: deterministic metadata, managed originals, SQLite catalog,
    hash deduplication, manual correction and tested persistence.
-2. Reader: local PDF.js, compact three-column workspace, native drawing and
-   highlights, comments, independent panes, internal tabs and save/reopen proof.
-3. Server and references: local API, controlled background work, citation analysis,
-   shared local resolution, selected open-access retrieval and web-search fallback.
-4. Desktop window: source preview with safe close and existing-server attachment;
-   complete interactive and Windows/macOS checks, then file delivery, PDF
-   associations and standalone builds per OS/architecture.
-   See the [desktop plan](development/desktop-plan.md).
+2. Native reader (Qt Widgets + MuPDF): tabs, quick view, selection, highlights and
+   explicit save; then drawing, comments and editing existing annotations,
+   compatible with PDFs annotated by the web reader.
+3. References and background work without HTTP: citation analysis, shared local
+   resolution, selected open-access retrieval and web-search fallback, called
+   directly by the native interface.
+4. Native application parity with the web interface, following the
+   [migration checklist](development/native-migration.md): library, references
+   column, comments, preferences, shortcuts and accessibility. Then standalone
+   builds and PDF associations per OS/architecture, and removal of the web
+   interface, the HTTP server and the pywebview window
+   ([desktop plan](development/desktop-plan.md), transitional).
 
 ## Acceptance sequence
 
@@ -24,10 +28,12 @@ records are in [development/](development/).
 - Verify local citation ranking and visibly partial results against manually checked examples.
 - Exercise local-file reuse, download selection, recoverable failures and search fallback.
 - Check accessibility, narrow-window layout, active-document focus, and English UI.
-- Verify desktop close/reopen, existing-server attachment and platform installation.
+- Verify application close/reopen, one owner per library and platform installation.
+- Measure memory, render time and interface stalls with the reference papers.
 
 ## Later extensions
 
 OCR, external-file indexing, broader citation-format coverage, advanced search,
 annotation export and bibliographic integrations follow actual observed needs.
+A Rust implementation stays deferred; see the [native stack decision](development/native-stack.md).
 LLMs are not used for importing or organizing the local collection.
