@@ -97,7 +97,8 @@ your API keys and email in `settings.json`, so keep backups private.
   automatically.
 - The reader has an outline, page navigation and zoom. **Draw**, **Highlight** and
   **Select** edit the PDF; **Comment** attaches a note to a selected phrase or page.
-  Comments appear in the right column and mark their phrase in the document.
+  Comments appear in the right column and mark their phrase in the document; clicking
+  a marked phrase selects its comment and shows it in the Comments panel.
 - **PDF edits are saved only when you choose Save** (or press Ctrl/Cmd+S). Closing a
   modified PDF offers Save, Discard or Cancel; switching tabs keeps unsaved edits.
   Comments have their own save button.

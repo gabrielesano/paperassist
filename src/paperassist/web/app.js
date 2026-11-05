@@ -1258,7 +1258,12 @@ function selectComment(reader, note, scroll = false) {
     if (note) revealCommentAnchor(reader, note, scroll);
     else clearCommentAnchor(reader);
     updateEditorOptions();
-    markSelectedNote();
+    // Picking a commented phrase in the document shows its comment in the right column;
+    // the list marks the selection once it has loaded.
+    if (note && state.detail !== "comments") {
+        state.detail = "comments";
+        switchDetail();
+    } else markSelectedNote();
 }
 // Notes have no ids, so rows and selection are matched by content like updateComment does.
 function markSelectedNote() {
