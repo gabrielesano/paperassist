@@ -8,11 +8,37 @@ import re
 import sqlite3
 import tempfile
 import threading
+import unicodedata
 from pathlib import Path
 
 from pypdf import PdfReader
 
+from .citation import pdf_name
 from .metadata import PARSER_VERSION, extract_metadata
+
+RESERVED_NAME = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", re.I)
+# Names that say nothing about the paper; the document id is a better label than these.
+GENERIC_NAME = re.compile(r"(?:download|document|file|untitled)[\d_()-]*|[\d_-]+|[0-9a-f]{16,}", re.I)
+
+
+def safe_filename(name: str) -> str:
+    """Portable PDF file name (Linux, macOS, Windows), or '' when nothing meaningful is left."""
+    name = re.sub(r"\.pdf$", "", unicodedata.normalize("NFC", name), flags=re.I)
+    name = "".join("\0" if c in '<>:"/\\|?*' or c.isspace() or unicodedata.category(c) in ("Cc", "Cf", "Cs") else c
+                   for c in name)
+    stem = re.sub(r"\0+", "_", name)[:120]
+    while len(stem.encode()) > 200:  # file systems limit bytes, not characters
+        stem = stem[:-1]
+    # Leading dots would hide the file; Windows drops trailing dots and spaces.
+    stem = stem.strip("._ ")
+    if not stem or GENERIC_NAME.fullmatch(stem):
+        return ""
+    return f"_{stem}.pdf" if RESERVED_NAME.fullmatch(stem) else f"{stem}.pdf"
+
+
+def _surname(authors: str) -> str:
+    words = re.split(r"\s*(?:[;,]|\band\b)\s*", authors.strip())[0].split()
+    return words[-1] if words else ""
 
 
 class Library:
@@ -33,7 +59,8 @@ class Library:
                     title TEXT NOT NULL, authors TEXT NOT NULL DEFAULT '', year INTEGER,
                     doi TEXT, pages INTEGER NOT NULL, metadata_status TEXT NOT NULL,
                     extracted TEXT NOT NULL, work_id INTEGER, revision INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    stored_name TEXT
                 );
                 CREATE TABLE IF NOT EXISTS works (
                     id INTEGER PRIMARY KEY, preferred_file_id INTEGER REFERENCES documents(id)
@@ -47,6 +74,9 @@ class Library:
                     content TEXT NOT NULL
                 );
             """)
+            if "stored_name" not in {row[1] for row in db.execute("PRAGMA table_info(documents)")}:
+                db.execute("ALTER TABLE documents ADD COLUMN stored_name TEXT")
+        self._reconcile()
 
     @contextmanager
     def _connect(self):
@@ -64,6 +94,87 @@ class Library:
         result = dict(row)
         result["metadata"] = json.loads(result.pop("extracted"))
         return result
+
+    @staticmethod
+    def _stored_name(doc) -> str:
+        # Libraries created before readable names keep <sha256>.pdf until the next open.
+        return doc["stored_name"] or f'{doc["sha256"]}.pdf'
+
+    @staticmethod
+    def _base_name(doc) -> str:
+        """The name shown in the file manager: the identified paper, else the name the user gave."""
+        verified = doc["metadata"].get("verified")
+        if doc["year"] and (doc["metadata_status"] == "verified" or (verified and doc["metadata_status"] == "corrected")):
+            # A user correction wins over the provider's author, but keeps the identified journal reference.
+            surname = (verified or {}).get("first_author") if doc["metadata_status"] == "verified" else ""
+            try:
+                name = safe_filename(pdf_name(surname or _surname(doc["authors"]), doc["year"], (verified or {}).get("publication")))
+            except (KeyError, IndexError, TypeError):
+                name = ""
+            if name:
+                return name
+        return safe_filename(doc["filename"]) or f'Untitled_{doc["id"]}.pdf'
+
+    def _free_name(self, db, doc, base: str) -> str:
+        """Add _2, _3, ... until no other file matches, ignoring case as macOS and Windows do."""
+        own = self._stored_name(doc)
+        used = {(row[1] or row[0] + ".pdf").lower() for row in
+                db.execute("SELECT sha256, stored_name FROM documents WHERE id != ?", (doc["id"],))}
+        used |= {name.lower() for name in os.listdir(self.originals) if name != own}
+        name, number = base, 1
+        while name.lower() in used:
+            number += 1
+            name = f"{base[:-4]}_{number}.pdf"
+        return name
+
+    def _rename(self, document_id: int) -> None:
+        """Move the original to its current readable name; a locked file just keeps the old one until the next try."""
+        with self._lock:
+            with self._connect() as db:
+                doc = self._document(db.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone())
+                base = self._base_name(doc)
+                current = self._stored_name(doc)
+                # A numbered variant (Name_2.pdf) of the wanted name is already right; do not churn.
+                if re.fullmatch(re.escape(base[:-4]) + r"(?:_\d+)?\.pdf", current, re.I):
+                    return
+                new = self._free_name(db, doc, base)
+            old, target = self.originals / current, self.originals / new
+            if not old.is_file():
+                return
+            try:
+                os.replace(old, target)  # `new` is free, so nothing is overwritten
+            except OSError:
+                return
+            try:
+                with self._connect() as db:
+                    db.execute("UPDATE documents SET stored_name = ? WHERE id = ?", (new, document_id))
+            except sqlite3.Error:
+                os.replace(target, old)
+                raise
+
+    def _reconcile(self) -> None:
+        """Finish an interrupted rename, then give legacy <sha256>.pdf originals readable names."""
+        with self._connect() as db:
+            rows = db.execute("SELECT id, sha256, stored_name FROM documents").fetchall()
+        files = {entry.name for entry in os.scandir(self.originals) if entry.name.lower().endswith(".pdf")}
+        names = {row["id"]: row["stored_name"] or row["sha256"] + ".pdf" for row in rows}
+        strays = sorted(files - set(names.values()))
+        # A crash between the file move and the database update leaves a missing file and a stray one.
+        # Hashing is the only safe way to tell which stray belongs to which row, so do it only then.
+        for row in rows:
+            if strays and names[row["id"]] not in files:
+                for name in strays:
+                    with open(self.originals / name, "rb") as stream:
+                        if hashlib.file_digest(stream, "sha256").hexdigest() == row["sha256"]:
+                            with self._connect() as db:
+                                db.execute("UPDATE documents SET stored_name = ? WHERE id = ?",
+                                           (None if name == row["sha256"] + ".pdf" else name, row["id"]))
+                            strays.remove(name)
+                            break
+        with self._connect() as db:
+            legacy = [row[0] for row in db.execute("SELECT id FROM documents WHERE stored_name IS NULL")]
+        for document_id in legacy:
+            self._rename(document_id)
 
     def list_documents(self, query: str = "") -> list[dict]:
         with self._connect() as db:
@@ -135,31 +246,38 @@ class Library:
                 with self._connect() as db:
                     row = db.execute("SELECT * FROM documents WHERE sha256 = ?", (sha,)).fetchone()
                     if row:
-                        dest = self.originals / f"{sha}.pdf"
-                        if not dest.exists():
+                        doc = self._document(row)
+                        dest = self.originals / self._stored_name(doc)
+                        if not dest.exists():  # repair an original that was deleted from disk
+                            name = row["stored_name"] or self._free_name(db, doc, self._base_name(doc))
+                            dest = self.originals / name
                             os.replace(temp, dest)
-                        result = self._document(row)
+                            db.execute("UPDATE documents SET stored_name = ? WHERE id = ?", (name, row["id"]))
+                        result = doc
                         if result["metadata"].get("parser_version", 0) < PARSER_VERSION:
                             metadata = extract_metadata(dest, filename)
                             db.execute("UPDATE documents SET extracted = ? WHERE id = ?", (json.dumps(metadata), row["id"]))
                             if row["metadata_status"] != "corrected":
                                 db.execute("UPDATE documents SET title = ?, authors = ? WHERE id = ?",
                                            (metadata["title"], metadata["authors"], row["id"]))
-                            result = self._document(db.execute("SELECT * FROM documents WHERE id = ?", (row["id"],)).fetchone())
+                        result = self._document(db.execute("SELECT * FROM documents WHERE id = ?", (row["id"],)).fetchone())
                         result["duplicate"] = True
                         return result
                     with temp.open("rb") as check:
                         if not check.read(1024).lstrip().startswith(b"%PDF-"):
                             raise ValueError("File is not a PDF")
                     metadata = extract_metadata(temp, filename)
-                    dest = self.originals / f"{sha}.pdf"
-                    os.replace(temp, dest)
                     cursor = db.execute("""INSERT INTO documents
                         (sha256, filename, source_path, size, title, authors, year, doi, pages,
                          metadata_status, extracted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (sha, filename, source_path, size, metadata["title"], metadata["authors"],
                          None, None, metadata["pages"], "needs_review", json.dumps(metadata)))
                     document_id = cursor.lastrowid
+                    # The row exists first because an unnamed file is called Untitled_<id>.
+                    doc = self._document(db.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone())
+                    name = self._free_name(db, doc, self._base_name(doc))
+                    os.replace(temp, self.originals / name)  # `name` is free, so nothing is overwritten
+                    db.execute("UPDATE documents SET stored_name = ? WHERE id = ?", (name, document_id))
                 result = self.get_document(document_id)
                 result["duplicate"] = False
                 return result
@@ -173,7 +291,7 @@ class Library:
             if not working.is_file():
                 raise FileNotFoundError(f"Missing saved PDF for document {document_id}, revision {doc['revision']}")
             return working
-        original = self.originals / f'{doc["sha256"]}.pdf'
+        original = self.originals / self._stored_name(doc)
         if not original.is_file():
             raise FileNotFoundError(f"Missing original PDF for document {document_id}")
         return original
@@ -235,6 +353,8 @@ class Library:
                         db.execute("""UPDATE works SET preferred_file_id = (SELECT id FROM documents
                             WHERE work_id = ? ORDER BY id LIMIT 1)
                             WHERE id = ? AND preferred_file_id = ?""", (old_work, old_work, document_id))
+            if status == "corrected":
+                self._rename(document_id)
         return self.get_document(document_id)
 
     def apply_verified(self, document_id: int, record: dict, filename: str | None = None) -> dict:
@@ -254,10 +374,11 @@ class Library:
             if values:
                 self.update_metadata(document_id, values, status="verified")
             metadata = {**doc["metadata"], "sources": {**sources, **dict.fromkeys(values, record["provider"])},
-                        "verified": {key: record.get(key) for key in ("provider", "doi", "publication")}}
+                        "verified": {key: record.get(key) for key in ("provider", "doi", "publication", "first_author")}}
             with self._connect() as db:
                 db.execute("UPDATE documents SET filename = ?, extracted = ? WHERE id = ?",
                            (Path(filename).name if rename else doc["filename"], json.dumps(metadata), document_id))
+            self._rename(document_id)
             return self.get_document(document_id)
 
     @staticmethod

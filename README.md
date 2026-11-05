@@ -58,6 +58,14 @@ Set `PAPERASSIST_DATA_DIR` to use another directory, or pass `--data-dir` to
 library, stop the app and copy the whole directory. It contains your API keys
 and email in `settings.json`, so keep backups private.
 
+PDFs are stored in `originals/` under readable names:
+`Author_Year_Journal_Volume_Page.pdf` once a paper is identified, otherwise the
+name of the imported file (`Untitled_<id>.pdf` if it had none). A number is added
+when two papers would share a name. You can browse this folder, but rename or
+move files only through PaperAssist: it identifies papers by content (SHA-256),
+and the catalog records each file name. Saved annotated versions live in
+`working/` under internal names.
+
 ## Import and read
 
 - **Import PDFs** and **Import folder** (in **Library**) add papers from the browser.

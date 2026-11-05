@@ -1,11 +1,15 @@
+import hashlib
 import io
+import sqlite3
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 from pypdf import PdfWriter
 
-from paperassist.library import Library
+from paperassist.library import Library, safe_filename
 
 
 def pdf():
@@ -170,3 +174,190 @@ class VerifiedMetadataTests(unittest.TestCase):
         first = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')
         document = self.library.apply_verified(first['id'], self.record, 'New_name.pdf')
         self.assertEqual((document['filename'], document['doi']), ('paper.pdf', self.record['doi']))
+
+
+class ReadableNameTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'library'
+        self.library = Library(self.root)
+        self.payload = pdf()
+        self.record = {'provider': 'crossref', 'title': 'Nanoflares in a twisted loop', 'authors': 'A. F. Rappazzo, M. Velli',
+                       'year': 2013, 'doi': '10.1088/0004-637x/771/2/76', 'publication': ['APJ', '771', '76', '2013'],
+                       'first_author': 'Rappazzo'}
+
+    def variant(self, width):
+        writer = PdfWriter()
+        writer.add_blank_page(width=width, height=72)
+        stream = io.BytesIO()
+        writer.write(stream)
+        return stream.getvalue()
+
+    def names(self):
+        return sorted(path.name for path in self.library.originals.glob('*.pdf'))
+
+    def legacy(self, document_id):
+        """Turn a document back into what libraries looked like before readable names."""
+        doc = self.library.get_document(document_id)
+        self.library.get_path(document_id, False).rename(self.library.originals / f'{doc["sha256"]}.pdf')
+        with self.library._connect() as db:
+            db.execute('UPDATE documents SET stored_name = NULL WHERE id = ?', (document_id,))
+
+    def test_safe_filename_rules(self):
+        self.assertEqual(safe_filename('Müller – Sun 2020.PDF'), 'Müller_–_Sun_2020.pdf')
+        self.assertEqual(safe_filename('a/b\\c:d*e?f"g<h>i|j\tk.pdf'), 'a_b_c_d_e_f_g_h_i_j_k.pdf')
+        self.assertEqual(safe_filename('  ..hidden. . '), 'hidden.pdf')
+        self.assertEqual(safe_filename('CON.pdf'), '_CON.pdf')
+        self.assertEqual(safe_filename('lpt3.pdf'), '_lpt3.pdf')
+        self.assertEqual(safe_filename('Console.pdf'), 'Console.pdf')
+        self.assertEqual(safe_filename('x' * 300 + '.pdf'), 'x' * 120 + '.pdf')
+        self.assertLessEqual(len(safe_filename('é' * 300).encode()), 204)
+        for generic in ('download.pdf', 'Document (1).pdf', '12345.pdf', 'a' * 64 + '.pdf', '', '...', 'file_2.pdf'):
+            self.assertEqual(safe_filename(generic), '', generic)
+
+    def test_import_keeps_the_given_name_and_the_bytes(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'My paper 2020.pdf')
+        self.assertEqual(doc['stored_name'], 'My_paper_2020.pdf')
+        path = self.library.get_path(doc['id'], False)
+        self.assertEqual(path.name, 'My_paper_2020.pdf')
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), doc['sha256'])
+        self.assertTrue(self.library.import_stream(io.BytesIO(self.payload), 'other.pdf')['duplicate'])
+        self.assertEqual(self.names(), ['My_paper_2020.pdf'])
+
+    def test_generic_names_become_untitled_and_collisions_are_case_insensitive(self):
+        first = self.library.import_stream(io.BytesIO(self.payload), 'download.pdf')
+        self.assertEqual(first['stored_name'], f'Untitled_{first["id"]}.pdf')
+        a = self.library.import_stream(io.BytesIO(self.variant(100)), 'Paper.pdf')
+        b = self.library.import_stream(io.BytesIO(self.variant(101)), 'PAPER.pdf')
+        c = self.library.import_stream(io.BytesIO(self.variant(102)), 'paper.pdf')
+        self.assertEqual((a['stored_name'], b['stored_name'], c['stored_name']), ('Paper.pdf', 'PAPER_2.pdf', 'paper_3.pdf'))
+
+    def test_import_never_overwrites_a_stray_file(self):
+        (self.library.originals / 'taken.pdf').write_bytes(b'precious')
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'taken.pdf')
+        self.assertEqual(doc['stored_name'], 'taken_2.pdf')
+        self.assertEqual((self.library.originals / 'taken.pdf').read_bytes(), b'precious')
+
+    def test_legacy_row_resolves_to_sha_name(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')
+        self.legacy(doc['id'])
+        self.assertEqual(self.library.get_path(doc['id'], False).name, f'{doc["sha256"]}.pdf')
+
+    def test_verified_metadata_renames_the_original(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'download.pdf')
+        doc = self.library.apply_verified(doc['id'], self.record, 'Rappazzo_2013_ApJ_771_76.pdf')
+        self.assertEqual(doc['stored_name'], 'Rappazzo_2013_ApJ_771_76.pdf')
+        self.assertEqual(self.names(), ['Rappazzo_2013_ApJ_771_76.pdf'])
+        self.assertEqual(self.library.get_path(doc['id'], False).read_bytes(), self.payload)
+
+    def test_correction_renames_and_keeps_the_identified_reference(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'scan 17.pdf')
+        self.library.apply_verified(doc['id'], self.record)
+        doc = self.library.update_metadata(doc['id'], {'authors': 'Rappazzo, A. F.', 'year': 2014})
+        self.assertEqual(doc['stored_name'], 'Rappazzo_2014_ApJ_771_76.pdf')
+        doc = self.library.update_metadata(doc['id'], {'title': 'Another title'})
+        self.assertEqual(doc['stored_name'], 'Rappazzo_2014_ApJ_771_76.pdf')
+
+    def test_correcting_an_unverified_paper_keeps_its_name(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'mine.pdf')
+        self.assertEqual(self.library.update_metadata(doc['id'], {'title': 'Fixed'})['stored_name'], 'mine.pdf')
+
+    def test_second_paper_with_the_same_reference_gets_a_numbered_name(self):
+        a = self.library.import_stream(io.BytesIO(self.payload), 'a.pdf')
+        b = self.library.import_stream(io.BytesIO(self.variant(100)), 'b.pdf')
+        self.library.apply_verified(a['id'], self.record)
+        b = self.library.apply_verified(b['id'], {**self.record, 'doi': '10.1234/other'})
+        self.assertEqual(b['stored_name'], 'Rappazzo_2013_ApJ_771_76_2.pdf')
+
+    def test_failed_move_keeps_the_old_name_and_is_retried_later(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'download.pdf')
+        old = doc['stored_name']
+        with mock.patch('paperassist.library.os.replace', side_effect=PermissionError):
+            doc = self.library.apply_verified(doc['id'], self.record)
+        self.assertEqual((doc['stored_name'], doc['metadata_status']), (old, 'verified'))
+        self.assertEqual(self.library.get_path(doc['id'], False).read_bytes(), self.payload)
+        self.library.update_metadata(doc['id'], {'title': 'Nanoflares'}, status='corrected')
+        self.assertEqual(self.library.get_document(doc['id'])['stored_name'], 'Rappazzo_2013_ApJ_771_76.pdf')
+
+    def test_failed_database_update_puts_the_file_back(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'download.pdf')
+        old = doc['stored_name']
+        real = self.library._connect
+
+        class Failing:
+            def __init__(self, db):
+                self.db = db
+            def __getattr__(self, name):
+                return getattr(self.db, name)
+            def execute(self, sql, *args):
+                if 'stored_name' in sql and sql.startswith('UPDATE'):
+                    raise sqlite3.OperationalError('disk full')
+                return self.db.execute(sql, *args)
+
+        @contextmanager
+        def connect():
+            with real() as db:
+                yield Failing(db)
+
+        with mock.patch.object(self.library, '_connect', connect), self.assertRaises(sqlite3.OperationalError):
+            self.library.apply_verified(doc['id'], self.record)
+        self.assertEqual(self.names(), [old])
+        self.assertEqual(self.library.get_document(doc['id'])['stored_name'], old)
+
+    def test_reopening_renames_legacy_files_once(self):
+        ids = [self.library.import_stream(io.BytesIO(self.variant(100 + n)), f'paper{n}.pdf')['id'] for n in range(3)]
+        shas = {i: self.library.get_document(i)['sha256'] for i in ids}
+        for i in ids:
+            self.legacy(i)
+        self.assertEqual(self.names(), sorted(f'{sha}.pdf' for sha in shas.values()))
+        library = Library(self.root)
+        after = self.names()
+        self.assertEqual(after, ['paper0.pdf', 'paper1.pdf', 'paper2.pdf'])
+        for i, sha in shas.items():
+            self.assertEqual(hashlib.sha256(library.get_path(i, False).read_bytes()).hexdigest(), sha)
+        with mock.patch('paperassist.library.hashlib.file_digest') as digest:
+            Library(self.root)
+        digest.assert_not_called()
+        self.assertEqual(self.names(), after)
+
+    def test_recovers_when_the_file_moved_but_the_database_did_not(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')
+        self.library.get_path(doc['id'], False).rename(self.library.originals / 'moved.pdf')
+        library = Library(self.root)
+        self.assertEqual(library.get_document(doc['id'])['stored_name'], 'moved.pdf')
+        self.assertEqual(library.get_path(doc['id'], False).read_bytes(), self.payload)
+
+    def test_recovers_when_the_database_moved_but_the_file_did_not(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'download.pdf')
+        self.library.apply_verified(doc['id'], self.record)
+        self.legacy(doc['id'])  # the file is back at its old name ...
+        with self.library._connect() as db:  # ... while the database already records the new one
+            db.execute("UPDATE documents SET stored_name = 'Rappazzo_2013_ApJ_771_76.pdf' WHERE id = ?", (doc['id'],))
+        library = Library(self.root)
+        self.assertEqual(library.get_document(doc['id'])['stored_name'], 'Rappazzo_2013_ApJ_771_76.pdf')
+        self.assertEqual(self.names(), ['Rappazzo_2013_ApJ_771_76.pdf'])
+
+    def test_a_foreign_file_is_never_adopted_for_a_missing_original(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')
+        self.library.get_path(doc['id'], False).unlink()
+        (self.library.originals / 'other.pdf').write_bytes(self.variant(200))
+        library = Library(self.root)
+        self.assertEqual(library.get_document(doc['id'])['stored_name'], 'paper.pdf')
+        self.assertEqual(sorted(self.names()), ['other.pdf'])
+
+    def test_old_database_without_the_column_is_upgraded(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')
+        self.legacy(doc['id'])
+        with self.library._connect() as db:
+            db.execute('ALTER TABLE documents DROP COLUMN stored_name')
+        library = Library(self.root)
+        self.assertEqual(library.get_path(doc['id'], False).name, 'paper.pdf')
+
+    def test_repairing_a_missing_original_gives_it_a_readable_name(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')
+        self.legacy(doc['id'])
+        self.library.get_path(doc['id'], False).unlink()
+        again = self.library.import_stream(io.BytesIO(self.payload), 'new.pdf')
+        self.assertEqual(again['stored_name'], 'paper.pdf')
+        self.assertEqual(self.library.get_path(doc['id'], False).read_bytes(), self.payload)
