@@ -39,6 +39,23 @@ test("Escape only leaves toolbar fields", () => {
     assert.equal(shortcutFor(press("Escape"), { typing: true }), null);
 });
 
+test("a slash filters the references, also as Shift+7 on the Italian layout", () => {
+    assert.equal(label(press("/")), "Filter the references (Esc clears, Esc again leaves)");
+    assert.equal(label(press("/", { shiftKey: true })), "Filter the references (Esc clears, Esc again leaves)");
+    assert.equal(shortcutFor(press("/"), { typing: true }), null);
+});
+
+test("Escape in the reference filter clears it before leaving", () => {
+    const filter = { id: "reference-filter" };
+    const entry = shortcutFor(press("Escape", { target: filter }), { typing: true });
+    assert.ok(entry);
+    const cleared = [];
+    const field = { id: "reference-filter", value: "antolin", dispatchEvent: (e) => cleared.push(e.type) };
+    entry.run({ mainReader: () => null }, press("Escape", { target: field, preventDefault() {} }));
+    assert.deepEqual([field.value, cleared], ["", ["input"]]);
+    assert.equal(entry.run({ mainReader: () => null }, press("Escape", { target: field, preventDefault() {} })), undefined);
+});
+
 test("keys use the control group of the paper they act on", () => {
     assert.equal(controlId({ kind: "main" }, "find-input"), "find-input");
     assert.equal(controlId({ kind: "preview" }, "find-input"), "second-find-input");

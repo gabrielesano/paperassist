@@ -124,6 +124,10 @@ them, otherwise by searching the text; if neither gives a position, the page ope
 The title still opens the reference. For a missing reference, the first click opens
 its details and later clicks step.
 
+Type in **Filter references** above the cards to show only the entries matching every
+word (label, authors, year, DOI or title; case and accents ignored). Each paper tab
+keeps its own filter.
+
 If a reference is missing, **Find open access** searches for a legal copy; you can
 also tick several entries in **Reference PDFs** and search them together. Each
 source reports its own outcome, and a failed search never proves a paper is behind a
@@ -145,7 +149,8 @@ Press `?` or use the keyboard button in the toolbar for the full list. The main 
 - `V`, `D`, `H`, `C` choose Select, Draw, Highlight and Comment; `Ctrl+Z` and
   `Ctrl+Shift+Z` (or `Ctrl+Y`) undo and redo annotation edits; `Ctrl+S` saves.
 - `L` opens the library; `,` and `.` switch tabs; `X` closes the tab; `B` hides the
-  side panels; `1`, `2` and `O` go to References, Comments and the outline.
+  side panels; `1`, `2` and `O` go to References, Comments and the outline; `/` focuses
+  the reference filter, where `Esc` clears it and a second `Esc` returns to the document.
 
 Letter keys are ignored while you type in a field or a dialog is open. Without an open
 paper, `Ctrl+F` and the zoom keys stay with the browser.

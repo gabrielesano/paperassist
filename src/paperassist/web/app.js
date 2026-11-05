@@ -9,6 +9,7 @@ import {
 } from "./comments.js";
 import { SOURCES, SOURCE_NAMES, createSourcesDialog, proxyUrl } from "./sources.js";
 import { installShortcuts } from "./shortcuts.js";
+import { referenceMatcher } from "./reference-filter.js";
 import {
     citationPosition,
     locateCitations,
@@ -888,8 +889,38 @@ function emptyReferences(host) {
     button.onclick = analyzeReferences;
     host.append(button);
 }
+// The query lives on the tab, so each paper remembers its own filter. Filtering only hides
+// cards, which keeps every button, count and open detail of the others untouched.
+function referenceFilter(rows) {
+    const tab = state.current;
+    const field = el("div", "", "reference-filter");
+    const input = el("input");
+    Object.assign(input, { id: "reference-filter", type: "search", placeholder: "Filter references",
+        autocomplete: "off", value: tab.referenceQuery ?? "" });
+    input.setAttribute("aria-label", "Filter references");
+    const total = el("span", "", "reference-filter-count");
+    total.setAttribute("role", "status");
+    const none = el("p", "", "reference-meta reference-filter-none");
+    const apply = () => {
+        const query = input.value.trim();
+        const matches = referenceMatcher(query);
+        let shown = 0;
+        for (const { ref, row } of rows) {
+            row.hidden = !matches(ref);
+            if (!row.hidden) shown++;
+        }
+        total.textContent = query ? `${shown} of ${rows.length}` : "";
+        none.textContent = query && !shown ? `No references match \u201c${query}\u201d.` : "";
+    };
+    input.oninput = () => { tab.referenceQuery = input.value; apply(); };
+    field.append(input, total);
+    return { field, none, apply };
+}
 function renderReferences() {
     const host = $("#detail-content");
+    // The panel is rebuilt often, so the field hands its focus and caret to its replacement.
+    const typing = document.activeElement?.id === "reference-filter" ? document.activeElement : null;
+    const caret = typing && [typing.selectionStart, typing.selectionEnd];
     host.replaceChildren();
     const action = el("button", "Find or select references", "panel-action");
     action.onclick = () => { $("#acquire-dialog").showModal(); renderAcquire(); };
@@ -902,6 +933,9 @@ function renderReferences() {
         emptyReferences(host);
         return;
     }
+    const rows = [];
+    const filter = referenceFilter(rows);
+    host.append(filter.field, filter.none);
     for (const ref of state.references) {
         const row = el("div", "", `reference ${referenceTone(ref)}${state.expandedRef === ref.id ? " expanded" : ""}`);
         row.dataset.referenceId = ref.id;
@@ -990,6 +1024,12 @@ function renderReferences() {
         note.setAttribute("role", "status");
         row.append(note);
         host.append(row);
+        rows.push({ ref, row });
+    }
+    filter.apply();
+    if (typing) {
+        $("#reference-filter").focus();
+        $("#reference-filter").setSelectionRange(...caret);
     }
 }
 function folderButton(ref) {

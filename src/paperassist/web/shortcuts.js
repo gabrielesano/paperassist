@@ -153,6 +153,25 @@ export const shortcuts = [
         run: () => showPanel("#outline") },
     { group: "Tabs and panels", keys: [["1"]], label: "Show the references", match: plain("1"),
         run: () => { $("#references-tab").click(); showPanel("#detail-content"); } },
+    { group: "Tabs and panels", keys: [["/"]], label: "Filter the references (Esc clears, Esc again leaves)", match: plain("/"),
+        run: () => {
+            $("#references-tab").click();
+            showPanel("#detail-content");
+            const field = $("#reference-filter");
+            field?.focus();
+            field?.select();
+        } },
+    // Not listed: the label of the "/" entry explains it.
+    { group: "Tabs and panels", anywhere: true,
+        match: (event) => event.key === "Escape" && event.target.id === "reference-filter",
+        run: (app, event) => {
+            // Chrome would also clear a search field; the input event keeps the stored query in step.
+            event.preventDefault();
+            if (event.target.value) {
+                event.target.value = "";
+                event.target.dispatchEvent(new Event("input"));
+            } else if (app.mainReader()?.pdf) focusDocument(app.mainReader());
+        } },
     { group: "Tabs and panels", keys: [["2"]], label: "Show the comments", match: plain("2"),
         run: () => { $("#comments-tab").click(); showPanel("#detail-content"); } },
     { group: "Lists and dialogs", keys: [["Tab"], ["Shift", "Tab"]], label: "Move between controls and list items" },

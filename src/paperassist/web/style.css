@@ -407,6 +407,36 @@ button:hover,
 .note:first-child {
     padding-top: 0;
 }
+/* The count sits inside the field and the field always reserves its room, so typing
+   never moves the cards. */
+.reference-filter {
+    position: relative;
+    margin-bottom: 10px;
+}
+.reference-filter input {
+    width: 100%;
+    padding: 6px 64px 6px 8px;
+    border: 1px solid #ccd7cd;
+    border-radius: 3px;
+    background: #fff;
+    font-size: 13px;
+}
+.reference-filter input::-webkit-search-cancel-button {
+    display: none;
+}
+.reference-filter-count {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+.reference-filter-none:not(:empty) {
+    margin: 0 0 10px;
+}
 .ref-top {
     display: flex;
     justify-content: space-between;
