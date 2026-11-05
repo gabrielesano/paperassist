@@ -135,8 +135,11 @@ class LibraryLocationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
-        # The real per-user config must never be read or written.
-        patcher = patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.root / 'config')})
+        # The real per-user config must never be read or written, on any platform.
+        patcher = patch('paperassist.paths.config_file', return_value=self.root / 'config' / 'config.json')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.dict(os.environ)  # restores the variable popped below
         patcher.start()
         self.addCleanup(patcher.stop)
         os.environ.pop('PAPERASSIST_DATA_DIR', None)
@@ -236,7 +239,7 @@ class ServeSwitchTests(unittest.TestCase):
         root = Path(tmp.name).resolve()
         first, second = root / 'first', root / 'second'
         Library(second)
-        patcher = patch.dict(os.environ, {'XDG_CONFIG_HOME': str(root / 'config')})
+        patcher = patch('paperassist.paths.config_file', return_value=root / 'config' / 'config.json')
         patcher.start()
         self.addCleanup(patcher.stop)
         servers = []
@@ -284,13 +287,16 @@ class ServeSwitchTests(unittest.TestCase):
         self.assertFalse((second / '.server.json').exists())
 
     def test_a_library_that_cannot_start_sends_the_server_back_to_the_previous_one(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'XDG_CONFIG_HOME': tmp}), \
-             patch('paperassist.server._serve_library', side_effect=[Path('/broken'), RuntimeError('damaged'), None]) as run, \
-             patch('sys.stderr', new=io.StringIO()) as errors:
-            serve('127.0.0.1', 0, Path('/good'), False)
-            self.assertEqual([call.args[2] for call in run.call_args_list], [Path('/good'), Path('/broken'), Path('/good')])
-            self.assertEqual(paths.saved_library(), Path('/good'))
-        self.assertIn('Could not open /broken: damaged', errors.getvalue())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            good, broken = root / 'good', root / 'broken'
+            with patch('paperassist.paths.config_file', return_value=root / 'config.json'), \
+                 patch('paperassist.server._serve_library', side_effect=[broken, RuntimeError('damaged'), None]) as run, \
+                 patch('sys.stderr', new=io.StringIO()) as errors:
+                serve('127.0.0.1', 0, good, False)
+                self.assertEqual([call.args[2] for call in run.call_args_list], [good, broken, good])
+                self.assertEqual(paths.saved_library(), good)
+            self.assertIn(f'Could not open {broken}: damaged', errors.getvalue())
 
 
 if __name__ == '__main__':

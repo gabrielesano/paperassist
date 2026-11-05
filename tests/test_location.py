@@ -29,7 +29,7 @@ class LocationTests(unittest.TestCase):
         return location.classify(self.current, str(path))['action']
 
     def snapshot(self, folder):
-        return sorted((str(path.relative_to(folder)), path.read_bytes() if path.is_file() else None) for path in folder.rglob('*'))
+        return sorted((path.relative_to(folder).as_posix(), path.read_bytes() if path.is_file() else None) for path in folder.rglob('*'))
 
     def test_a_library_is_opened_and_empty_or_missing_folders_receive_a_move(self):
         other = self.root / 'other'
