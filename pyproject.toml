@@ -25,7 +25,11 @@ desktop = [
 ]
 
 native = [
-    "PySide6-Essentials>=6.10,<7",
+    # PySide6 6.12.0 drops a reference to None on every void call. Python 3.11, where
+    # None is not immortal, crashes after a few thousand calls. Keep it out of 3.11
+    # until a later release is checked with tests/test_native_ui.py BindingTests.
+    "PySide6-Essentials>=6.10,<6.12; python_version < '3.12'",
+    "PySide6-Essentials>=6.10,<7; python_version >= '3.12'",
     "pypdfium2>=5.14,<6",
 ]
 

@@ -189,6 +189,7 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(self.annotations(), ["Highlight", "Highlight"])
         self.assertFalse(reopened.modified)
 
+    @unittest.skipIf(os.name == "nt", "Windows files have no Unix permission bits")
     def test_a_save_keeps_the_file_permissions(self):
         self.path.chmod(0o600)
         self.highlight_first_line()

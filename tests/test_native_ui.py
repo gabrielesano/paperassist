@@ -1,5 +1,6 @@
 """Native reader widgets under Qt's offscreen platform: real events, the real render process."""
 import collections
+import sys
 import tempfile
 import time
 import unittest
@@ -14,7 +15,7 @@ if pdf_available:
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtGui import QPixmap
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel
 
     from paperassist import settings
     from paperassist.native.document import SaveState
@@ -466,6 +467,19 @@ class WindowTests(unittest.TestCase):
         view.delete_annotation()
         view.undo()
         self.assertEqual(view.doc.pdf.data, before)
+
+
+@needs_qt
+class BindingTests(unittest.TestCase):
+    @unittest.skipIf(sys.version_info >= (3, 12), "None is immortal from Python 3.12")
+    def test_qt_calls_keep_their_reference_to_none(self):
+        # PySide6 6.12.0 lost one reference to None per void call and crashed Python 3.11 within minutes.
+        QApplication.instance() or QApplication([])
+        label = QLabel()
+        before = sys.getrefcount(None)
+        for _ in range(1000):
+            label.setText("x")
+        self.assertGreater(sys.getrefcount(None), before - 100)
 
 
 if __name__ == "__main__":
