@@ -26,13 +26,13 @@ Each item has one implementation tag:
 
 | Acceptance behavior | Source / function | HTTP | Tag |
 | --- | --- | --- | --- |
-| [ ] Open Library from toolbar or welcome screen; show an empty-library hint. | app `library`, `listLibrary`; HTML `library-dialog` | `/api/documents?q=` | UI |
+| [x] Open Library from toolbar or welcome screen; show an empty-library hint. Native: the Library window opens at startup in place of a welcome screen. | app `library`, `listLibrary`; HTML `library-dialog` | `/api/documents?q=` | UI |
 | [ ] Search titles, authors, year, DOI and metadata status without hiding unidentified/scanned PDFs. | app `listLibrary`; `library.py:list_documents` | `/api/documents?q=` | backend |
-| [ ] Select multiple PDFs or a directory tree; ignore non-PDF uploads and show selected count/size. | app `importFiles`; HTML `files`, `folder` | POST `/api/import` multipart | UI |
+| [x] Select multiple PDFs or a directory tree; ignore non-PDF uploads and show selected count/size. | app `importFiles`; HTML `files`, `folder` | POST `/api/import` multipart | UI |
 | [ ] Accept filesystem paths for deterministic recursive imports without following directory symlinks. | `workspace.py:import_paths`; `library.py:import_paths` | POST `/api/import` JSON `{paths}` | backend |
-| [ ] Copy originals, hash/deduplicate content, preserve source bytes, retain uncertain metadata and manual corrections. | `library.py:import_stream`, `import_paths`; `metadata.py:extract_metadata` | POST `/api/import` | backend |
+| [x] Copy originals, hash/deduplicate content, preserve source bytes, retain uncertain metadata and manual corrections. | `library.py:import_stream`, `import_paths`; `metadata.py:extract_metadata` | POST `/api/import` | backend |
 | [ ] Show incremental progress, cancellation, added/duplicate/review/error counts and per-file failures; import opens no tabs/downloads. | app `importFiles`, `job`; Workspace import methods | POST `/api/import`; `J`; POST `J/cancel` | backend |
-| [ ] Edit title, authors, year and DOI; show validation failure and refresh the library/reference views. | app `editMetadata`, metadata-form submit; `library.py:update_metadata` | PATCH `D` | backend |
+| [x] Edit title, authors, year and DOI; show validation failure and refresh the library/reference views. | app `editMetadata`, metadata-form submit; `library.py:update_metadata` | PATCH `D` | backend |
 | [ ] Link a reference through the library picker, rank suggested matches and require the user to verify them. | app `listLibrary`, `linkReference`; `references.py:local_candidates`, `link` | `/api/documents?q=`; PATCH `R/{id}` | backend |
 
 ## Tabs
@@ -150,8 +150,8 @@ Each item has one implementation tag:
 | [ ] Save/clear manual-download folder explicitly; Browse fills but does not save; validation rejects missing/nonabsolute/library-internal folders. | preferences `createPreferencesDialog`; `settings.py:_inbox` | `/api/settings`; PUT `/api/settings`; POST `/api/choose-folder` | backend |
 | [ ] Inspect library folder, confirm a concrete Open/Move plan, reject stale/fixed/in-use targets or active jobs; copying retains old files. | preferences location flow; Workspace `inspect_library`, `prepare_switch`; `location.py` | POST `/api/library/inspect`, `/api/library/switch` | backend |
 | [ ] Require unsaved work and other preference edits to be resolved before switching; wait for new server then reload in the web host. | preferences `canLeave`, `waitForLibrary`; `server.py:serve` fallback loop | `/api/config` polling | UI |
-| [ ] Source switches, contact email, optional/required keys and HTTPS proxy use explicit Save; omitted values stay and empty/null clears. | sources `createSourcesDialog`; `settings.py:Settings`, `_merge`, `update` | GET/PUT `/api/settings`; `/api/config` | backend |
-| [ ] Mask secrets, show only configured state/last four characters, stage Remove/Keep, and check access only against saved settings. | sources `renderRow`, `changes`, check handler; Settings `view`; Workspace `check_settings` | POST `/api/settings/check` | backend |
+| [x] Source switches, contact email, optional/required keys and HTTPS proxy use explicit Save; omitted values stay and empty/null clears. | sources `createSourcesDialog`; `settings.py:Settings`, `_merge`, `update` | GET/PUT `/api/settings`; `/api/config` | backend |
+| [x] Mask secrets, show only configured state/last four characters, stage Remove/Keep, and check access only against saved settings. | sources `renderRow`, `changes`, check handler; Settings `view`; Workspace `check_settings` | POST `/api/settings/check` | backend |
 | [ ] Keep credentials/inbox in the existing library settings file and environment fallbacks; only interface preferences/library choice live in user config. | `settings.py:load`, `preferences`; `paths.py:config_file`, `locate` | `/api/settings`, `/api/preferences` | backend |
 | [ ] Import localStorage values only for missing backend fields; existing backend state always wins on reload/restart. | app `loadPreferences`; reader `open` | PUT `/api/preferences?if_missing=1`, `D/view?if_missing=1` | browser-only |
 | [ ] Token/origin/loopback-host protection and HTTP upload staging remain in the web path, without becoming native UI requirements. | `server.py:protect`, `_write_token`, `imports`; Workspace `import_files` | `/api/config`; all writes | browser-only |

@@ -1,4 +1,7 @@
 """The library list: search, open in a tab or quick view, and import PDFs as a background job."""
+import os
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
@@ -6,9 +9,34 @@ from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QLineE
 
 from .jobs import JobWatcher
 from .library_source import display_title
+from .metadata_dialog import MetadataDialog
 
 REVIEW = QColor("#a15c00")  # amber: not an error, a paper whose metadata nobody confirmed
 NEEDS_REVIEW = ("needs_review", "incomplete")
+
+
+def pdf_files(paths):
+    """The PDFs under these files and folders, found as the importer finds them: no symlinks, any case of ".pdf"."""
+    found = []
+    for path in map(Path, paths):
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            try:
+                with os.scandir(path) as entries:
+                    found += pdf_files(sorted(entry.path for entry in entries))
+            except OSError:
+                pass  # an unreadable folder is reported by the import itself
+        elif path.is_file() and path.suffix.lower() == ".pdf":
+            found.append(path)
+    return found
+
+
+def size_text(size):
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size} bytes" if unit == "bytes" else f"{size:.1f} {unit}"
+        size /= 1024
 
 
 class LibraryDialog(QDialog):
@@ -29,30 +57,56 @@ class LibraryDialog(QDialog):
         self.table.setColumnWidth(2, 50)
         self.open_button = QPushButton("Open")
         self.quick_button = QPushButton("Quick view")
+        self.edit_button = QPushButton("Edit details…")
+        self.edit_button.setToolTip("Correct the title, authors, year or DOI (F2)")
         self.import_button = QPushButton("Import PDFs…")
+        self.folder_button = QPushButton("Import folder…")
         self.cancel_button = QPushButton("Cancel import")
         self.progress = QProgressBar()
+        self.hint = QLabel("The library is empty.\nChoose Import PDFs or Import folder to add papers.", alignment=Qt.AlignCenter)
+        self.hint.setAccessibleName("Empty library")
+        self.estimate = QLabel(wordWrap=True)  # what an import would add, shown before anything is copied
+        self.estimate.setAccessibleName("Import estimate")
+        self.start_button = QPushButton("Start import")
+        self.discard_button = QPushButton("Cancel selection")
         self.message = QLabel(wordWrap=True)
         buttons = QHBoxLayout()
-        for widget in (self.import_button, self.progress, self.cancel_button):
+        for widget in (self.import_button, self.folder_button, self.progress, self.cancel_button):
             buttons.addWidget(widget)
         buttons.addWidget(self.message, 1)
-        for widget in (self.quick_button, self.open_button):
+        for widget in (self.edit_button, self.quick_button, self.open_button):
             buttons.addWidget(widget)
+        self.confirm_row = QHBoxLayout()
+        for widget in (self.estimate, self.start_button, self.discard_button):
+            self.confirm_row.addWidget(widget, 1 if widget is self.estimate else 0)
         column = QVBoxLayout(self)
         column.addWidget(self.search)
         column.addWidget(self.table, 1)
+        column.addWidget(self.hint, 1)
+        column.addLayout(self.confirm_row)
         column.addLayout(buttons)
+        self.pending = []
         self.typing = QTimer(self, singleShot=True, interval=150, timeout=self.refresh)
         self.search.textChanged.connect(self.typing.start)
         self.table.itemActivated.connect(lambda: self._request(self.open_requested))
         self.table.itemSelectionChanged.connect(self._enable)
         self.open_button.clicked.connect(lambda: self._request(self.open_requested))
         self.quick_button.clicked.connect(lambda: self._request(self.quick_requested))
+        self.edit_button.clicked.connect(self.edit_metadata)
         self.import_button.clicked.connect(self.import_dialog)
+        self.folder_button.clicked.connect(self.import_folder_dialog)
+        self.start_button.clicked.connect(self._confirm_import)
+        self.discard_button.clicked.connect(self._discard_selection)
         self.cancel_button.clicked.connect(lambda: self.watcher.cancel())
         self._importing(False)
+        self._discard_selection()
         self.refresh()
+
+    def keyPressEvent(self, event):
+        # A key event handler rather than a QShortcut: that only fires once the window counts as active.
+        if event.key() == Qt.Key_F2:
+            return self.edit_metadata()
+        super().keyPressEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -76,8 +130,11 @@ class LibraryDialog(QDialog):
             self.table.addTopLevelItem(item)
             if document["id"] == selected:
                 self.table.setCurrentItem(item)
-        if not documents and not self.search.text():
-            self.message.setText("The library is empty. Import PDFs to start.")
+        empty = not documents and not self.search.text()
+        self.table.setVisible(not empty)
+        self.hint.setVisible(empty)
+        if empty:
+            self.message.setText("")
         elif not documents:
             self.message.setText("No paper matches this search.")
         elif not self.watcher:
@@ -89,7 +146,7 @@ class LibraryDialog(QDialog):
         return item.data(0, Qt.UserRole) if item else None
 
     def _enable(self):
-        for button in (self.open_button, self.quick_button):
+        for button in (self.open_button, self.quick_button, self.edit_button):
             button.setEnabled(self.selected_id() is not None)
 
     def _request(self, signal):
@@ -97,11 +154,75 @@ class LibraryDialog(QDialog):
             signal.emit(document_id)
             self.hide()
 
+    # ---- metadata -------------------------------------------------------------------------
+    def edit_metadata(self):
+        document_id = self.selected_id()
+        if document_id is None:
+            return
+        self.editor = MetadataDialog(self.workspace.library, self.workspace.library.get_document(document_id), self)
+        self.editor.saved.connect(self._corrected)
+        self.editor.open()
+
+    def _corrected(self, document):
+        """Bring every place that shows this paper up to date: the list, the tab titles and the references."""
+        self.refresh()
+        window = self.parent()
+        if window is None or not hasattr(window, "all_panes"):  # shown on its own, e.g. in tests
+            return
+        for pane in window.all_panes():
+            source = pane.view.doc.source
+            if getattr(source, "document_id", None) == document["id"]:
+                source.title = display_title(document)
+        window.refresh()
+        # The current paper may cite the corrected one, so its panel is reread whichever paper was edited.
+        if window.details.document_id is not None:
+            window.details.reload(window.details.document_id)
+
     # ---- import ---------------------------------------------------------------------------
     def import_dialog(self):
         names, _ = QFileDialog.getOpenFileNames(self, "Import PDFs", "", "PDF (*.pdf)")
         if names:
-            self.start_import(names)
+            self.select_import(names)
+
+    def import_folder_dialog(self):
+        folder = QFileDialog.getExistingDirectory(self, "Import a folder of PDFs")
+        if folder:
+            self.select_import([folder])
+
+    def select_import(self, names):
+        """Show what the selection would add and wait for the user to confirm; non-PDF files are ignored."""
+        files = pdf_files(names)
+        if not files:
+            self._discard_selection()
+            self.message.setText("No PDF files in the selection.")
+            return
+        total = 0
+        for path in files:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass  # vanished since the scan; the import reports it
+        # Duplicates are not copied, so the total is an upper bound.
+        self.estimate.setText(f"{len(files)} PDF{'s' if len(files) != 1 else ''}, {size_text(total)}. "
+                              f"Importing copies them: up to {size_text(total)} of extra storage.")
+        self.pending = list(names)
+        self._show_estimate(True)
+        self.start_button.setFocus()
+
+    def _show_estimate(self, shown):
+        for widget in (self.estimate, self.start_button, self.discard_button):
+            widget.setVisible(shown)
+        self.import_button.setEnabled(not shown and not self.watcher)
+        self.folder_button.setEnabled(not shown and not self.watcher)
+
+    def _confirm_import(self):
+        names = self.pending
+        self._discard_selection()
+        self.start_import(names)
+
+    def _discard_selection(self):
+        self.pending = []
+        self._show_estimate(False)
 
     def start_import(self, names):
         try:
@@ -140,5 +261,6 @@ class LibraryDialog(QDialog):
 
     def _importing(self, running):
         self.import_button.setEnabled(not running)
+        self.folder_button.setEnabled(not running)
         self.progress.setVisible(running)
         self.cancel_button.setVisible(running)
