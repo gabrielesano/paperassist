@@ -44,10 +44,11 @@ def unwanted(entry):
 a = Analysis(
     [str(root / "packaging" / "entry.py")],
     pathex=[str(root / "src")],
-    hiddenimports=["paperassist.native.worker", "paperassist.native.annotation_bar"],  # spawn entry and host-installed toolbar
+    hiddenimports=["paperassist.native.worker"],  # the render process's spawn entry
     excludes=EXCLUDED_MODULES,
     binaries=collect_dynamic_libs("pypdfium2_raw"),
     datas=collect_data_files("pypdfium2_raw") + copy_metadata("pypdfium2") + copy_metadata("pypdf")
+          + copy_metadata("PySide6-Essentials")  # About reads versions and licenses from package metadata
           + [(str(root / "LICENSE"), ".")],
 )
 a.binaries = [entry for entry in a.binaries if not unwanted(entry)]

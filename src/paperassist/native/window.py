@@ -7,6 +7,7 @@ from paperassist import settings
 
 from .annotation_bar import install as install_annotation_bar
 from .acquisition import AcquisitionController
+from .app_menu import install as install_app_menu
 from .comments import install as install_comments
 from .document import SaveState
 from .library_dialog import LibraryDialog
@@ -54,6 +55,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self.annotation_bar = install_annotation_bar(self)
         install_shortcuts(self)
+        install_app_menu(self)  # also Preferences, which applies the saved interface size, and About
         self.comments.draft_changed.connect(self.refresh)
         self.refresh()
 

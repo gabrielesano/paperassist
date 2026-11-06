@@ -144,9 +144,9 @@ Each item has one implementation tag:
 
 | Acceptance behavior | Source / function | HTTP | Tag |
 | --- | --- | --- | --- |
-| [ ] Brand menu opens Preferences, Sources, Keyboard shortcuts and About; support arrows/Home/End, Enter/Space, Escape, outside click and Tab. | app-menu `installAppMenu`; HTML `app-menu`; CSS `.app-menu` | — | UI |
-| [ ] About shows app version, license, library path and project information. | app About action; HTML `about-dialog` | `/api/config` | UI |
-| [ ] Interface size choices 80/90/100/110/125/150% apply immediately to chrome only and persist per user across libraries. | preferences `parseZoom`, `applyZoom`, `createPreferencesDialog`; CSS `--ui-zoom` | GET/PUT `/api/preferences` | UI |
+| [x] Brand menu opens Preferences, Sources, Keyboard shortcuts and About; support arrows/Home/End, Enter/Space, Escape, outside click and Tab. | app-menu `installAppMenu`; HTML `app-menu`; CSS `.app-menu` | — | UI |
+| [x] About shows app version, license, library path and project information. | app About action; HTML `about-dialog` | `/api/config` | UI |
+| [x] Interface size choices 80/90/100/110/125/150% apply immediately to chrome only and persist per user across libraries. | preferences `parseZoom`, `applyZoom`, `createPreferencesDialog`; CSS `--ui-zoom` | GET/PUT `/api/preferences` | UI |
 | [ ] Save/clear manual-download folder explicitly; Browse fills but does not save; validation rejects missing/nonabsolute/library-internal folders. | preferences `createPreferencesDialog`; `settings.py:_inbox` | `/api/settings`; PUT `/api/settings`; POST `/api/choose-folder` | backend |
 | [ ] Inspect library folder, confirm a concrete Open/Move plan, reject stale/fixed/in-use targets or active jobs; copying retains old files. | preferences location flow; Workspace `inspect_library`, `prepare_switch`; `location.py` | POST `/api/library/inspect`, `/api/library/switch` | backend |
 | [ ] Require unsaved work and other preference edits to be resolved before switching; wait for new server then reload in the web host. | preferences `canLeave`, `waitForLibrary`; `server.py:serve` fallback loop | `/api/config` polling | UI |
@@ -168,7 +168,7 @@ Save uses PUT `D/pdf`, navigation uses PUT `D/view`, deletion of notes uses PUT
 
 | Acceptance behavior | Source / function | HTTP | Tag |
 | --- | --- | --- | --- |
-| [ ] `?` help, Mod+`,` Preferences, `L` Library, Mod+`S` explicit PDF Save. | shortcuts table; app Save handler | As above; `/api/documents` for Library | UI |
+| [x] `?` help, Mod+`,` Preferences, `L` Library, Mod+`S` explicit PDF Save. | shortcuts table; app Save handler | As above; `/api/documents` for Library | UI |
 | [x] `N/J` next page, `P/K` previous, Home/End first/last, `G` page field, Enter returns focus to the document. | shortcuts table, `focusControl`, `focusDocument` | PUT `D/view` | UI |
 | [x] Arrows, Space/Shift+Space and Page Up/Down scroll a focused document. | browser scrolling; shortcuts help | — | UI |
 | [ ] Mod+`F` focuses active paper Find; Enter/Shift+Enter moves matches; Esc leaves toolbar field without clearing its query. | shortcuts `fieldReader`, `focusControl`; app `wireControls` | — | UI |
