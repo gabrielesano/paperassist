@@ -41,6 +41,7 @@ class Link(NamedTuple):
     uri: str | None  # an external link...
     page: int | None  # ...or an internal one with its target page and y (displayed points)
     y: float
+    destination: str | None = None
 
 
 class Frame:
@@ -77,6 +78,8 @@ class Pdf:
         self._doc = pdfium.PdfDocument(self.data)
         self.sizes = [self._doc.get_page_size(i) for i in range(len(self._doc))]
         self._frames = {}
+        self._named_destinations = None
+        self._named_pages = {}
 
     @property
     def is_closed(self):
@@ -141,12 +144,33 @@ class Pdf:
                 target_frame = self.frame(target)
                 top = target_frame.point(x.value if has_x.value else target_frame.origin[0],
                                          y.value if has_y.value else target_frame.top)[1] if has_x.value or has_y.value else 0
-                item = Link(rect, None, target, top)
+                item = Link(rect, None, target, top, self._destination_name(dest))
             else:
                 continue
             result.append(item)
         page.close()
         return result
+
+    def _destination_name(self, destination):
+        if self._named_destinations is None:
+            self._named_destinations = {}
+            for index in range(raw.FPDF_CountNamedDests(self._doc)):
+                length = ctypes.c_long()
+                raw.FPDF_GetNamedDest(self._doc, index, None, length)
+                if length.value <= 0:
+                    continue
+                name = ctypes.create_string_buffer(length.value)
+                dest = raw.FPDF_GetNamedDest(self._doc, index, name, length)
+                if dest:
+                    key = ctypes.cast(dest, ctypes.c_void_p).value
+                    value = name.raw.decode("utf-16-le", errors="replace").rstrip("\0")
+                    self._named_destinations[key] = value
+                    self._named_pages[value] = raw.FPDFDest_GetDestPageIndex(self._doc, dest)
+        return self._named_destinations.get(ctypes.cast(destination, ctypes.c_void_p).value)
+
+    def named_destinations(self):
+        self._destination_name(raw.FPDF_DEST())
+        return dict(self._named_pages)
 
     def search(self, text):
         hits = []
@@ -177,6 +201,8 @@ class Pdf:
         document = pdfium.PdfDocument(data)
         self._doc.close()
         self.data, self._doc = data, document
+        self._named_destinations = None
+        self._named_pages.clear()
 
     def add_highlight(self, page, rects, color=HIGHLIGHT, opacity=1):
         from . import annotations

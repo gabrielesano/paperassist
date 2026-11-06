@@ -3,7 +3,7 @@ from weakref import WeakSet
 
 from PySide6.QtCore import QSignalBlocker, Qt, Slot
 from PySide6.QtGui import QColor, QIcon, QPixmap
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QSpinBox, QToolBar
+from PySide6.QtWidgets import QComboBox, QLabel, QSpinBox, QToolBar
 
 COLORS = [('Yellow', '#F5D76E'), ('Green', '#8FD3AA'), ('Blue', '#79C5DF'),
           ('Pink', '#E9A9BC'), ('Dark green', '#243F3A'), ('Black', '#000000')]
@@ -22,6 +22,11 @@ class AnnotationBar(QToolBar):
         self.draw.setCheckable(True)
         self.draw.setShortcut('D')
         self.draw.triggered.connect(lambda: self.tool('ink'))
+        self.comment = self.addAction('Comment')
+        self.comment.setCheckable(True)
+        self.comment.setShortcut('C')
+        self.comment.setToolTip('Comment on selected text or the current page (C)')
+        self.comment.triggered.connect(lambda: window.comments.compose())
         self.label = QLabel()
         self.addWidget(self.label)
         self.colors = QComboBox(objectName='annotation-color')
@@ -43,7 +48,6 @@ class AnnotationBar(QToolBar):
         self.redo = self.addAction('Redo', lambda: self.call('redo'))
         window.highlight_action.toggled.connect(self.highlight)
         window.tabs.currentChanged.connect(self.refresh)
-        QApplication.instance().focusChanged.connect(self.refresh)
         self.refresh()
 
     def view(self):
@@ -83,16 +87,24 @@ class AnnotationBar(QToolBar):
             page, index = view.selected_annotation
             item = next((a for a in view.doc.annotations(page) if a['index'] == index), None)
         active = bool(view and not view.locked)
+        comment = view.selected_comment if view else None
+        notes = bool(view and view.notes_model)
         self.select.setEnabled(active)
         self.draw.setEnabled(active)
-        for action, checked in ((self.select, bool(view and not view.highlighting and not view.drawing)),
+        self.comment.setEnabled(notes)
+        for action, checked in ((self.select, bool(view and not view.highlighting and not view.drawing and not view.commenting)),
                                 (self.draw, bool(view and view.drawing)),
+                                (self.comment, bool(view and view.commenting)),
                                 (self.window.highlight_action, bool(view and view.highlighting))):
             with QSignalBlocker(action):
                 action.setChecked(checked)
-        self.label.setText(('Selected ' + item['subtype']) if item else 'Draw' if view and view.drawing else 'Highlight' if view and view.highlighting else 'Select')
-        self.colors.setEnabled(active)
-        color = item['color'] if item else (view.ink_color if view and view.drawing else view.highlight_color if view else (0, 0, 0))
+        self.label.setText('Selected comment' if comment is not None else ('Selected ' + item['subtype']) if item else '')
+        self.colors.setEnabled(notes if comment is not None else active and bool(item or view.drawing or view.highlighting))
+        if comment is not None:
+            from .comments import note_color
+            color = QColor(note_color(comment)).getRgbF()[:3]
+        else:
+            color = item['color'] if item else (view.ink_color if view and view.drawing else view.highlight_color if view else (0, 0, 0))
         hex_color = QColor.fromRgbF(*color).name().lower()
         with QSignalBlocker(self.colors):
             self.colors.setCurrentIndex(next((i for i, (_, value) in enumerate(COLORS) if value.lower() == hex_color), -1))
@@ -100,8 +112,8 @@ class AnnotationBar(QToolBar):
         self.thickness.setEnabled(active)
         with QSignalBlocker(self.thickness):
             self.thickness.setValue(round(item['width'] if item else view.ink_width if view else 2))
-        self.remove.setEnabled(active and item is not None)
-        self.undo.setEnabled(active and bool(view.doc._undo))
+        self.remove.setEnabled(notes if comment is not None else active and item is not None)
+        self.undo.setEnabled(bool(view and ((view.notes_model and view.notes_model.deleted is not None) or active and view.doc._undo)))
         self.redo.setEnabled(active and bool(view.doc._redo))
 
 

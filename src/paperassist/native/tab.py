@@ -1,5 +1,5 @@
 """One tab: the main paper and, optionally, one quick-view paper in a resizable split."""
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QSplitter, QSplitterHandle
 
 NARROW = 720  # below this width the quick view always goes underneath
@@ -25,6 +25,8 @@ class Handle(QSplitterHandle):
 
 
 class DocTab(QSplitter):
+    active_changed = Signal()
+
     def __init__(self, main, side_by_side=False):
         super().__init__(Qt.Vertical)
         self.main, self.quick, self.active = main, None, main
@@ -46,6 +48,7 @@ class DocTab(QSplitter):
         self.active = pane
         for each in self.panes():
             each.set_active(pane is each and len(self.panes()) > 1)
+        self.active_changed.emit()
 
     # ---- quick view -----------------------------------------------------------------
     def set_quick(self, pane):

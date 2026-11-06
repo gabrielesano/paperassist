@@ -13,11 +13,11 @@ def locked_by_other(pane, panes):
     return any(other is not pane and other.key == pane.key and other.modified for other in panes)
 
 
-def collect_decisions(panes, ask):
+def collect_decisions(panes, ask, pending=None):
     """Ask about every modified pane before anything closes; None as soon as the user cancels."""
     decisions = []
     for pane in panes:
-        if pane.modified:
+        if (pending(pane) if pending else pane.modified):
             answer = ask(pane)
             if answer == CANCEL:
                 return None

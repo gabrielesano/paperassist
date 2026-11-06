@@ -82,9 +82,8 @@ class LibraryWindowCase(unittest.TestCase):
         return window
 
     def close_window(self, window):
-        for pane in window.all_panes():
-            pane.release()
-        window.hide()
+        window.confirm = lambda panes: True  # edits left over from a test are not the point of the cleanup
+        window.close()  # finishes the background reads that write into the library folder
         window.deleteLater()
 
     def pump(self, until=None, seconds=0.2):
@@ -401,22 +400,23 @@ class ReferencesTests(LibraryWindowCase):
         window = self.make_window()
         source = self.docs[0]
         self.assertEqual(references.get(self.workspace.library, source["id"])["status"], "not_analyzed")
-        tab = self.open_document(window, source)
+        tab = window.open_library_document(source["id"])
         self.assertIn(source["id"], window.details.analyzing)  # busy, not blocked
         self.assertTrue(window.details.progress.isVisibleTo(window))
         self.pump(lambda: window.details.list.count() > 0)
         self.assertIn("Smith", self.panel_texts(window)[0])
-        self.assertTrue(self.panel_texts(window)[0].endswith("Not in library"))
-        window.details.list.itemClicked.emit(window.details.list.item(0))
+        self.assertTrue(self.panel_texts(window)[0].endswith("Not searched"))
+        window.details._open(window.details.list.item(0))
         self.assertIsNone(tab.quick)  # not in the library: nothing to open
 
         ref = references.get(self.workspace.library, source["id"])["references"][0]
         references.link(self.workspace.library, source["id"], ref["id"], self.docs[1]["id"])
         window.details.show_for(source["id"])
+        self.pump(lambda: self.panel_texts(window)[0].endswith("In library"))
         self.assertTrue(self.panel_texts(window)[0].endswith("In library"))
-        window.details.list.itemClicked.emit(window.details.list.item(0))
+        window.details._open(window.details.list.item(0))
         self.assertEqual(tab.quick.key, f"library:{self.docs[1]['id']}")
-        window.details.list.itemClicked.emit(window.details.list.item(0))
+        window.details._open(window.details.list.item(0))
         self.assertEqual(len(window.all_panes()), 2)  # a second click on the same paper changes nothing
 
     def test_the_filter_box_narrows_the_list_and_is_remembered_per_paper(self):
@@ -448,6 +448,81 @@ class ReferencesTests(LibraryWindowCase):
         window = self.make_window(workspace=False)
         window.open_source(FileSource(make_pdf(self.dir / "loose.pdf")))
         self.assertIn("papers in the library", window.details.status.text())
+
+
+class ReferenceCardTests(LibraryWindowCase):
+    """Cards are painted text; only the card in use owns buttons, and the keyboard reaches all of them."""
+
+    def setUp(self):
+        super().setUp()
+        self.window = self.make_window()
+        self.window.acquisition.main_opened = lambda document_id: None
+        self.panel = self.window.details
+        self.open_document(self.window, self.docs[0])
+        self.pump(lambda: self.panel.list.count() == 2 and not self.panel.reading)
+
+    def widgets(self):
+        items = [self.panel.list.item(i) for i in range(self.panel.list.count())]
+        return [widget for item in items if (widget := self.panel.list.itemWidget(item))]
+
+    def test_only_the_expanded_card_owns_widgets(self):
+        self.assertEqual(self.widgets(), [])
+        first, second = self.panel.list.item(0), self.panel.list.item(1)
+        self.panel._expand(first)
+        self.assertEqual(self.widgets(), [self.panel.list.itemWidget(first)])
+        self.panel._expand(second)
+        self.assertEqual(self.widgets(), [self.panel.list.itemWidget(second)])
+        self.panel._expand(first)
+        self.panel.filter.setText("smith")  # a refill keeps the card in use only while it is still listed
+        self.assertEqual(len(self.widgets()), 1)
+        self.panel.filter.setText("zzz")
+        self.assertEqual(self.widgets(), [])
+
+    def test_cards_stay_reachable_openable_and_steppable_from_the_keyboard(self):
+        refs = references.get(self.workspace.library, self.docs[0]["id"])["references"]
+        references.link(self.workspace.library, self.docs[0]["id"], refs[0]["id"], self.docs[1]["id"])
+        self.panel.reload(self.docs[0]["id"])
+        self.pump(lambda: self.panel.list.count() == 2 and not self.panel.reading)
+        self.window.activateWindow()
+        list_, tab = self.panel.list, self.window.tab()
+        list_.setFocus()
+        list_.setCurrentRow(0)
+        QTest.keyClick(list_, Qt.Key_Return)  # Enter expands and moves focus into the card
+        (card,) = self.widgets()
+        self.pump(seconds=0.1)
+        self.assertGreaterEqual(card.height(), card.minimumSizeHint().height())  # nothing of the card is clipped
+        self.assertEqual(card.count.accessibleName(), "Go to the next citation in the text")
+        self.assertEqual(card.title.toolTip(), list_.item(0).toolTip())
+        card.title.linkActivated.emit("open")  # what Enter does on the focused title link
+        self.assertEqual(tab.quick.key, f"library:{self.docs[1]['id']}")
+        found = [{"page": 1, "rects": [Rect(20, 70, 60, 80)]}, {"page": 2, "rects": [Rect(20, 70, 60, 80)]}]
+        with patch("paperassist.native.references_panel.locate_citations", return_value=found):
+            QTest.keyClick(card.count, Qt.Key_Space)
+            self.pump(lambda: card.count.text() == "1 of 2")
+        self.assertIs(self.widgets()[0], card)  # stepping updates text in place, so focus stays on the button
+        self.assertIn("1 of 2", list_.item(0).text())
+        QTest.keyClick(card.count, Qt.Key_Escape)
+        self.assertEqual(self.widgets(), [])
+        self.pump(seconds=0.1)
+        self.assertGreater(list_.visualItemRect(list_.item(0)).height(), 30)  # back to the painted size
+        self.assertTrue(list_.hasFocus() or not self.window.isActiveWindow())
+
+    def test_cards_show_status_tones_tooltips_and_the_partial_note(self):
+        item = self.panel.list.item(0)
+        self.assertEqual(item.text().count("\n"), 2)  # title, count, status
+        self.assertIn("Smith", item.text())
+        ref = self.panel._ref(item.data(Qt.UserRole + 1))
+        self.assertEqual(item.toolTip(), ref["raw"])
+        self.assertEqual(self.panel.list.accessibleName(), "References")
+        ref["local_invalid"] = True
+        self.panel._fill()
+        self.assertEqual(self.panel.list.item(0).data(Qt.UserRole + 2), "#9a4b2e")
+        self.panel.payload_status = "partial"
+        self.panel._fill()
+        self.assertTrue(self.panel.analysis_note.isVisibleTo(self.window))
+        self.panel.payload_status = "complete"
+        self.panel._fill()
+        self.assertFalse(self.panel.analysis_note.isVisibleTo(self.window))
 
 
 if __name__ == "__main__":

@@ -92,53 +92,53 @@ Each item has one implementation tag:
 
 | Acceptance behavior | Source / function | HTTP | Tag |
 | --- | --- | --- | --- |
-| [ ] Comment uses the selected phrase or the current page, leaves Draw/Highlight, and composes in the right column. | app `comment`, pendingAnchor, `showComments` | `D/notes` | UI |
-| [ ] Capture quote plus per-line PDF-space rectangles, including multi-page selections; later PDF selections can update an open draft. | comments `captureCommentAnchor`; app `setDraftAnchor` | PUT `D/notes` on Save comment | PDF.js |
-| [ ] Save comment explicitly; preserve drafts across tabs, Cancel drops a draft, and errors keep the text. | app `saveCommentDraft`, `showComments`, `prepareClose` | GET/PUT `D/notes` | UI |
-| [ ] Show page/text/quote; click Page to navigate to the phrase after zoom, rotation and reopen; support legacy page-only notes and `selection` quotes. | app `showComments`; comments `revealCommentAnchor`, `topLeftDestination` | `D/notes` | PDF.js |
-| [ ] Show persistent red dashed unfilled phrase outlines even with panels collapsed; draw focus separately using comment color. | comments `setCommentIndicators`, `drawIndicators`, `draw`, `clearCommentIndicators` | `D/notes` | PDF.js |
-| [ ] Click a commented phrase in Select to select its note and open Comments; smallest band wins, later note wins equal-size ties. | comments `commentAt`, `commentAtClient`; app `selectComment`, document click handler | `D/notes` | PDF.js |
-| [ ] Recolor a selected comment or delete it using toolbar, list action, Delete/Backspace; Escape deselects; offer one deletion Undo. | app `updateComment`, `offerUndo`, `markSelectedNote`; key handler | GET/PUT `D/notes` | UI |
-| [ ] Notes are immediate independent sidecar saves; saving notes never increments a PDF revision. | `library.py:save_notes`; app `saveCommentDraft`, `updateComment` | PUT `D/notes` | backend |
+| [x] Comment uses the selected phrase or the current page, leaves Draw/Highlight, and composes in the right column. | app `comment`, pendingAnchor, `showComments` | `D/notes` | UI |
+| [x] Capture quote plus per-line PDF-space rectangles, including multi-page selections; later PDF selections can update an open draft. | comments `captureCommentAnchor`; app `setDraftAnchor` | PUT `D/notes` on Save comment | PDF.js |
+| [x] Save comment explicitly; preserve drafts across tabs, Cancel drops a draft, and errors keep the text. | app `saveCommentDraft`, `showComments`, `prepareClose` | GET/PUT `D/notes` | UI |
+| [x] Show page/text/quote; click Page to navigate to the phrase after zoom, rotation and reopen; support legacy page-only notes and `selection` quotes. | app `showComments`; comments `revealCommentAnchor`, `topLeftDestination` | `D/notes` | PDF.js |
+| [x] Show persistent red dashed unfilled phrase outlines even with panels collapsed; draw focus separately using comment color. | comments `setCommentIndicators`, `drawIndicators`, `draw`, `clearCommentIndicators` | `D/notes` | PDF.js |
+| [x] Click a commented phrase in Select to select its note and open Comments; smallest band wins, later note wins equal-size ties. | comments `commentAt`, `commentAtClient`; app `selectComment`, document click handler | `D/notes` | PDF.js |
+| [x] Recolor a selected comment or delete it using toolbar, list action, Delete/Backspace; Escape deselects; offer one deletion Undo. | app `updateComment`, `offerUndo`, `markSelectedNote`; key handler | GET/PUT `D/notes` | UI |
+| [x] Notes are immediate independent sidecar saves; saving notes never increments a PDF revision. | `library.py:save_notes`; app `saveCommentDraft`, `updateComment` | PUT `D/notes` | backend |
 
 ## References column
 
 | Acceptance behavior | Source / function | HTTP | Tag |
 | --- | --- | --- | --- |
-| [ ] References belong to the main PDF; Comments belong to the active pane; switching detail mode preserves this distinction. | app `switchDetail`, `loadReferences`, `showComments` | `R`, active `D/notes` | UI |
-| [ ] Extract/analyze deterministically in a background job; show absent, loading, partial and failed states honestly. | app `analyzeReferences`, `emptyReferences`; `references.py:analyze` | POST `R/analyze`; `J`; `R` | backend |
-| [ ] Rank by source-local detected citations; show ambiguous/unknown counts, not global provider citation counts. | app `loadReferences`, `count`, `updateCount`; `references.py:extract`, `_share` | `R` | backend |
-| [ ] Display raw/candidate metadata, local availability, invalid self-link warnings, retrieval summaries and attempt details with distinct tones. | app `renderReferences`, `referenceTone`, `retrievalSummary`, `attemptList`; references `_resolve` | `R` | UI |
-| [ ] Filter every term across label/authors/year/DOI/title/raw, ignoring case/accents; keep query per tab and show result/empty counts. | app `referenceFilter`; `web/reference-filter.js:referenceMatcher` | — after `R` | UI |
-| [ ] Reference title opens quick view or expands missing-paper actions; card/count clicks step citations once available/expanded. | app `cardClick`, `openReference`, `renderReferences` | `R`; target `D/pdf` if local | UI |
-| [ ] Change or reset manual links without deleting files; reject a new self-link and preserve flagged invalid legacy links for review. | app `linkReference`, `resetReferenceLink`; `references.py:link`, `_conflict` | PATCH `R/{id}` | backend |
-| [ ] Reanalysis preserves manual links, retrieval and corroborated identities; unmatched old entries remain visible for verification. | `references.py:analyze`, `_resolve` | POST `R/analyze` | backend |
+| [x] References belong to the main PDF; Comments belong to the active pane; switching detail mode preserves this distinction. | app `switchDetail`, `loadReferences`, `showComments` | `R`, active `D/notes` | UI |
+| [x] Extract/analyze deterministically in a background job; show absent, loading, partial and failed states honestly. | app `analyzeReferences`, `emptyReferences`; `references.py:analyze` | POST `R/analyze`; `J`; `R` | backend |
+| [x] Rank by source-local detected citations; show ambiguous/unknown counts, not global provider citation counts. | app `loadReferences`, `count`, `updateCount`; `references.py:extract`, `_share` | `R` | backend |
+| [x] Display raw/candidate metadata, local availability, invalid self-link warnings, retrieval summaries and attempt details with distinct tones. | app `renderReferences`, `referenceTone`, `retrievalSummary`, `attemptList`; references `_resolve` | `R` | UI |
+| [x] Filter every term across label/authors/year/DOI/title/raw, ignoring case/accents; keep query per tab and show result/empty counts. | app `referenceFilter`; `web/reference-filter.js:referenceMatcher` | — after `R` | UI |
+| [x] Reference title opens quick view or expands missing-paper actions; card/count clicks step citations once available/expanded. Native: a click or Enter expands the card (title link, count button, actions); double-click or the title link opens a library paper; Esc collapses. | app `cardClick`, `openReference`, `renderReferences` | `R`; target `D/pdf` if local | UI |
+| [x] Change or reset manual links without deleting files; reject a new self-link and preserve flagged invalid legacy links for review. | app `linkReference`, `resetReferenceLink`; `references.py:link`, `_conflict` | PATCH `R/{id}` | backend |
+| [ ] Reanalysis preserves manual links, retrieval and corroborated identities; unmatched old entries remain visible for verification. Native only starts the unchanged backend job (Analyze again); preservation was not re-verified in the native reader. | `references.py:analyze`, `_resolve` | POST `R/analyze` | backend |
 
 ## Citation stepping
 
 | Acceptance behavior | Source / function | HTTP | Tag |
 | --- | --- | --- | --- |
-| [ ] Consume only confidently mapped main-paper internal citation links; fall back to ordinary PDF navigation otherwise. | reader link click handler; app callback `citation` | `R`; target `D/pdf` | PDF.js |
-| [ ] Named destinations map directly; numeric groups/ranges and unambiguous author-year links map entries; grouped matches offer a choice. | app callback `citation` | `R` | UI |
-| [ ] Locate linked citations before the destination's bibliography page; order by nearest text item and merge touching links to one event. | citation-steps `linkIndex`, `locateLinked`, `bibliographyPage`, `nearestItem`, `mergeLinks` | — after `D/pdf`, `R` | PDF.js |
-| [ ] Fall back to server occurrence markers; normalize whitespace, accents, ligatures, hyphens and dash styles, matching repeated markers in order. | citation-steps `locateByText`, `buildTextIndex`, `findMarkers` | `R` occurrence data | PDF.js |
-| [ ] First click starts at/after current reading position, later clicks advance and wrap; briefly outline exact rectangles without dirtying the PDF. | app `stepCitation`; citation-steps `nextCitationIndex`, `readingPosition`, `citationPosition`, `revealCitation` | — | PDF.js |
-| [ ] Page-only occurrences still navigate and disclose that exact text could not be located; counts update from located occurrences. | app `citationNote`, `updateCount`, `stepCitation`; citation-steps `revealCitation` | — | UI |
+| [x] Consume only confidently mapped main-paper internal citation links; fall back to ordinary PDF navigation otherwise. | reader link click handler; app callback `citation` | `R`; target `D/pdf` | PDF.js |
+| [x] Named destinations map directly; numeric groups/ranges and unambiguous author-year links map entries; grouped matches offer a choice. | app callback `citation` | `R` | UI |
+| [x] Locate linked citations before the destination's bibliography page; order by nearest text item and merge touching links to one event. | citation-steps `linkIndex`, `locateLinked`, `bibliographyPage`, `nearestItem`, `mergeLinks` | — after `D/pdf`, `R` | PDF.js |
+| [x] Fall back to server occurrence markers; normalize whitespace, accents, ligatures, hyphens and dash styles, matching repeated markers in order. | citation-steps `locateByText`, `buildTextIndex`, `findMarkers` | `R` occurrence data | PDF.js |
+| [x] First click starts at/after current reading position, later clicks advance and wrap; briefly outline exact rectangles without dirtying the PDF. | app `stepCitation`; citation-steps `nextCitationIndex`, `readingPosition`, `citationPosition`, `revealCitation` | — | PDF.js |
+| [x] Page-only occurrences still navigate and disclose that exact text could not be located; counts update from located occurrences. | app `citationNote`, `updateCount`, `stepCitation`; citation-steps `revealCitation` | — | UI |
 
 ## Retrieval and downloads
 
 | Acceptance behavior | Source / function | HTTP | Tag |
 | --- | --- | --- | --- |
-| [ ] Each newly opened main tab offers all/selected reference PDFs or Continue reading; existing tab switches/preview/import do not cascade. | app `openDocument`, `loadReferences(propose)`, `promote`; HTML `acquire-dialog` | `R`; POST `R/analyze` when needed | UI |
-| [ ] Select all, Clear all, individual boxes and live count; local/legacy entries disabled; retain selection per source in the browser today. | app `renderAcquire`, `saveSelection`, `updateSelectionCount` | —; `paperassist-selection-{id}` remains localStorage | UI |
-| [ ] Show provider configuration/enabled status before acquisition; starting a search is explicit and successful single search opens its PDF. | app `showSources`, `providerSummary`, `runAcquisition`, `showLinked` | `/api/config`; POST `R/download`; `J`; `R` | UI |
-| [ ] Report per-provider progress, cancellation between references, outcomes and unsearched counts; reading remains usable. | app `runAcquisition`, `job`; Workspace `download_references`, `cancel_job` | POST `R/download`; `J`; POST `J/cancel` | backend |
-| [ ] Recheck local reuse under the download lock, fetch legitimate open-access PDFs, validate identity/content, publish managed copies and persist each outcome. | Workspace `download_references`; `retrieval.py:download`; `references.py:link`, `set_retrieval` | POST `R/download` | backend |
-| [ ] Distinguish downloaded/local/not_identified/ambiguous/blocked/not_found/failed; old unversioned results show Not searched. | app `currentRetrieval`, `referenceStatus`; retrieval result version 2 | `R` | backend |
-| [ ] Offer publisher/DOI, open-PDF, prefilled Google/article/PDF searches and configured library-proxy browser links where relevant. | app `openPdfLink`, `libraryLinks`, `retrievalSummary`; sources `proxyUrl` | External URLs; no automatic proxy downloads | UI |
-| [ ] Check downloads folder per reference, identify candidates first, show reasons/size and ask explicit choice for ambiguous candidates. | app `checkFolder`, `folderResult`, `linkFolderFile`; `inbox.py:check_folder`, `link_file` | POST `R/{id}/check-folder`; `J`; POST `R/{id}/link-file` | backend |
-| [ ] Missing downloads-folder configuration opens Preferences at that field; repair earlier questionable downloads in a serialized job. | app `checkFolder`, repair button; Workspace `repair_downloads` | POST `R/repair-downloads`; `J` | backend |
-| [ ] Expose DOI metadata resolution through the existing API even though the current UI does not call it. | Workspace `resolve_reference` | POST `R/{id}/resolve`; `J` | backend |
+| [x] Each newly opened main tab offers all/selected reference PDFs or Continue reading; existing tab switches/preview/import do not cascade. | app `openDocument`, `loadReferences(propose)`, `promote`; HTML `acquire-dialog` | `R`; POST `R/analyze` when needed | UI |
+| [x] Select all, Clear all, individual boxes and live count; local/legacy entries disabled; retain selection per source in the browser today. Native: selections are kept per source id in `native-acquisition.json` inside the library folder (UI-only sidecar written atomically; no database migration; web localStorage selections are not imported). | app `renderAcquire`, `saveSelection`, `updateSelectionCount` | —; `paperassist-selection-{id}` remains localStorage | UI |
+| [x] Show provider configuration/enabled status before acquisition; starting a search is explicit and successful single search opens its PDF. | app `showSources`, `providerSummary`, `runAcquisition`, `showLinked` | `/api/config`; POST `R/download`; `J`; `R` | UI |
+| [x] Report per-provider progress, cancellation between references, outcomes and unsearched counts; reading remains usable. | app `runAcquisition`, `job`; Workspace `download_references`, `cancel_job` | POST `R/download`; `J`; POST `J/cancel` | backend |
+| [ ] Recheck local reuse under the download lock, fetch legitimate open-access PDFs, validate identity/content, publish managed copies and persist each outcome. Native starts the unchanged Workspace job; live providers were not exercised in the native checks (mocked). | Workspace `download_references`; `retrieval.py:download`; `references.py:link`, `set_retrieval` | POST `R/download` | backend |
+| [x] Distinguish downloaded/local/not_identified/ambiguous/blocked/not_found/failed; old unversioned results show Not searched. | app `currentRetrieval`, `referenceStatus`; retrieval result version 2 | `R` | backend |
+| [x] Offer publisher/DOI, open-PDF, prefilled Google/article/PDF searches and configured library-proxy browser links where relevant. Links open only on an explicit click; the system-browser launch was checked with a patched opener. | app `openPdfLink`, `libraryLinks`, `retrievalSummary`; sources `proxyUrl` | External URLs; no automatic proxy downloads | UI |
+| [x] Check downloads folder per reference, identify candidates first, show reasons/size and ask explicit choice for ambiguous candidates. Candidate and ambiguity UI checked in a real window with a mocked folder result; the backend scan was not re-run natively. | app `checkFolder`, `folderResult`, `linkFolderFile`; `inbox.py:check_folder`, `link_file` | POST `R/{id}/check-folder`; `J`; POST `R/{id}/link-file` | backend |
+| [ ] Missing downloads-folder configuration opens Preferences at that field; repair earlier questionable downloads in a serialized job. The Preferences hook (`preferences_requested`, field `inbox`) is emitted; until the preferences dialog is wired the window shows a status message instead. Repair button not exercised. | app `checkFolder`, repair button; Workspace `repair_downloads` | POST `R/repair-downloads`; `J` | backend |
+| [ ] Expose DOI metadata resolution through the existing API even though the current UI does not call it. The card has a Resolve DOI metadata button; not exercised in the native checks. | Workspace `resolve_reference` | POST `R/{id}/resolve`; `J` | backend |
 
 ## Settings and preferences
 

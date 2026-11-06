@@ -6,6 +6,8 @@ from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QSp
 from paperassist import settings
 
 from .annotation_bar import install as install_annotation_bar
+from .acquisition import AcquisitionController
+from .comments import install as install_comments
 from .document import SaveState
 from .library_dialog import LibraryDialog
 from .library_source import LibrarySource
@@ -14,7 +16,7 @@ from .pane import Pane
 from .positions import PositionKeeper
 from .references_panel import ReferencesPanel
 from .rules import CANCEL, DISCARD, SAVE, apply_decisions, collect_decisions, locked_by_other
-from .sidebar import SideColumn
+from .sidebar import DetailsPanel, SideColumn
 from .source import FileSource
 from .tab import DocTab
 
@@ -32,6 +34,7 @@ QTabBar::tab { padding: 5px 12px; }
 
 
 class MainWindow(QMainWindow):
+
     def __init__(self, client, workspace=None):
         """workspace is the opened library, or None for loose files."""
         super().__init__()
@@ -48,6 +51,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.state_label)
         self._build_actions()
         self.annotation_bar = install_annotation_bar(self)
+        self.comments.draft_changed.connect(self.refresh)
         self.refresh()
 
     def _build_actions(self):
@@ -72,7 +76,15 @@ class MainWindow(QMainWindow):
         self.outline.navigate.connect(lambda page, y: self.tab() and self.tab().main.view.goto(page, y))
         self.details = ReferencesPanel(self.workspace)
         self.details.open_requested.connect(self.open_library_document_in_quick_view)
-        self.outline_column, self.details_column = SideColumn("Outline", self.outline), SideColumn("References", self.details)
+        self.comments = install_comments(self)
+        self.detail_switch = DetailsPanel(self.details, self.comments.panel)
+        self.acquisition = AcquisitionController(self)
+        self.details.set_acquisition(self.acquisition)
+        self.details.references_loaded.connect(self.acquisition.set_reference_data)
+        self.acquisition.open_requested.connect(self.open_library_document_in_quick_view)
+        self.acquisition.preferences_requested.connect(self._acquisition_preferences)
+        self.details.reveal_requested.connect(lambda: self.comments.show_mode("references"))
+        self.outline_column, self.details_column = SideColumn("Outline", self.outline), SideColumn("References / Comments", self.detail_switch)
         self.outline_column.hide_requested.connect(lambda: self.set_columns(outline=False))
         self.details_column.hide_requested.connect(lambda: self.set_columns(details=False))
         self.outline_column.setVisible(saved.get("outline_expanded") is not False)
@@ -113,9 +125,18 @@ class MainWindow(QMainWindow):
         if self.outline_column.isVisibleTo(self) and self._shown_for.get("outline", False) != key:
             self._shown_for["outline"] = key
             self.outline.show_outline(self._outline_entries(main) if main else [], len(main.view.doc) if main else 0)
-        if self.details_column.isVisibleTo(self) and self._shown_for.get("details", False) != key:
+        self.details.bind_view(main.view if main else None)
+        if self._shown_for.get("details", False) != key:
             self._shown_for["details"] = key
             self.details.show_for(getattr(main.view.doc.source, "document_id", None) if main else None)
+        self.comments.refresh()
+
+    def _acquisition_preferences(self, field):
+        callback = getattr(self, "show_preferences", None)
+        if callback:
+            callback(field)
+        else:
+            self.statusBar().showMessage("Configure the downloads folder in Preferences before checking it.", 8000)
 
     def _outline_entries(self, main):
         if main.key not in self.outlines:  # reading a big PDF's bookmarks takes a moment; edits never change them
@@ -176,6 +197,7 @@ class MainWindow(QMainWindow):
         pane = Pane(source, self.client)
         pane.view.highlighting = self.highlight_action.isChecked()
         pane.view.edited.connect(self.refresh)
+        self.comments.bind(pane)
         if self.workspace and hasattr(source, "document_id"):
             PositionKeeper(pane, self.workspace).failed.connect(lambda message: self.statusBar().showMessage(message, 8000))
         return pane
@@ -183,6 +205,9 @@ class MainWindow(QMainWindow):
     def _add_tab(self, tab):
         self.tabs.setCurrentIndex(self.tabs.addTab(tab, ""))
         self.refresh()
+        document_id = getattr(tab.main.view.doc.source, "document_id", None)
+        if document_id is not None:
+            self.acquisition.main_opened(document_id)
         return tab
 
     def open_source(self, source):
@@ -194,7 +219,9 @@ class MainWindow(QMainWindow):
         return self._add_tab(self._wrap(self._new_pane(source)))
 
     def _wrap(self, main):
-        return DocTab(main, self.side_by_side)
+        tab = DocTab(main, self.side_by_side)
+        tab.active_changed.connect(self.refresh)
+        return tab
 
     def _set_highlighting(self, on):
         for pane in self.all_panes():
@@ -259,7 +286,8 @@ class MainWindow(QMainWindow):
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
             state = min((p.state for p in tab.panes()), key=WORST_FIRST.index)
-            self.tabs.setTabText(i, tab.main.title[:28] + MARKERS.get(state, ""))
+            draft = any(self.comments.has_draft(p) for p in tab.panes())
+            self.tabs.setTabText(i, tab.main.title[:28] + (MARKERS.get(state, "") or (" ●" if draft else "")))
             self.tabs.setTabToolTip(i, f"{tab.main.title} — {state.value}")
         if hasattr(self, "annotation_bar"):  # refresh can run while the window is being built
             self.annotation_bar.refresh()
@@ -272,6 +300,8 @@ class MainWindow(QMainWindow):
         detail = f"{pane.state.value}: {pane.view.doc.error}. Use Save to retry." if pane.state is SaveState.FAILED else pane.state.value
         if pane.view.locked:
             detail = "Read-only, last saved version"
+        if self.comments.has_draft(pane):
+            detail += " · Comment draft"
         self.state_label.setText(f"{pane.title} — {detail}")
         marker = MARKERS.get(pane.state, "").strip()
         self.setWindowTitle(f"{marker} {pane.title} — PaperAssist".strip() if marker else f"{pane.title} — PaperAssist")
@@ -300,8 +330,19 @@ class MainWindow(QMainWindow):
 
     def confirm(self, panes):
         """True when closing these panes may go ahead: every modified one was saved or discarded."""
-        decisions = collect_decisions(panes, self.ask_decision)
-        return decisions is not None and apply_decisions(decisions, self._save_pane)
+        decisions = collect_decisions(panes, self.ask_decision,
+                                      lambda p: p.modified or self.comments.has_draft(p))
+        if decisions is None or not apply_decisions(decisions, self._save_pending):
+            return False
+        for pane, answer in decisions:
+            if answer == DISCARD:
+                self.comments.discard_draft(pane)
+        return True
+
+    def _save_pending(self, pane):
+        if pane.modified and not self._save_pane(pane):
+            return False
+        return not self.comments.has_draft(pane) or self.comments.save_draft(pane)
 
     def close_tab(self, index):
         tab = self.tabs.widget(index)
@@ -320,6 +361,7 @@ class MainWindow(QMainWindow):
         for pane in self.all_panes():
             pane.release()  # also stores the reading positions
         self.details.close()
+        self.acquisition.close()
         if self.library_dialog:
             self.library_dialog.close()
         event.accept()
