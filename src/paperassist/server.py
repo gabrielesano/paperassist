@@ -297,7 +297,10 @@ def _serve_library(host, port, data_dir, open_browser, source, *, choose_folder=
         previous = None
         try:
             url = f"http://{'[%s]' % host if ':' in host else host}:{server.server_port}"
-            marker.write_text(json.dumps({'url': url}), encoding='utf-8')
+            # Other processes poll for the marker, so it must never be seen half-written.
+            partial = marker.with_name('.server.json.partial')
+            partial.write_text(json.dumps({'url': url}), encoding='utf-8')
+            os.replace(partial, marker)
             print(f'Library: {Path(data_dir).resolve()}\nPaperAssist is running at {url} (press Ctrl+C to stop)', flush=True)
             if open_browser:
                 # The socket listens already; the first browser request waits in its backlog.
