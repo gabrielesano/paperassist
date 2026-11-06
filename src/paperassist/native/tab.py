@@ -1,5 +1,5 @@
 """One tab: the main paper and, optionally, one quick-view paper in a resizable split."""
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import QSplitter, QSplitterHandle
 
 NARROW = 720  # below this width the quick view always goes underneath
@@ -12,6 +12,11 @@ class Handle(QSplitterHandle):
     def __init__(self, orientation, splitter):
         super().__init__(orientation, splitter)
         self.setFocusPolicy(Qt.TabFocus)
+
+    def event(self, event):
+        if event.type() == QEvent.ShortcutOverride and event.key() in (Qt.Key_Home, Qt.Key_End):
+            event.accept()  # the separator moves with these keys; the page shortcuts must not take them
+        return super().event(event)
 
     def keyPressEvent(self, event):
         before, after = (Qt.Key_Up, Qt.Key_Down) if self.orientation() == Qt.Vertical else (Qt.Key_Left, Qt.Key_Right)

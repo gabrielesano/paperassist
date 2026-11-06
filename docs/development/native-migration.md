@@ -42,7 +42,7 @@ Each item has one implementation tag:
 | [ ] Open papers in independent in-app tabs; an already-open file selects its existing owner instead of creating a second editable view. | app `openDocument`, `byId`, `selectTab` | `D/pdf`, `D/view`, `R`, `D/notes` on opening | UI |
 | [ ] Switching tabs preserves page, zoom, find query, comment draft, unsaved editors and each tab's quick view. | app `selectTab`, `refreshToolbar`; reader `release`, `show` | `D/view`; `R`, `D/notes` | PDF.js |
 | [ ] Show full title in accessible names, shortened visible labels, active tab and modified state; last close restores welcome. | app `renderTabs`, `closeTab`; CSS `.tab`, `.current` | — | UI |
-| [ ] Rename with double-click/F2; Enter/blur commits, Escape cancels; an empty label restores the title without changing bibliography or filenames. | app `renameTab`; `library.py:set_label` | PUT `D/label` | backend |
+| [x] Rename with double-click/F2; Enter/blur commits, Escape cancels; an empty label restores the title without changing bibliography or filenames. | app `renameTab`; `library.py:set_label` | PUT `D/label` | backend |
 | [ ] Release hidden page canvases and recreate visible pages while retaining unsaved edits; share parsing resources where supported. | reader `release`, `show`, `open`; app `selectTab` | `D/pdf` on open only | PDF.js |
 | [ ] Tabs are session-local; there is no automatic saved-tab-session restoration today. | app `state.tabs`, `openDocument` | — | UI |
 
@@ -52,7 +52,7 @@ Each item has one implementation tag:
 | --- | --- | --- | --- |
 | [ ] Render local PDFs with text, links, existing annotations and embedded/system font fallbacks; report load errors. | reader `open`, `PDFViewer`, `PDFLinkService`; bundled PDF.js assets | `D/pdf`; vendor font/cmap/wasm/ICC resources | PDF.js |
 | [ ] Render outline hierarchy; use numbered page buttons when no outline exists. | app `showOutline`; `pdf.getOutline`, `links.goToDestination` | `D/pdf` | PDF.js |
-| [ ] Previous/next and typed page number clamp to valid pages and show total pages. | app `wireControls`, `refreshControls` | PUT `D/view` | UI |
+| [x] Previous/next and typed page number clamp to valid pages and show total pages. Native: N/P keys and the status-bar page field. | app `wireControls`, `refreshControls` | PUT `D/view` | UI |
 | [ ] Zoom in/out and fit width; retain a numeric scale or fit mode and one-based page per exact PDF. | app `wireControls`; reader pagesinit, `remember`; Library view methods | GET/PUT `D/view` | backend |
 | [ ] Persist page and zoom, not pixel scroll offset, rotation or open tabs; initial restore must not overwrite the saved position. | reader `open`, pagesinit, `remember` | GET/PUT `D/view`; PUT `D/view?if_missing=1` during migration | UI |
 | [ ] Each paper has independent case/accent-insensitive find text, all-match highlighting, previous/next and Enter/Shift+Enter. | app `wireControls`, `refreshControls`; reader `PDFFindController` | — after `D/pdf` | PDF.js |
@@ -169,13 +169,13 @@ Save uses PUT `D/pdf`, navigation uses PUT `D/view`, deletion of notes uses PUT
 | Acceptance behavior | Source / function | HTTP | Tag |
 | --- | --- | --- | --- |
 | [ ] `?` help, Mod+`,` Preferences, `L` Library, Mod+`S` explicit PDF Save. | shortcuts table; app Save handler | As above; `/api/documents` for Library | UI |
-| [ ] `N/J` next page, `P/K` previous, Home/End first/last, `G` page field, Enter returns focus to the document. | shortcuts table, `focusControl`, `focusDocument` | PUT `D/view` | UI |
-| [ ] Arrows, Space/Shift+Space and Page Up/Down scroll a focused document. | browser scrolling; shortcuts help | — | UI |
+| [x] `N/J` next page, `P/K` previous, Home/End first/last, `G` page field, Enter returns focus to the document. | shortcuts table, `focusControl`, `focusDocument` | PUT `D/view` | UI |
+| [x] Arrows, Space/Shift+Space and Page Up/Down scroll a focused document. | browser scrolling; shortcuts help | — | UI |
 | [ ] Mod+`F` focuses active paper Find; Enter/Shift+Enter moves matches; Esc leaves toolbar field without clearing its query. | shortcuts `fieldReader`, `focusControl`; app `wireControls` | — | UI |
-| [ ] Mod+`+`/`=` zoom in, Mod+`-` out, Mod+`0` fit width. | shortcuts `clickControl` | PUT `D/view` | UI |
-| [ ] `V/D/H/C` Select/Draw/Highlight/Comment; Delete/Backspace deletes selection; Mod+Z undo and Mod+Shift+Z/Ctrl+Y redo. | shortcuts `editingAction`; app comment key handler; PDF.js editing actions | PDF/notes writes only as described above | PDF.js |
-| [ ] `,`/`.` previous/next tab without wrap, `X` close tab, F2 rename only a focused tab title. | shortcuts `stepTab`, table; app `renameTab` | PUT `D/label` on commit | UI |
-| [ ] `B` panels, `O` outline, `1/2` References/Comments, `/` filter; Esc clears filter then returns to PDF on next press. | shortcuts `showPanel`, table | PUT `/api/preferences`; `R`, `D/notes` | UI |
+| [x] Mod+`+`/`=` zoom in, Mod+`-` out, Mod+`0` fit width. | shortcuts `clickControl` | PUT `D/view` | UI |
+| [x] `V/D/H/C` Select/Draw/Highlight/Comment; Delete/Backspace deletes selection; Mod+Z undo and Mod+Shift+Z/Ctrl+Y redo. | shortcuts `editingAction`; app comment key handler; PDF.js editing actions | PDF/notes writes only as described above | PDF.js |
+| [x] `,`/`.` previous/next tab without wrap, `X` close tab, F2 rename only a focused tab title. | shortcuts `stepTab`, table; app `renameTab` | PUT `D/label` on commit | UI |
+| [x] `B` panels, `O` outline, `1/2` References/Comments, `/` filter; Esc clears filter then returns to PDF on next press. | shortcuts `showPanel`, table | PUT `/api/preferences`; `R`, `D/notes` | UI |
 | [ ] Tab/Shift+Tab traverse controls, Enter/Space activate; dialog Esc closes/cancels and restores appropriate focus. | shortcuts help; HTML dialogs; app-menu | — | UI |
 | [ ] Do not claim browser-reserved Ctrl+T/W/Tab or Alt+arrows as existing app commands. | shortcuts file preamble | — | browser-only |
 

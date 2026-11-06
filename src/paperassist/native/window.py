@@ -1,5 +1,5 @@
 """Main window: one paper per tab, save state everywhere, and the Save/Discard/Cancel rules."""
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QTabWidget
 
@@ -16,6 +16,7 @@ from .pane import Pane
 from .positions import PositionKeeper
 from .references_panel import ReferencesPanel
 from .rules import CANCEL, DISCARD, SAVE, apply_decisions, collect_decisions, locked_by_other
+from .shortcuts import install as install_shortcuts
 from .sidebar import DetailsPanel, SideColumn
 from .source import FileSource
 from .tab import DocTab
@@ -34,6 +35,7 @@ QTabBar::tab { padding: 5px 12px; }
 
 
 class MainWindow(QMainWindow):
+    refreshed = Signal()  # documents, panes or save states changed; the page field follows it
 
     def __init__(self, client, workspace=None):
         """workspace is the opened library, or None for loose files."""
@@ -51,6 +53,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.state_label)
         self._build_actions()
         self.annotation_bar = install_annotation_bar(self)
+        install_shortcuts(self)
         self.comments.draft_changed.connect(self.refresh)
         self.refresh()
 
@@ -292,6 +295,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "annotation_bar"):  # refresh can run while the window is being built
             self.annotation_bar.refresh()
         self._update_columns()
+        self.refreshed.emit()
         pane = self.pane()
         if pane is None:
             self.setWindowTitle("PaperAssist")

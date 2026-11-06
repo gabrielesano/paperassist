@@ -237,6 +237,8 @@ class PdfView(QAbstractScrollArea):
             self.select_comment(None)
         elif event.key() in steps:
             bar.triggerAction(steps[event.key()])
+        elif event.key() == Qt.Key_Space:
+            bar.triggerAction(QScrollBar.SliderPageStepSub if event.modifiers() & Qt.ShiftModifier else QScrollBar.SliderPageStepAdd)
         else:
             super().keyPressEvent(event)
 
