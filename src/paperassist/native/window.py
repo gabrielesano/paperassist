@@ -1,12 +1,20 @@
 """Main window: one paper per tab, save state everywhere, and the Save/Discard/Cancel rules."""
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QTabWidget
+from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QTabWidget
+
+from paperassist import settings
 
 from .annotation_bar import install as install_annotation_bar
 from .document import SaveState
+from .library_dialog import LibraryDialog
+from .library_source import LibrarySource
+from .outline import OutlinePanel, read_outline
 from .pane import Pane
+from .positions import PositionKeeper
+from .references_panel import ReferencesPanel
 from .rules import CANCEL, DISCARD, SAVE, apply_decisions, collect_decisions, locked_by_other
+from .sidebar import SideColumn
 from .source import FileSource
 from .tab import DocTab
 
@@ -24,16 +32,18 @@ QTabBar::tab { padding: 5px 12px; }
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, client, settings=None):
+    def __init__(self, client, workspace=None):
+        """workspace is the opened library, or None for loose files."""
         super().__init__()
-        self.client = client
-        self.settings = settings or QSettings("PaperAssist", "native")
+        self.client, self.workspace, self.library_dialog = client, workspace, None
+        saved = settings.preferences()  # shared with the web reader
+        self.side_by_side = saved.get("quick_view_layout") == "side"
         self.resize(1400, 900)
         self.setStyleSheet(STYLE)
         self.tabs = QTabWidget(tabsClosable=True, movable=True, documentMode=True)
         self.tabs.tabCloseRequested.connect(lambda index: self.close_tab(index))
         self.tabs.currentChanged.connect(lambda _: self.refresh())
-        self.setCentralWidget(self.tabs)
+        self._build_columns(saved)
         self.state_label = QLabel()
         self.statusBar().addWidget(self.state_label)
         self._build_actions()
@@ -45,7 +55,8 @@ class MainWindow(QMainWindow):
         bar.setMovable(False)
         self.highlight_action = self._action(bar, "Highlight", ["H"], self._set_highlighting, checkable=True)
         for text, keys, slot in [
-            ("Open", ["Ctrl+O"], self.open_dialog), ("Save", ["Ctrl+S"], self.save),
+            ("Open", ["Ctrl+O"], self.open_dialog), ("Library", ["Ctrl+L"], self.show_library),
+            ("Panels", ["Ctrl+B"], self.toggle_columns), ("Save", ["Ctrl+S"], self.save),
             ("Find", ["Ctrl+F"], lambda: self._on_pane(lambda p: p.find_bar.open())),
             ("Zoom out", ["Ctrl+-"], lambda: self._on_pane(lambda p: p.view.zoom_by(0.8))),
             ("Zoom in", ["Ctrl+=", "Ctrl++"], lambda: self._on_pane(lambda p: p.view.zoom_by(1.25))),
@@ -54,6 +65,89 @@ class MainWindow(QMainWindow):
             ("Quick view", ["Ctrl+E"], self.quick_dialog), ("Close tab", ["Ctrl+W"], lambda: self.close_tab(self.tabs.currentIndex())),
         ]:
             self._action(bar, text, keys, slot)
+
+    # ---- side columns ----------------------------------------------------------------------
+    def _build_columns(self, saved):
+        self.outline = OutlinePanel()
+        self.outline.navigate.connect(lambda page, y: self.tab() and self.tab().main.view.goto(page, y))
+        self.details = ReferencesPanel(self.workspace)
+        self.details.open_requested.connect(self.open_library_document_in_quick_view)
+        self.outline_column, self.details_column = SideColumn("Outline", self.outline), SideColumn("References", self.details)
+        self.outline_column.hide_requested.connect(lambda: self.set_columns(outline=False))
+        self.details_column.hide_requested.connect(lambda: self.set_columns(details=False))
+        self.outline_column.setVisible(saved.get("outline_expanded") is not False)
+        self.details_column.setVisible(saved.get("details_expanded") is not False)
+        self._shown_for, self.outlines = {}, {}  # column -> key of the paper it shows; bookmarks by paper key
+        splitter = QSplitter(Qt.Horizontal, childrenCollapsible=False)
+        for widget in (self.outline_column, self.tabs, self.details_column):
+            splitter.addWidget(widget)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([230, 840, 330])
+        self.setCentralWidget(splitter)
+
+    def set_columns(self, outline=None, details=None):
+        changes = {}
+        for column, name, visible in ((self.outline_column, "outline_expanded", outline),
+                                      (self.details_column, "details_expanded", details)):
+            if visible is not None:
+                column.setVisible(visible)
+                changes[name] = visible
+        self._remember(**changes)
+        self._update_columns()
+
+    def toggle_columns(self):
+        """Hide both columns when both show; otherwise show both, which also restores a lone collapsed one."""
+        both = self.outline_column.isVisibleTo(self) and self.details_column.isVisibleTo(self)
+        self.set_columns(outline=not both, details=not both)
+
+    def _remember(self, **changes):
+        try:
+            settings.update_preferences(changes)
+        except (OSError, ValueError) as error:
+            self.statusBar().showMessage(f"Could not save the interface preferences: {error}", 8000)
+
+    def _update_columns(self):
+        """Fill the visible columns for the main paper of the current tab, once per paper."""
+        main = self.tab().main if self.tab() else None
+        key = main.key if main else None
+        if self.outline_column.isVisibleTo(self) and self._shown_for.get("outline", False) != key:
+            self._shown_for["outline"] = key
+            self.outline.show_outline(self._outline_entries(main) if main else [], len(main.view.doc) if main else 0)
+        if self.details_column.isVisibleTo(self) and self._shown_for.get("details", False) != key:
+            self._shown_for["details"] = key
+            self.details.show_for(getattr(main.view.doc.source, "document_id", None) if main else None)
+
+    def _outline_entries(self, main):
+        if main.key not in self.outlines:  # reading a big PDF's bookmarks takes a moment; edits never change them
+            self.outlines[main.key] = read_outline(main.view.doc.pdf.data)
+        return self.outlines[main.key]
+
+    # ---- library --------------------------------------------------------------------------
+    def show_library(self):
+        if self.workspace is None:
+            self.statusBar().showMessage("Start PaperAssist without file arguments to open the library.", 6000)
+            return
+        if self.library_dialog is None:
+            self.library_dialog = LibraryDialog(self.workspace, self)
+            self.library_dialog.open_requested.connect(self.open_library_document)
+            self.library_dialog.quick_requested.connect(self.open_library_document_in_quick_view)
+        self.library_dialog.show()
+        self.library_dialog.raise_()
+        self.library_dialog.activateWindow()
+
+    def library_source(self, document_id):
+        return LibrarySource(self.workspace.library, self.workspace.library.get_document(document_id))
+
+    def open_library_document(self, document_id):
+        return self.open_source(self.library_source(document_id))
+
+    def open_library_document_in_quick_view(self, document_id):
+        source = self.library_source(document_id)
+        if not self.tab():
+            return self.open_source(source)
+        if self.tab().quick and self.tab().quick.key == source.key:
+            return self.tab().quick  # clicking the paper that is already there changes nothing
+        return self.open_quick(source)
 
     def _on_pane(self, action):
         if self.pane():
@@ -82,6 +176,8 @@ class MainWindow(QMainWindow):
         pane = Pane(source, self.client)
         pane.view.highlighting = self.highlight_action.isChecked()
         pane.view.edited.connect(self.refresh)
+        if self.workspace and hasattr(source, "document_id"):
+            PositionKeeper(pane, self.workspace).failed.connect(lambda message: self.statusBar().showMessage(message, 8000))
         return pane
 
     def _add_tab(self, tab):
@@ -98,7 +194,7 @@ class MainWindow(QMainWindow):
         return self._add_tab(self._wrap(self._new_pane(source)))
 
     def _wrap(self, main):
-        return DocTab(main, self.settings.value("quick_side_by_side", False, bool))
+        return DocTab(main, self.side_by_side)
 
     def _set_highlighting(self, on):
         for pane in self.all_panes():
@@ -136,10 +232,10 @@ class MainWindow(QMainWindow):
             self.refresh()
 
     def toggle_quick_layout(self):
-        side_by_side = not self.tab().side_by_side
-        self.settings.setValue("quick_side_by_side", side_by_side)  # remembered for the next session
+        self.side_by_side = not self.tab().side_by_side
+        self._remember(quick_view_layout="side" if self.side_by_side else "stacked")
         for i in range(self.tabs.count()):
-            self.tabs.widget(i).set_side_by_side(side_by_side)
+            self.tabs.widget(i).set_side_by_side(self.side_by_side)
 
     def promote_quick(self):
         """Move the quick pane into its own tab with its page, zoom and unsaved edits."""
@@ -167,6 +263,7 @@ class MainWindow(QMainWindow):
             self.tabs.setTabToolTip(i, f"{tab.main.title} — {state.value}")
         if hasattr(self, "annotation_bar"):  # refresh can run while the window is being built
             self.annotation_bar.refresh()
+        self._update_columns()
         pane = self.pane()
         if pane is None:
             self.setWindowTitle("PaperAssist")
@@ -221,5 +318,8 @@ class MainWindow(QMainWindow):
         if not self.confirm(self.all_panes()):
             return event.ignore()
         for pane in self.all_panes():
-            pane.release()
+            pane.release()  # also stores the reading positions
+        self.details.close()
+        if self.library_dialog:
+            self.library_dialog.close()
         event.accept()

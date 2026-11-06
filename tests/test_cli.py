@@ -117,7 +117,7 @@ class CommandTests(unittest.TestCase):
         self.directory = Path(self.tmp.name)
 
     def test_no_command_serves_default_library_and_opens_browser(self):
-        with patch('paperassist.cli.locate', return_value=(self.directory, 'default')), \
+        with patch('paperassist.cli.locate_existing', return_value=(self.directory, 'default')), \
              patch('paperassist.server.serve') as serve_mock:
             self.assertEqual(main([]), 0)
         serve_mock.assert_called_once_with('127.0.0.1', 8765, self.directory, True, 'default')
@@ -143,7 +143,7 @@ class CommandTests(unittest.TestCase):
 
     def test_desktop_entry_point_uses_the_same_command_path(self):
         with patch('paperassist.cli._desktop', return_value=0) as desktop, \
-             patch('paperassist.cli.locate', return_value=(self.directory, 'default')):
+             patch('paperassist.cli.locate_existing', return_value=(self.directory, 'default')):
             self.assertEqual(desktop_main([]), 0)
         desktop.assert_called_once_with(self.directory, 'default', 8765)
 
@@ -157,7 +157,7 @@ class CommandTests(unittest.TestCase):
         with library_lock(self.directory), redirect_stderr(message), patch('paperassist.cli.webbrowser.open') as opened:
             self.assertEqual(main(['serve', '--data-dir', str(self.directory)]), 1)
             opened.assert_not_called()
-            with patch('paperassist.cli.locate', return_value=(self.directory, 'default')):
+            with patch('paperassist.cli.locate_existing', return_value=(self.directory, 'default')):
                 self.assertEqual(main([]), 0)
             opened.assert_called_once_with('http://127.0.0.1:8765')
         self.assertIn('already open in a running PaperAssist server', message.getvalue())

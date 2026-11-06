@@ -86,3 +86,16 @@ def locate(option=None):
     if saved := saved_library():
         return saved, 'settings'
     return platform_data_dir(), 'default'
+
+
+def locate_existing(option=None):
+    """locate(), but a library chosen in the app must still exist.
+
+    A chosen library always has its catalog; without it the folder is gone (say, an
+    unplugged drive), and silently starting an empty library there would hide that.
+    """
+    directory, source = locate(option)
+    if source == 'settings' and not (directory / 'library.sqlite3').is_file():
+        raise FileNotFoundError(f'The library folder chosen in the app is missing: {directory}\n'
+                                'Reconnect its drive, or start with --data-dir to use another folder.')
+    return directory, source

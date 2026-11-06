@@ -11,11 +11,12 @@ from unittest.mock import patch
 from test_native_support import make_pdf, needs_qt, pdf_available
 
 if pdf_available:
-    from PySide6.QtCore import QPoint, QSettings, Qt
+    from PySide6.QtCore import QPoint, Qt
     from PySide6.QtGui import QPixmap
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
 
+    from paperassist import settings
     from paperassist.native.document import SaveState
     from paperassist.native.engine import Link, Rect
     from paperassist.native.renderer import RenderClient
@@ -50,7 +51,10 @@ class WindowTests(unittest.TestCase):
         cls._files.cleanup()
 
     def setUp(self):
-        self.window = MainWindow(self.client, QSettings(str(self.dir / f"{self.id()}.ini"), QSettings.IniFormat))
+        config = patch("paperassist.paths.config_file", return_value=self.dir / f"{self.id()}-config.json")
+        config.start()
+        self.addCleanup(config.stop)
+        self.window = MainWindow(self.client)
         self.window.resize(1200, 800)
         self.window.show()
         self.answers, self.asked, self.failures = collections.deque(), [], []
@@ -293,13 +297,14 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(self.asked, [])
 
     def test_the_layout_switch_is_remembered_and_narrow_windows_always_stack(self):
+        self.window.set_columns(outline=False, details=False)  # the side columns leave the reader too narrow to split
         tab = self.open("a")
         quick = self.window.open_quick(FileSource(self.pdf("b")))
         self.assertEqual(tab.orientation(), Qt.Vertical)
         quick.layout_button.click()
         self.pump()
         self.assertEqual(tab.orientation(), Qt.Horizontal)
-        self.assertTrue(self.window.settings.value("quick_side_by_side", False, bool))
+        self.assertEqual(settings.preferences()["quick_view_layout"], "side")
         self.window.resize(600, 800)
         self.pump()
         self.assertEqual(tab.orientation(), Qt.Vertical)

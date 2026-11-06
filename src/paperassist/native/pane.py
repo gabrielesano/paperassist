@@ -51,6 +51,7 @@ class Pane(QFrame):
     quick_layout_toggled = Signal()
     promote_requested = Signal()
     close_requested = Signal()
+    released = Signal()  # the document is about to close; last chance to store its reading position
 
     def __init__(self, source, client):
         super().__init__()
@@ -135,5 +136,6 @@ class Pane(QFrame):
             self.close_requested.emit()
 
     def release(self):
+        self.released.emit()
         self.view.release()
         self.view.doc.close()

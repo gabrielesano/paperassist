@@ -6,7 +6,7 @@ import webbrowser
 from collections.abc import Sequence
 
 from paperassist import __version__
-from paperassist.paths import locate
+from paperassist.paths import locate_existing
 
 
 def _serve(host, port, data_dir, open_browser, source):
@@ -54,12 +54,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     importer.add_argument('paths', nargs='+')
     importer.add_argument('--data-dir', help='library directory (default: PAPERASSIST_DATA_DIR, the folder chosen in the app, or the per-user data directory)')
     args = parser.parse_args(argv)
-    data_dir, source = locate(getattr(args, 'data_dir', None))
-    # A chosen library always has its catalog; without it the folder is gone (say, an
-    # unplugged drive), and silently starting an empty library there would hide that.
-    if source == 'settings' and not (data_dir / 'library.sqlite3').is_file():
-        print(f'The library folder chosen in the app is missing: {data_dir}\n'
-              'Reconnect its drive, or start with --data-dir to use another folder.', file=sys.stderr)
+    try:
+        data_dir, source = locate_existing(getattr(args, 'data_dir', None))
+    except FileNotFoundError as error:
+        print(error, file=sys.stderr)
         return 1
     if args.command is None:
         return _serve('127.0.0.1', 8765, data_dir, True, source)
