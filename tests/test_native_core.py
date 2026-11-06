@@ -3,12 +3,14 @@ import os
 import sys
 import tempfile
 import unittest
+
+from pypdf import PdfReader, PdfWriter
 from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import make_pdf, needs_pdf, pymupdf
+from test_native_support import make_pdf, needs_pdf, pdf_available
 
-if pymupdf:
+if pdf_available:
     from paperassist.native.document import PdfDocument, SaveState
     from paperassist.native.engine import Pdf, Rect
     from paperassist.native.layout import GAP, MARGIN, PageCache, PageLayout
@@ -22,7 +24,7 @@ class Fake:
 
 
 class LayoutTests(unittest.TestCase):
-    layout = PageLayout([(400, 500), (400, 500), (200, 300)], 2.0, 1000) if pymupdf else None
+    layout = PageLayout([(400, 500), (400, 500), (200, 300)], 2.0, 1000) if pdf_available else None
 
     @needs_pdf
     def test_pages_stack_with_gaps_and_are_centered(self):
@@ -141,8 +143,8 @@ class DocumentTests(unittest.TestCase):
         self.doc.add_highlight(0, [Rect(*words[0][:4]).union(Rect(*words[5][:4]))])
 
     def annotations(self):
-        with pymupdf.open(self.path) as saved:
-            return [a.type[1] for page in saved for a in page.annots()]
+        return [str(a.get_object()['/Subtype'])[1:] for page in PdfReader(self.path).pages
+                for a in page.get('/Annots', []) if a.get_object()['/Subtype'] != '/Link']
 
     def test_editing_marks_the_document_unsaved_and_writes_nothing(self):
         self.assertIs(self.doc.state, SaveState.SAVED)
@@ -256,9 +258,10 @@ class DocumentTests(unittest.TestCase):
         from pypdf import PdfWriter
         from pypdf.generic import ArrayObject, DictionaryObject, FloatObject, NameObject, TextStringObject
         path = make_pdf(Path(self._dir.name) / "named.pdf")
-        with pymupdf.open(path) as raw:
-            cite = raw[0].search_for("Smith")[0]
-            top = raw[3].rect.height - 108  # PDF space, just above the "[1] Smith" line
+        raw = Pdf(path.read_bytes())
+        cite = next(rect for page, rect in raw.search("Smith") if page == 0)
+        raw.close()
+        top = 500 - 108
         writer = PdfWriter(clone_from=path)
         writer.add_named_destination_array(TextStringObject("ref1"), ArrayObject(
             [writer.pages[3].indirect_reference, NameObject("/XYZ"), FloatObject(40), FloatObject(top), FloatObject(0)]))
@@ -283,13 +286,16 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(rotated.sizes[0], (500, 400))
         page_rect = Rect(0, 0, 500, 400)
         self.assertTrue(all(page_rect.union(Rect(*w[:4])) == page_rect for w in rotated.words(0)))
-        with pymupdf.open(path) as raw:  # MuPDF itself reports the unrotated place
-            self.assertNotEqual(tuple(raw[0].search_for("nanoflares")[0]), tuple(rotated.search("nanoflares")[0][1]))
         hit = rotated.search("nanoflares")[0][1]
         rotated.add_highlight(0, [hit])
         self.assertTrue(rotated.save())
-        with pymupdf.open(path) as saved:  # an independent reader draws the highlight where the text is
-            pixels = saved[0].get_pixmap(clip=pymupdf.Rect(*hit), alpha=False).samples
+        from paperassist.native.engine import PageRenderer
+        renderer = PageRenderer(path.read_bytes())
+        rendered = renderer.render(0, 1)
+        data = bytes(rendered.rgb)
+        pixels = b''.join(data[(y * rendered.width + int(hit.x0)) * 3:(y * rendered.width + int(hit.x1)) * 3]
+                          for y in range(int(hit.y0), int(hit.y1)))
+        renderer.close()
         yellow = sum(1 for i in range(0, len(pixels), 3) if pixels[i] > 200 and pixels[i + 1] > 180 and pixels[i + 2] < 120)
         self.assertGreater(yellow * 3, len(pixels) // 3 * 0.3)
 

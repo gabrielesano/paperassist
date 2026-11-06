@@ -3,6 +3,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QTabWidget
 
+from .annotation_bar import install as install_annotation_bar
 from .document import SaveState
 from .pane import Pane
 from .rules import CANCEL, DISCARD, SAVE, apply_decisions, collect_decisions, locked_by_other
@@ -36,6 +37,7 @@ class MainWindow(QMainWindow):
         self.state_label = QLabel()
         self.statusBar().addWidget(self.state_label)
         self._build_actions()
+        self.annotation_bar = install_annotation_bar(self)
         self.refresh()
 
     def _build_actions(self):
@@ -163,6 +165,8 @@ class MainWindow(QMainWindow):
             state = min((p.state for p in tab.panes()), key=WORST_FIRST.index)
             self.tabs.setTabText(i, tab.main.title[:28] + MARKERS.get(state, ""))
             self.tabs.setTabToolTip(i, f"{tab.main.title} — {state.value}")
+        if hasattr(self, "annotation_bar"):  # refresh can run while the window is being built
+            self.annotation_bar.refresh()
         pane = self.pane()
         if pane is None:
             self.setWindowTitle("PaperAssist")

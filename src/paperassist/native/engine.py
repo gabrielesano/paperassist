@@ -1,16 +1,19 @@
-"""The only module that talks to MuPDF (PyMuPDF).
+"""PDFium reading/rendering boundary; annotations.py owns pypdf structures.
 
-Everything the rest of the reader knows about a PDF comes out of here as plain Python
-data, so replacing the engine means rewriting this file and nothing else. MuPDF
-reports text and links in the page's unrotated space; this module converts them to
-what the user sees, and converts highlight rectangles back when writing.
+All coordinates exposed to the UI are top-left displayed PDF points, including
+crop offsets and rotation. Documents hold bytes, never an open source file.
 """
+import ctypes
+from contextlib import closing
+import unicodedata
 from typing import NamedTuple
 
-import pymupdf
+import pypdfium2 as pdfium
+import pypdfium2.raw as raw
 
-HIGHLIGHT = (1.0, 0.92, 0.2)
-
+HIGHLIGHT = tuple(value / 255 for value in (245, 215, 110))
+FIT_TOP = {raw.PDFDEST_VIEW_FITR, raw.PDFDEST_VIEW_FITH, raw.PDFDEST_VIEW_FITBH}
+BLANK = {" ", "\r", "\n", "\t", "\ufffe"}
 
 class Rect(NamedTuple):
     x0: float
@@ -40,104 +43,206 @@ class Link(NamedTuple):
     y: float
 
 
-def _rect(value):
-    return Rect(value.x0, value.y0, value.x1, value.y1)
+class Frame:
+    """Maps PDF user space (origin bottom-left, crop box, rotation) to top-left view points."""
+
+    def __init__(self, page):
+        left, bottom, right, top = page.get_bbox()
+        w, h = right - left, top - bottom
+        # Affine map X = a*u + c*v + e, Y = b*u + d*v + f with u, v measured from the box corner.
+        self.origin = (left, bottom)
+        self.top = top
+        self.matrix = {0: (1, 0, 0, -1, 0, h), 90: (0, 1, 1, 0, 0, 0),
+                       180: (-1, 0, 0, 1, w, 0), 270: (0, -1, -1, 0, h, w)}[page.get_rotation() % 360]
+
+    def point(self, x, y):
+        a, b, c, d, e, f = self.matrix
+        u, v = x - self.origin[0], y - self.origin[1]
+        return a * u + c * v + e, b * u + d * v + f
+
+    def to_pdf(self, x, y):
+        a, b, c, d, e, f = self.matrix
+        x, y = x - e, y - f
+        det = a * d - b * c
+        return (d * x - c * y) / det + self.origin[0], (a * y - b * x) / det + self.origin[1]
+
+    def rect(self, left, bottom, right, top):
+        (x0, y0), (x1, y1) = self.point(left, bottom), self.point(right, top)
+        return Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
 class Pdf:
-    """A PDF opened for reading its structure and for appending highlights.
-
-    It is opened from bytes, not from a path, so no file handle stays open: Windows
-    cannot replace a file that is open, and saving replaces it (see source.py).
-    """
-
     def __init__(self, data):
-        self._doc = pymupdf.open(stream=data, filetype="pdf")
-        self.sizes = [(p.rect.width, p.rect.height) for p in self._doc]
-        self._rotation = [p.rotation_matrix for p in self._doc]  # unrotated space -> displayed space
+        self.data = bytes(data)
+        self._doc = pdfium.PdfDocument(self.data)
+        self.sizes = [self._doc.get_page_size(i) for i in range(len(self._doc))]
+        self._frames = {}
 
     @property
     def is_closed(self):
-        return self._doc.is_closed
+        return self._doc.raw is None
 
-    def words(self, page):
-        """[(x0, y0, x1, y1, text, block)] in the engine's reading order."""
-        m = self._rotation[page]
-        return [(*_rect(pymupdf.Rect(w[:4]) * m), w[4], w[5]) for w in self._doc[page].get_text("words")]
+    def frame(self, number):
+        if number not in self._frames:
+            with closing(self._doc[number]) as page:
+                self._frames[number] = Frame(page)
+        return self._frames[number]
 
-    def links(self, page):
-        m, found = self._rotation[page], []
-        for link in self._doc[page].get_links():
-            if link["kind"] == pymupdf.LINK_URI:
-                found.append(Link(_rect(link["from"] * m), link["uri"], None, 0.0))
-            elif link.get("page", -1) >= 0:  # goto, or a named destination MuPDF resolved
-                target, to = link["page"], link.get("to")
-                # MuPDF leaves a resolved named destination in PDF space (y up), unlike a goto;
-                # journals such as ApJ link every citation that way.
-                if to and link["kind"] == pymupdf.LINK_NAMED and (to.x or to.y):
-                    to = to * self._doc[target].transformation_matrix
-                point = (to or pymupdf.Point(0, 0)) * self._rotation[target]
-                found.append(Link(_rect(link["from"] * m), None, target, point.y))
-        return found
+    def words(self, number):
+        frame, page = self.frame(number), self._doc[number]
+        text_page = page.get_textpage()
+        text = "".join(chr(raw.FPDFText_GetUnicode(text_page, i) or 32) for i in range(text_page.count_chars()))
+        words, start, line = [], None, 0
+        for i, char in enumerate(text + " "):
+            hyphen = char in ('\ufffe', '\x02', '-') and bool(raw.FPDFText_IsHyphen(text_page, i))
+            if char in BLANK or hyphen:
+                # PDFium exposes line-end hyphens as U+FFFE in ranges, or U+0002 via GetUnicode.
+                if start is not None:
+                    boxes = [text_page.get_charbox(k, loose=True) for k in range(start, i + hyphen)]  # loose: font-height bands
+                    rect = frame.rect(min(b[0] for b in boxes), min(b[1] for b in boxes),
+                                      max(b[2] for b in boxes), max(b[3] for b in boxes))
+                    words.append((*rect, unicodedata.normalize("NFKC", text[start:i]) + "-" * hyphen, line))
+                    start = None
+                line += hyphen or char == "\n"
+            elif start is None:
+                start = i
+        text_page.close()
+        page.close()
+        return words
+
+    def links(self, number):
+        """Resolve internal destinations including XYZ, FitH and FitR to displayed coordinates."""
+        frame, page = self.frame(number), self._doc[number]
+        result, position, link = [], ctypes.c_int(0), raw.FPDF_LINK()
+        while raw.FPDFLink_Enumerate(page, position, link):
+            box = raw.FS_RECTF()
+            raw.FPDFLink_GetAnnotRect(link, box)
+            rect = frame.rect(box.left, box.bottom, box.right, box.top)
+            action = raw.FPDFLink_GetAction(link)
+            if action and raw.FPDFAction_GetType(action) == raw.PDFACTION_URI:
+                size = raw.FPDFAction_GetURIPath(self._doc, action, None, 0)
+                buffer = ctypes.create_string_buffer(size)
+                raw.FPDFAction_GetURIPath(self._doc, action, buffer, size)
+                item = Link(rect, buffer.value.decode("utf-8", errors="replace"), None, 0)
+            elif dest := raw.FPDFLink_GetDest(self._doc, link):
+                target = raw.FPDFDest_GetDestPageIndex(self._doc, dest)
+                if not 0 <= target < len(self.sizes):
+                    continue
+                has_x, has_y, has_zoom = (ctypes.c_int() for _ in range(3))
+                x, y, zoom = (ctypes.c_float() for _ in range(3))
+                raw.FPDFDest_GetLocationInPage(dest, has_x, has_y, has_zoom, x, y, zoom)
+                if not has_y.value:  # fit modes keep their top edge in the view parameters, not in the location
+                    count, params = ctypes.c_ulong(4), (ctypes.c_float * 4)()
+                    view = raw.FPDFDest_GetView(dest, count, params)
+                    y.value, has_y.value = {raw.PDFDEST_VIEW_FITR: params[3], raw.PDFDEST_VIEW_FITH: params[0],
+                                            raw.PDFDEST_VIEW_FITBH: params[0]}.get(view, 0), view in FIT_TOP
+                    if view in (raw.PDFDEST_VIEW_FITR, raw.PDFDEST_VIEW_FITV, raw.PDFDEST_VIEW_FITBV):
+                        x.value, has_x.value = params[0], True
+                target_frame = self.frame(target)
+                top = target_frame.point(x.value if has_x.value else target_frame.origin[0],
+                                         y.value if has_y.value else target_frame.top)[1] if has_x.value or has_y.value else 0
+                item = Link(rect, None, target, top)
+            else:
+                continue
+            result.append(item)
+        page.close()
+        return result
 
     def search(self, text):
-        """[(page, Rect)] for every case-insensitive occurrence."""
-        return [(page, _rect(rect * self._rotation[page])) for page in range(len(self.sizes))
-                for rect in self._doc[page].search_for(text)]
+        hits = []
+        for number in range(len(self.sizes)):
+            frame, page = self.frame(number), self._doc[number]
+            text_page = page.get_textpage()
+            searcher = text_page.search(text)
+            while match := searcher.get_next():
+                line = None
+                for i in range(text_page.count_rects(*match)):
+                    rect = Rect(*text_page.get_rect(i))
+                    if line and min(line.y1, rect.y1) - max(line.y0, rect.y0) > 0.5 * min(line.height, rect.height):
+                        line = line.union(rect)  # PDFium splits a match at font changes and spaces
+                    else:
+                        line and hits.append((number, frame.rect(*line)))
+                        line = rect
+                line and hits.append((number, frame.rect(*line)))
+            text_page.close()
+            page.close()
+        return hits
 
-    def add_highlight(self, page, rects):
-        target = self._doc[page]  # an annotation is only valid while its page object is alive
-        quads = [pymupdf.Rect(r) * ~self._rotation[page] for r in rects]
-        annot = target.add_highlight_annot(quads=quads)
-        annot.set_colors(stroke=HIGHLIGHT)
-        annot.update()
+    def _edit(self, kind, page, **values):
+        from . import annotations
+        data = annotations.apply(self.data, kind, page, **values)
+        self._replace(data)
+
+    def _replace(self, data):
+        document = pdfium.PdfDocument(data)
+        self._doc.close()
+        self.data, self._doc = data, document
+
+    def add_highlight(self, page, rects, color=HIGHLIGHT, opacity=1):
+        from . import annotations
+        frame = self.frame(page)
+        quads = []
+        for rect in rects:
+            points = [frame.to_pdf(x, y) for x, y in ((rect.x0, rect.y0), (rect.x1, rect.y1))]
+            quads.append(annotations.bounds(points))
+        self._edit('highlight', page, rects=quads, color=color, opacity=opacity)
+
+    def add_ink(self, page, strokes, color=(0, 0, 0), width=2):
+        frame = self.frame(page)
+        self._edit('ink', page, strokes=[[frame.to_pdf(x, y) for x, y in stroke] for stroke in strokes], color=color, width=width)
+
+    def annotations(self, page):
+        from . import annotations
+        frame = self.frame(page)
+        result = annotations.read(self.data, page)
+        for item in result:
+            item['rect'] = frame.rect(*item['rect'])
+            item['quads'] = [frame.rect(*r) for r in item['quads']]
+            item['strokes'] = [[frame.point(*p) for p in stroke] for stroke in item['strokes']]
+        return result
+
+    def update_annotation(self, page, index, color=None, width=None):
+        self._edit('update', page, index=index, color=color, width=width)
+
+    def delete_annotation(self, page, index):
+        self._edit('delete', page, index=index)
+
+    def restore_annotations(self, previous, pages):
+        from . import annotations
+        self._replace(annotations.restore(self.data, previous, pages))
 
     def can_save_incrementally(self):
-        return self._doc.can_save_incrementally()
+        return True
 
     def write(self, out):
-        """Write the whole new file to the binary file object out.
-
-        When possible the update is appended to the original bytes, which stay a prefix.
-        MuPDF copies them to the output itself, so out needs no existing file. PyMuPDF's
-        own incremental save insists on an on-disk original, hence the direct call.
-        """
-        if not self.can_save_incrementally():
-            out.write(self._doc.tobytes())
-            return
-        options = pymupdf.mupdf.PdfWriteOptions()
-        options.do_incremental = True
-        options.do_encrypt = pymupdf.mupdf.PDF_ENCRYPT_KEEP
-        options.dont_regenerate_id = True
-        sink = pymupdf.JM_new_output_fileptr(out)
-        pymupdf.mupdf.pdf_write_document(pymupdf._as_pdf_document(self._doc), sink, options)
-        sink.fz_close_output()
+        out.write(self.data)
 
     def close(self):
-        if not self._doc.is_closed:
-            self._doc.close()
+        self._doc.close()
 
 
 class RenderedPage:
-    def __init__(self, pixmap):
-        self._pixmap = pixmap  # the buffer is only valid while the pixmap lives
-        self.width, self.height = pixmap.width, pixmap.height
+    def __init__(self, bitmap):
+        self._bitmap = bitmap
+        self.width, self.height = bitmap.width, bitmap.height
 
     @property
     def rgb(self):
-        return self._pixmap.samples_mv
+        return memoryview(self._bitmap.buffer)
 
 
 class PageRenderer:
-    """A read-only replica of the file that draws pages; used by the render process."""
-
     def __init__(self, data):
-        self._doc = pymupdf.open(stream=data, filetype="pdf")  # bytes, so a save can replace the file on Windows
+        self._doc = pdfium.PdfDocument(data)
 
     def render(self, page, scale):
-        pixmap = self._doc[page].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
-        return RenderedPage(pixmap)
+        with closing(self._doc[page]) as target:
+            return RenderedPage(target.render(scale=scale, rev_byteorder=True, prefer_bgrx=False))
+
+    def close(self):
+        self._doc.close()
 
 
 def trim_caches():
-    pymupdf.TOOLS.store_shrink(100)
+    # PDFium releases page caches when page handles close; there is no public global trim API.
+    pass

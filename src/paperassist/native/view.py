@@ -6,6 +6,7 @@ from PySide6.QtCore import QEventLoop, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea, QScrollBar
 
+from .engine import HIGHLIGHT, Rect
 from .layout import MARGIN, PageCache, PageLayout
 from .trim import trim_heap
 
@@ -17,8 +18,10 @@ SELECTION, HIT, CURRENT_HIT, MARKER = QColor(40, 110, 255, 80), QColor(255, 150,
 
 
 class PdfView(QAbstractScrollArea):
+    annotation_selection_changed = Signal()
     edited = Signal()     # content or save state changed
     activated = Signal()  # the user clicked or focused this view
+    moved = Signal()      # scrolled or zoomed, for reading-position persistence
 
     def __init__(self, doc, client):
         super().__init__()
@@ -30,6 +33,11 @@ class PdfView(QAbstractScrollArea):
         self.render_seconds = []  # worker-side time of every page this view received
         self.locked = False  # another view of this PDF has unsaved edits
         self.highlighting = False
+        self.drawing = False
+        self.highlight_color, self.ink_color = HIGHLIGHT, (0, 0, 0)
+        self.ink_width = 2
+        self.selected_annotation = None
+        self._stroke = []
         self.selection, self.selection_lines = None, []  # ((page, word), (page, word))
         self.hits, self.hit = [], -1
         self.history = []
@@ -41,6 +49,16 @@ class PdfView(QAbstractScrollArea):
         self.verticalScrollBar().setSingleStep(48)
         self.pages = PageLayout(doc.sizes, self.zoom, self.viewport().width())
         self._update_scrollbars()
+
+    @property
+    def highlighting(self):
+        return self._highlighting
+
+    @highlighting.setter
+    def highlighting(self, value):
+        self._highlighting = value
+        if value:
+            self.drawing = False
 
     # ---- geometry -------------------------------------------------------------------
     def _scale(self):
@@ -98,6 +116,7 @@ class PdfView(QAbstractScrollArea):
     def _after_move(self):
         self.viewport().update()
         self._want()
+        self.moved.emit()
 
     def _fresh(self, page):
         entry = self.cache.get(page)
@@ -126,9 +145,13 @@ class PdfView(QAbstractScrollArea):
     def has_page(self, page):
         return self._fresh(page)
 
-    def refresh_render(self):
+    def refresh_render(self, pages=None):
         """After the file changed: render from the new bytes, keep showing the old pixels meanwhile."""
-        old, self.doc_id = self.doc_id, self.client.open(self.doc.source.path)
+        old, self.doc_id = self.doc_id, self.client.open(self.doc.pdf.data)
+        if pages is not None:
+            for page, ((scale, _, pixmap), size) in list(self.cache.entries.items()):
+                if page not in pages:
+                    self.cache.entries[page] = ((scale, self.doc_id, pixmap), size)
         self.client.close(old)
         self._want()
 
@@ -176,6 +199,14 @@ class PdfView(QAbstractScrollArea):
                  Qt.Key_Home: QScrollBar.SliderToMinimum, Qt.Key_End: QScrollBar.SliderToMaximum}
         if event.matches(QKeySequence.Copy):
             self.copy()
+        elif event.matches(QKeySequence.Undo):
+            self.undo()
+        elif event.matches(QKeySequence.Redo):
+            self.redo()
+        elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.delete_annotation()
+        elif event.key() == Qt.Key_Escape and self.selected_annotation:
+            self.select_annotation(None)
         elif event.key() in steps:
             bar.triggerAction(steps[event.key()])
         else:
@@ -212,10 +243,20 @@ class PdfView(QAbstractScrollArea):
                 self.first_paint = self.first_paint or time.perf_counter()
             else:
                 painter.fillRect(box, Qt.white)
-            painter.setCompositionMode(QPainter.CompositionMode_Multiply)
-            for rect in self.doc.pending.get(page, []):
-                painter.fillRect(self._band(page, rect), MARKER)  # not in the render process's pixels yet
-            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        if self.selected_annotation:
+            page, index = self.selected_annotation
+            item = next((a for a in self.doc.annotations(page) if a['index'] == index), None)
+            if item:
+                painter.setPen(QColor('#286eb8'))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(self._band(page, item['rect']).adjusted(-2, -2, 2, 2))
+        if self._stroke:
+            from PySide6.QtGui import QPen
+            painter.setPen(QPen(QColor.fromRgbF(*self.ink_color), self.ink_width * self.zoom,
+                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            page = self._stroke_page
+            for a, b in zip(self._stroke, self._stroke[1:]):
+                painter.drawLine(self._band(page, Rect(*a, *a)).topLeft(), self._band(page, Rect(*b, *b)).topLeft())
         for page, rect, _ in self.selection_lines:
             painter.fillRect(self._band(page, rect), SELECTION)
         for i, (page, rect) in enumerate(self.hits):
@@ -232,7 +273,12 @@ class PdfView(QAbstractScrollArea):
         if event.button() != Qt.LeftButton:
             return
         page, x, y = self._locate(event.position())
-        self._press = {"link": self.doc.link_at(page, x, y), "moved": False}
+        if self.drawing and not self.locked:
+            self.select_annotation(None)
+            self._stroke_page, self._stroke = page, [(x, y)]
+            return
+        picked = self.doc.annotation_at(page, x, y, tolerance=4 / self.zoom) if not self.highlighting else None
+        self._press = {"link": self.doc.link_at(page, x, y), "moved": False, "annotation": picked, "page": page}
         self.selection, self.selection_lines = None, []
         word = self.doc.word_at(page, x, y)
         self._anchor_word = None if word is None else (page, word)
@@ -254,9 +300,15 @@ class PdfView(QAbstractScrollArea):
 
     def mouseMoveEvent(self, event):
         page, x, y = self._locate(event.position())
+        if self._stroke:
+            if page == self._stroke_page:
+                self._stroke.append((x, y))
+                self.viewport().update()
+            return
         if self._press is None:
             self.viewport().setCursor(Qt.PointingHandCursor if self.doc.link_at(page, x, y) else Qt.IBeamCursor)
             return
+        self.select_annotation(None)
         self._press["moved"] = True
         self._drag = event.position()
         if not self._autoscroll.isActive():
@@ -264,14 +316,24 @@ class PdfView(QAbstractScrollArea):
         self._extend_selection(event.position())
 
     def mouseReleaseEvent(self, event):
+        if self._stroke:
+            stroke, self._stroke = self._stroke, []
+            if not self.locked and len(stroke) > 1:
+                self.doc.add_ink(self._stroke_page, [stroke], self.ink_color, self.ink_width)
+                self._annotation_changed([self._stroke_page])
+            return
         press, self._press = self._press, None
         self._autoscroll.stop()
         if press is None:
             return
-        if not press["moved"] and press["link"]:
+        if not press['moved'] and press['annotation']:
+            self.select_annotation((press['page'], press['annotation']['index']))
+        elif not press["moved"] and press["link"]:
             self.follow(press["link"])
         elif press["moved"] and self.highlighting and not self.locked:
             self.highlight_selection()
+        elif not press['moved']:
+            self.select_annotation(None)
 
     def selected_text(self):
         return "\n".join(text for _, _, text in self.selection_lines)
@@ -284,11 +346,66 @@ class PdfView(QAbstractScrollArea):
         pages = {}
         for page, rect, _ in self.selection_lines:
             pages.setdefault(page, []).append(rect)
-        for page, rects in pages.items():
-            self.doc.add_highlight(page, rects)
+        if self.locked or not pages:
+            return
+        self.doc.add_highlights(pages, self.highlight_color)
         self.selection, self.selection_lines = None, []
+        self._annotation_changed(list(pages))
+
+    def set_tool(self, tool):
+        self.highlighting, self.drawing = tool == 'highlight', tool == 'ink'
+        self.select_annotation(None)
+
+    def select_annotation(self, selection):
+        self.selected_annotation = selection
+        self.annotation_selection_changed.emit()
         self.viewport().update()
+
+    def _annotation_changed(self, pages):
+        self.doc.pending.clear()
+        self.refresh_render(pages)
+        self.viewport().update()
+        self.annotation_selection_changed.emit()
         self.edited.emit()
+
+    def set_annotation_color(self, color):
+        if self.locked:
+            return
+        if self.selected_annotation:
+            page, index = self.selected_annotation
+            if self.doc.update_annotation(page, index, color=color):
+                self._annotation_changed([page])
+        elif self.drawing:
+            self.ink_color = color
+        else:
+            self.highlight_color = color
+
+    def set_annotation_width(self, width):
+        if self.locked:
+            return
+        if self.selected_annotation:
+            page, index = self.selected_annotation
+            if self.doc.update_annotation(page, index, width=width):
+                self._annotation_changed([page])
+        else:
+            self.ink_width = width
+
+    def delete_annotation(self):
+        if self.selected_annotation and not self.locked:
+            page, index = self.selected_annotation
+            self.doc.delete_annotation(page, index)
+            self.select_annotation(None)
+            self._annotation_changed([page])
+
+    def undo(self):
+        if not self.locked and (pages := self.doc.undo()):
+            self.select_annotation(None)
+            self._annotation_changed(pages)
+
+    def redo(self):
+        if not self.locked and (pages := self.doc.redo()):
+            self.select_annotation(None)
+            self._annotation_changed(pages)
 
     def _show_saving(self):
         self.edited.emit()  # let "Saving…" paint before the possibly slow write blocks the loop

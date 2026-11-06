@@ -3,12 +3,14 @@ import collections
 import tempfile
 import time
 import unittest
+
+from pypdf import PdfReader
 from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import make_pdf, needs_qt, pymupdf
+from test_native_support import make_pdf, needs_qt, pdf_available
 
-if pymupdf:
+if pdf_available:
     from PySide6.QtCore import QPoint, QSettings, Qt
     from PySide6.QtGui import QPixmap
     from PySide6.QtTest import QTest
@@ -96,8 +98,8 @@ class WindowTests(unittest.TestCase):
         self.drag(pane.view, page, 3, 20)
 
     def annotations(self, path):
-        with pymupdf.open(path) as doc:
-            return sum(len(list(page.annots())) for page in doc)
+        return sum(1 for page in PdfReader(path).pages for a in page.get('/Annots', [])
+                   if a.get_object()['/Subtype'] != '/Link')
 
     # ---- reading ------------------------------------------------------------------------
     def test_a_paper_opens_fit_to_width_and_renders_in_the_other_process(self):
@@ -118,7 +120,7 @@ class WindowTests(unittest.TestCase):
     def test_pages_are_drawn_on_whole_device_pixels_at_fractional_ratios(self):
         view = self.open("a").main.view
         _, _, width, height = view.pages.rect(0)
-        pixmap = QPixmap(round(width * 1.25) + 1, round(height * 1.25) + 1)  # MuPDF rounds sizes outward
+        pixmap = QPixmap(round(width * 1.25) + 1, round(height * 1.25) + 1)  # The renderer rounds sizes outward
         pixmap.setDevicePixelRatio(1.25)
         with patch.object(PdfView, "devicePixelRatioF", return_value=1.25):
             box = view._target(0, pixmap)
@@ -380,6 +382,85 @@ class WindowTests(unittest.TestCase):
         self.window.promote_quick()
         self.assertEqual((self.window.tabs.count(), self.window.tab()), (2, tab))
         self.assertIsNone(other.quick)
+
+    def test_annotation_toolbar_palette_undo_and_exact_revision_rendering(self):
+        from paperassist.native.annotation_bar import COLORS, install
+        from paperassist.native.engine import PageRenderer
+        from PySide6.QtGui import QImage
+        bar = install(self.window)
+        view = self.open('palette').main.view
+        original = view.doc.source.path.read_bytes()
+        for index in range(5):
+            self.window.highlight_action.setChecked(True)
+            bar.refresh()
+            bar.colors.setCurrentIndex(index)
+            bar.colors.activated.emit(index)
+            self.drag(view, 0, index * 7, index * 7 + 4)
+            self.pump(lambda: view.has_page(0))
+            color = view.doc.annotations(0)[-1]['color']
+            self.assertEqual([round(v * 255) for v in color], list(bytes.fromhex(COLORS[index][1][1:])))
+        self.assertEqual(view.doc.source.path.read_bytes(), original)
+        image = view.cache.get(0)[2].toImage().convertToFormat(QImage.Format_RGB888)
+        actual = bytes(image.constBits())
+        packed = b''.join(actual[y * image.bytesPerLine():y * image.bytesPerLine() + image.width() * 3]
+                          for y in range(image.height()))
+        renderer = PageRenderer(view.doc.pdf.data)
+        self.addCleanup(renderer.close)
+        self.assertEqual(packed, bytes(renderer.render(0, view._scale()).rgb))
+        view.setFocus()
+        for _ in range(5):
+            QTest.keyClick(view, Qt.Key_Z, Qt.ControlModifier)
+        self.assertFalse(view.doc.modified)
+        self.assertEqual(view.doc.annotations(0), [])
+        self.assertEqual(view.doc.source.path.read_bytes(), original)
+
+    def test_annotation_toolbar_draw_select_recolor_thickness_delete_and_undo(self):
+        from paperassist.native.annotation_bar import install
+        bar = install(self.window)
+        view = self.open('ink').main.view
+        bar.refresh()
+        bar.draw.trigger()
+        bar.thickness.setValue(4)
+        first = view._band(0, Rect(40, 180, 40, 180)).topLeft().toPoint()
+        middle = view._band(0, Rect(100, 200, 100, 200)).topLeft().toPoint()
+        last = view._band(0, Rect(180, 180, 180, 180)).topLeft().toPoint()
+        QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, first)
+        QTest.mouseMove(view.viewport(), middle)
+        QTest.mouseMove(view.viewport(), last)
+        QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, last)
+        self.pump(lambda: view.has_page(0))
+        self.assertEqual(view.doc.annotations(0)[0]['width'], 4)
+        bar.select.trigger()
+        self.assertFalse(bar.width_action.isVisible())
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, middle)
+        self.assertTrue(bar.width_action.isVisible())
+        self.assertEqual(view.selected_annotation, (0, 1))  # the citation link is /Annots[0]
+        bar.colors.activated.emit(2)
+        bar.thickness.setValue(8)
+        item = view.doc.annotations(0)[0]
+        self.assertEqual(item['width'], 8)
+        self.assertEqual([round(v * 255) for v in item['color']], [121, 197, 223])
+        view.setFocus()
+        QTest.keyClick(view, Qt.Key_Delete)
+        self.assertEqual(view.doc.annotations(0), [])
+        QTest.keyClick(view, Qt.Key_Z, Qt.ControlModifier)
+        self.assertEqual(len(view.doc.annotations(0)), 1)
+        self.assertEqual(view.doc.annotations(0)[0]['width'], 8)
+        self.assertTrue(view.save())
+        self.pump(lambda: view.has_page(0))
+        self.assertFalse(view.doc.modified)
+
+    def test_locked_view_annotation_commands_leave_everything_unchanged(self):
+        view = self.open('locked-edit').main.view
+        self.highlight(self.window.pane())
+        before = view.doc.pdf.data
+        view.selected_annotation = (0, 1)
+        view.locked = True
+        view.set_annotation_color((1, 0, 0))
+        view.set_annotation_width(8)
+        view.delete_annotation()
+        view.undo()
+        self.assertEqual(view.doc.pdf.data, before)
 
 
 if __name__ == "__main__":

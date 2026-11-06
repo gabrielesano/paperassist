@@ -5,11 +5,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from pypdf import PdfReader, PdfWriter
 from pathlib import Path
 
-from test_native_support import make_pdf, needs_pdf, needs_qt, pymupdf
+from test_native_support import make_pdf, needs_pdf, needs_qt, pdf_available
 
-if pymupdf:
+if pdf_available:
     from paperassist.native import worker
 
 
@@ -136,9 +138,9 @@ class SelfTestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             text = make_pdf(Path(directory) / "text.pdf", pages=1)
             blank = Path(directory) / "blank.pdf"
-            with pymupdf.open() as doc:
-                doc.new_page()
-                doc.save(blank)
+            writer = PdfWriter()
+            writer.add_blank_page(400, 500)
+            writer.write(blank)
             passed, failed = self.run_self_test(text), self.run_self_test(blank)
         self.assertEqual((passed.returncode, failed.returncode), (0, 1), passed.stderr + failed.stderr)
         self.assertIn("self-test ok", passed.stdout)

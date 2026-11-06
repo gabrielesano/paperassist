@@ -2,6 +2,7 @@
 #   pyinstaller packaging/paperassist.spec --noconfirm --distpath dist --workpath build
 # See packaging/README.md.
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
 
 root = Path(SPECPATH).parent
 
@@ -43,8 +44,11 @@ def unwanted(entry):
 a = Analysis(
     [str(root / "packaging" / "entry.py")],
     pathex=[str(root / "src")],
-    hiddenimports=["paperassist.native.worker"],  # imported by the render process, not by the UI start
+    hiddenimports=["paperassist.native.worker", "paperassist.native.annotation_bar"],  # spawn entry and host-installed toolbar
     excludes=EXCLUDED_MODULES,
+    binaries=collect_dynamic_libs("pypdfium2_raw"),
+    datas=collect_data_files("pypdfium2_raw") + copy_metadata("pypdfium2") + copy_metadata("pypdf")
+          + [(str(root / "LICENSE"), ".")],
 )
 a.binaries = [entry for entry in a.binaries if not unwanted(entry)]
 a.datas = [entry for entry in a.datas if not unwanted(entry)]

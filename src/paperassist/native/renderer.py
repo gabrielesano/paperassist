@@ -35,7 +35,7 @@ class RenderClient(QObject):
 
     def open(self, path):
         doc_id = next(self._ids)
-        self._send("open", doc_id, str(path))
+        self._send("open", doc_id, path if isinstance(path, bytes) else str(path))
         return doc_id
 
     def close(self, doc_id):

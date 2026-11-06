@@ -1,8 +1,7 @@
 """The render process.
 
-PyMuPDF calls mupdf.reinit_singlethreaded() and documents no concurrent use. In a
-thread it would also hold the GIL while drawing (a page takes 30-60 ms) and stall the
-Qt event loop, so drawing lives in a separate process.
+PDFium is not thread-safe. Drawing lives in a separate process so a slow page
+cannot stall the Qt event loop or overlap a structural engine call in the UI.
 
 It is started with multiprocessing's explicit "spawn" context and pipes. Unlike
 `sys.executable -m ...` this keeps working in a frozen app, where the executable is
@@ -73,8 +72,7 @@ def serve(inbox, outbox):
     threading.Thread(target=listen, args=(inbox, queue), daemon=True).start()
     while True:
         with queue.cond:
-            # After a quiet moment give MuPDF's caches and the freed heap back to the OS;
-            # trimming after every page would throw away the font cache that makes pages fast.
+            # Return freed pixels after a quiet moment instead of churning the allocator per page.
             woke = queue.cond.wait_for(lambda: queue.has_work(docs), timeout=None if trimmed else IDLE_TRIM_SECONDS)
             if not woke:
                 trim_caches()
@@ -85,11 +83,12 @@ def serve(inbox, outbox):
         for kind, *args in commands:
             if kind == "open":
                 try:
-                    docs[args[0]] = PageRenderer(Path(args[1]).read_bytes())
+                    docs[args[0]] = PageRenderer(args[1] if isinstance(args[1], bytes) else Path(args[1]).read_bytes())
                 except Exception:  # a vanished or broken file leaves blank pages, not a dead process
                     docs.pop(args[0], None)
             elif kind == "close":
-                docs.pop(args[0], None)
+                if document := docs.pop(args[0], None):
+                    document.close()
             elif kind == "quit":
                 return
         with queue.cond:

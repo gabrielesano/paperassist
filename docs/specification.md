@@ -191,11 +191,14 @@ searches only on request. Support linking a manually obtained local PDF.
 ## Technical direction
 
 Python and SQLite handle library data and retrieval. The interface is a native
-desktop application: Qt Widgets through PySide6, with MuPDF through PyMuPDF for
-rendering, text, search, links and annotations. It calls the Python library modules
+desktop application: Qt Widgets through PySide6, with PDFium through pypdfium2 for
+rendering, text, search and links, and pypdf for annotation writing. It calls the Python library modules
 directly, without an HTTP layer. Pages render in a separate process so the interface
-stays responsive, and only pages near the visible area keep their pixels. MuPDF is
-AGPL-3.0; distributed builds include the corresponding source, as the GPL requires.
+stays responsive, and only pages near the visible area keep their pixels. Unsaved
+annotation revisions stay in memory and are rendered from their actual PDF bytes;
+only explicit Save publishes those bytes atomically. PDFium binaries are supplied
+by pypdfium2's third-party builds. See the measured decision in
+[the native stack record](development/native-stack.md).
 
 Resource use is a product requirement. Measure memory, render time and interface
 stalls with real papers for reader changes; a lighter design is worth extra setup.
@@ -228,7 +231,8 @@ ambiguous or incomplete results, invalid downloads and Google fallback.
 
 ## Primary references
 
-- [PyMuPDF documentation](https://pymupdf.readthedocs.io/)
+- [pypdfium2 documentation](https://pypdfium2.readthedocs.io/)
+- [pypdf documentation](https://pypdf.readthedocs.io/)
 - [Qt for Python (PySide6)](https://doc.qt.io/qtforpython-6/)
 - [PDF.js component example](https://github.com/mozilla/pdf.js/blob/master/examples/components/simpleviewer.mjs)
 - [PDF.js document API](https://mozilla.github.io/pdf.js/api/draft/module-pdfjsLib-PDFDocumentProxy.html)

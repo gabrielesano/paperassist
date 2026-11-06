@@ -24,6 +24,9 @@ class PdfDocument:
         self.state, self.error = SaveState.SAVED, ""
         self.pending = {}  # page -> highlighted rects the render process has not drawn yet
         self._words, self._links = {}, {}
+        self._undo, self._redo = [], []
+        self._token = self._saved_token = self._sequence = 0
+        self._annotations = {}
 
     def __len__(self):
         return len(self.sizes)
@@ -56,7 +59,7 @@ class PdfDocument:
     def selection_lines(self, start, end):
         """[(page, rect, text)], one band per visual line, between two (page, word index) ends.
 
-        MuPDF may split a justified line into several 'lines', so words join the current
+        A PDF may split a justified line into several 'lines', so words join the current
         band by geometry: same block, mostly overlapping vertically, further to the right.
         """
         start, end = sorted([start, end])
@@ -69,8 +72,11 @@ class PdfDocument:
                 rect = Rect(*w[:4])
                 if bands and bands[-1][0] == (page, w[5]):
                     key, band, texts = bands[-1]
-                    overlap = min(band.y1, rect.y1) - max(band.y0, rect.y0)
-                    if overlap > 0.5 * min(band.height, rect.height) and rect.x0 >= band.x1 - 2:
+                    across_y = min(band.y1, rect.y1) - max(band.y0, rect.y0)
+                    across_x = min(band.x1, rect.x1) - max(band.x0, rect.x0)
+                    horizontal = across_y > 0.5 * min(band.height, rect.height) and (rect.x0 >= band.x1 - 2 or rect.x1 <= band.x0 + 2)
+                    vertical = across_x > 0.5 * min(band.width, rect.width) and (rect.y0 >= band.y1 - 2 or rect.y1 <= band.y0 + 2)
+                    if horizontal or vertical:
                         bands[-1] = (key, band.union(rect), texts + [w[4]])
                         continue
                 bands.append(((page, w[5]), rect, [w[4]]))
@@ -79,10 +85,83 @@ class PdfDocument:
     def search(self, text):
         return self.pdf.search(text)
 
-    def add_highlight(self, page, rects):
-        self.pdf.add_highlight(page, rects)
+    def annotations(self, page):
+        if page not in self._annotations:
+            self._annotations[page] = self.pdf.annotations(page)
+        return self._annotations[page]
+
+    def annotation_at(self, page, x, y, tolerance=4):
+        def near(a, b):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            fraction = max(0, min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy or 1)))
+            return (x - a[0] - fraction * dx) ** 2 + (y - a[1] - fraction * dy) ** 2
+        for item in reversed(self.annotations(page)):
+            if item['subtype'] == 'highlight':
+                if any(rect.contains(x, y) for rect in item['quads'] or [item['rect']]):
+                    return item
+            elif any(near(a, b) <= (item['width'] / 2 + tolerance) ** 2
+                     for stroke in item['strokes'] for a, b in zip(stroke, stroke[1:])):
+                return item
+        return None
+
+    def _change(self, pages, apply):
+        before, token = len(self.pdf.data), self._token
+        apply()
+        self._sequence += 1
+        self._token = self._sequence
+        # Only offsets are retained: every previous revision is already a prefix of these bytes.
+        self._undo.append((before, len(self.pdf.data), pages, token, self._token))
+        self._redo.clear()
+        self._changed()
+
+    def _changed(self):
+        self._annotations.clear()
+        self.state = SaveState.SAVED if self._token == self._saved_token else SaveState.UNSAVED
+        self.error = ''
+
+    def add_highlight(self, page, rects, color=None):
+        options = {} if color is None else {'color': color}
+        self._change([page], lambda: self.pdf.add_highlight(page, rects, **options))
         self.pending.setdefault(page, []).extend(rects)
-        self.state, self.error = SaveState.UNSAVED, ""
+
+    def add_highlights(self, pages, color):
+        def apply():
+            for page, rects in pages.items():
+                self.pdf.add_highlight(page, rects, color=color)
+        self._change(list(pages), apply)
+
+    def add_ink(self, page, strokes, color=(0, 0, 0), width=2):
+        self._change([page], lambda: self.pdf.add_ink(page, strokes, color, width))
+
+    def update_annotation(self, page, index, color=None, width=None):
+        item = next(item for item in self.annotations(page) if item['index'] == index)
+        if (color is None or all(abs(a - b) < 1e-6 for a, b in zip(color, item['color']))) and (width is None or width == item['width']):
+            return False
+        if width is not None and item['subtype'] != 'ink':
+            return False
+        self._change([page], lambda: self.pdf.update_annotation(page, index, color, width))
+        return True
+
+    def delete_annotation(self, page, index):
+        self._change([page], lambda: self.pdf.delete_annotation(page, index))
+
+    def undo(self):
+        return self._step(self._undo, self._redo, 0, 3)
+
+    def redo(self):
+        return self._step(self._redo, self._undo, 1, 4)
+
+    def _step(self, source, target, revision, token):
+        if not source:
+            return []
+        entry = source[-1]
+        self.pdf.restore_annotations(self.pdf.data[:entry[revision]], entry[2])
+        source.pop()
+        target.append(entry)
+        self._token = entry[token]
+        self.pending.clear()
+        self._changed()
+        return entry[2]
 
     def save(self, on_saving=lambda: None):
         """Explicit save only. A failure keeps the edits and the unsaved state for a retry."""
@@ -90,17 +169,25 @@ class PdfDocument:
         on_saving()
         try:
             self.source.save(self.pdf)
-            self.reload()
-        except Exception as error:  # the disk, permissions or MuPDF: all are shown to the user
+            self.reload(keep_history=True)
+        except Exception as error:  # the disk, permissions or the PDF engine: all are shown to the user
             self.state, self.error = SaveState.FAILED, str(error) or type(error).__name__
             return False
+        self._saved_token = self._token
         self.state, self.error = SaveState.SAVED, ""
         return True
 
-    def reload(self):
+    def reload(self, keep_history=False):
         """Read the saved file again."""
+        previous = self.pdf.data
+        replacement = self.source.open()
         self.pdf.close()
-        self.pdf = self.source.open()
+        self.pdf = replacement
+        self._annotations.clear()
+        if not keep_history or self.pdf.data != previous:
+            self._undo.clear()
+            self._redo.clear()
+            self._token = self._saved_token = 0
         self._words.clear()
         self._links.clear()
 

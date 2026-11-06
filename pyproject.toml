@@ -24,11 +24,9 @@ desktop = [
     "pywebview>=6.2,<7; sys_platform != 'linux'",
 ]
 
-# MuPDF (inside PyMuPDF) is AGPL-3.0; PySide6 is LGPL-3.0. PyMuPDF 2.x pulls numpy, onnxruntime,
-# networkx and pymupdf4llm, so stay on 1.x until the reader needs nothing from them.
 native = [
     "PySide6-Essentials>=6.10,<7",
-    "PyMuPDF>=1.28,<2",
+    "pypdfium2>=5.14,<6",
 ]
 
 [project.scripts]

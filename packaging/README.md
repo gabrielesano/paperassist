@@ -20,8 +20,10 @@ Qt QML, Quick and Network, Qt translations, the plugins `imageformats`, `iconeng
 `tls`, `generic`, `networkinformation` and `egldeviceintegrations`, the GTK theme plugin
 with the GTK libraries it pulls in, and every platform plugin except xcb, wayland,
 windows, cocoa and offscreen. The filter lives in the spec because PyInstaller's Qt
-hooks collect all plugins of the modules they find. On Linux it takes the bundle from
-213 MB to about 173 MB installed (about 61 MB as tar + zstd -19).
+hooks collect all plugins of the modules they find. The current PDFium Linux bundle is 128 MiB installed and 41.4 MiB as
+`tar | zstd -19`; the previous MuPDF core bundle was 173 / 60.6 MiB. See
+[the native stack record](../docs/development/native-stack.md) for the comparable
+reader measurements and the earlier prototype spike.
 
 Notes:
 
@@ -33,4 +35,6 @@ Notes:
   (macOS) or an installer; neither is done yet, nor signing or notarization.
 - Build Linux bundles on the oldest distribution you want to support: PyInstaller copies
   the build machine's system libraries (glibc stays external).
-- MuPDF is AGPL-3.0: a distributed bundle must offer the corresponding source.
+- PDFium ships through pypdfium2's third-party binary builds. The spec explicitly
+  collects `pypdfium2_raw`'s library and license data; PyMuPDF is not a dependency.
+  Keep the bundled PDFium and third-party notices when distributing the application.
