@@ -34,6 +34,8 @@ Thumbs.db
 /node_modules/
 /tmp/
 
-# Personal maintainer notes
+# Agent instructions and personal maintainer notes
+/AGENTS.md
+/CLAUDE.md
 CLAUDE.local.md
 docs/HANDOFF.md
