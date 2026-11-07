@@ -843,14 +843,19 @@ class NativePreferencesTests(unittest.TestCase):
         for dlg in list(window.acquisition.dialogs.values()):
             dlg.close()
         item = panel.list.item(0)
-        item.setText("A long reference title that wraps once the column gets narrow " * 6 + "\nauthors\nstatus")
+        # A scrollbar appearing after the card is sized would take width from it and change the target.
+        panel.list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # The card shows the item's first line. Wrapped text this long is taller at the narrowest width
+        # than the label's own size hint, whatever the font metrics, so a stale item height is detectable.
+        item.setText("A long reference title that wraps once the column gets narrow " * 25 + "\nauthors\nstatus")
         panel._expand(item)
         self.pump()
-        wide = item.sizeHint().height()
+        wide, wide_width = item.sizeHint().height(), panel.list.viewport().width()
 
         splitter.setSizes([230, 1000, 170])  # clamped to the card's minimum width
         self.pump()
         card = panel.list.itemWidget(item)
+        self.assertLess(panel.list.viewport().width(), wide_width)
         needed = card.layout().totalHeightForWidth(panel.list.viewport().width())
         self.assertGreater(needed, wide)
         self.assertGreaterEqual(item.sizeHint().height(), needed)
