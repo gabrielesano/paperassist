@@ -3,7 +3,7 @@ import unicodedata
 import weakref
 from html import escape
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QStyle, QStyledItemDelegate,
@@ -156,26 +156,21 @@ class ReferencesPanel(QWidget):
         self.repair.hide()
 
     def minimumSizeHint(self):
+        # An expanded card cannot shrink, so the panel must be wide enough for it. Only stable quantities
+        # are used (never the current width), otherwise the hint would feed back into the layout.
         hint = super().minimumSizeHint()
-        width = hint.width()
         if self.expanded is not None and (item := self._item(self.expanded)) and (card := self.list.itemWidget(item)):
             card.ensurePolished()
-            margins = self.contentsMargins()
-            bar = self.list.verticalScrollBar()
-            frame = self.list.frameWidth() * 2 + (bar.sizeHint().width() if bar.isVisible() else 0)
-            chrome = max(self.width() - self.list.viewport().width(), margins.left() + margins.right() + frame)
-            width = max(width, card.minimumSizeHint().width() + chrome)
-        return QSize(width, hint.height())
+            margins = self.layout().contentsMargins()
+            around = margins.left() + margins.right() + self.list.frameWidth() * 2
+            bar = self.list.verticalScrollBar().sizeHint().width()
+            return QSize(max(hint.width(), card.minimumSizeHint().width() + around + bar), hint.height())
+        return hint
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.expanded is not None and (item := self._item(self.expanded)) and self.list.itemWidget(item) is not None:
-            self._fit_item(item)
-
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        if event.type() == QEvent.StyleChange and self.expanded is not None and (item := self._item(self.expanded)) and self.list.itemWidget(item) is not None:
-            self._fit(item)
+        if self.expanded is not None and (item := self._item(self.expanded)):
+            self._fit_item(item)  # a wrapped title makes the card's height depend on its width
 
     def set_acquisition(self, acquisition):
         self.acquisition = acquisition

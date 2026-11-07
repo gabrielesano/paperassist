@@ -64,6 +64,19 @@ class NativePreferencesTests(unittest.TestCase):
         config.start()
         self.addCleanup(config.stop)
 
+    def assert_buttons_fit(self, root, context):
+        checked = 0
+        for cls in (QPushButton, QToolButton):
+            for btn in root.findChildren(cls):
+                if not btn.isVisible() or not btn.text():
+                    continue
+                self.assertLessEqual(
+                    btn.sizeHint().width(), btn.width(),
+                    f"{context}: button {btn.text()!r} ({btn.objectName()}) sizeHint {btn.sizeHint().width()} > width {btn.width()}",
+                )
+                checked += 1
+        return checked
+
     def make_window(self, workspace=None, install_menu=True, size=(1200, 800)):
         window = MainWindow(self.client, workspace)
         if install_menu:
@@ -304,8 +317,9 @@ class NativePreferencesTests(unittest.TestCase):
                 "tab_rect": window.tabs.tabBar().tabRect(0).size(),
                 "tab_height": window.tabs.tabBar().height(),
                 "outline_font": (window.outline.font().pointSizeF(), window.outline.font().pixelSize()),
-                "outline_hint": window.outline_column.minimumSizeHint(),
-                "details_hint": window.details_column.minimumSizeHint(),
+                # The column's own hint is floored at 160 px, which would hide how its content scales.
+                "outline_hint": window.outline_column.layout().minimumSize(),
+                "details_hint": window.details_column.layout().minimumSize(),
                 "dialog_font": (dialog.size_combo.font().pointSizeF(), dialog.size_combo.font().pixelSize()),
                 "dialog_size": dialog.size(),
             }
@@ -688,25 +702,12 @@ class NativePreferencesTests(unittest.TestCase):
         window.preferences_dialog.apply_zoom(1.5)
         self.pump()
 
-        def assert_buttons_fit(root, context):
-            checked = 0
-            for cls in (QPushButton, QToolButton):
-                for btn in root.findChildren(cls):
-                    if not btn.isVisible() or not btn.text():
-                        continue
-                    self.assertLessEqual(
-                        btn.sizeHint().width(), btn.width(),
-                        f"{context}: button {btn.text()!r} ({btn.objectName()}) sizeHint {btn.sizeHint().width()} > width {btn.width()}",
-                    )
-                    checked += 1
-            return checked
-
         bar = self.main_toolbar(window)
         ext = bar.findChild(QToolButton, "qt_toolbar_ext_button")
-        self.assertGreater(assert_buttons_fit(bar, "Main toolbar"), 0)
+        self.assertGreater(self.assert_buttons_fit(bar, "Main toolbar"), 0)
         if ext and ext.isVisible():
             self.assertTrue(ext.isEnabled())
-        assert_buttons_fit(quick.bar, "Quick view bar")
+        self.assert_buttons_fit(quick.bar, "Quick view bar")
 
         # References column: top actions + expanded unlinked card with browser links + expanded linked card.
         self.assertEqual(window.details.acquire.text(), "Acquire references")
@@ -717,42 +718,42 @@ class NativePreferencesTests(unittest.TestCase):
             if btn.isCheckable() and "Browser searches" in btn.text():
                 btn.setChecked(True)
         self.pump()
-        assert_buttons_fit(window.details_column, "References panel (unlinked card)")
+        self.assert_buttons_fit(window.details_column, "References panel (unlinked card)")
         window.details._expand(window.details.list.item(1))
         self.pump()
-        assert_buttons_fit(window.details_column, "References panel (linked card)")
+        self.assert_buttons_fit(window.details_column, "References panel (linked card)")
 
         # Comments column: Add comment, composer buttons, and saved comment row.
         window.comments.show_mode("comments")
         self.pump()
-        assert_buttons_fit(window.details_column, "Comments panel (idle)")
+        self.assert_buttons_fit(window.details_column, "Comments panel (idle)")
         window.comments.compose()
         window.comments.panel.text.setPlainText("Check 150% composer buttons")
         self.pump()
-        assert_buttons_fit(window.details_column, "Comments panel (composer)")
+        self.assert_buttons_fit(window.details_column, "Comments panel (composer)")
         window.comments.save_draft(window.pane())
         self.pump()
-        assert_buttons_fit(window.details_column, "Comments panel (with comment)")
+        self.assert_buttons_fit(window.details_column, "Comments panel (with comment)")
 
         # Library dialog (including visible Cancel button).
         window.show_library()
         window.library_dialog.cancel_button.show()
         self.pump()
-        assert_buttons_fit(window.library_dialog, "Library dialog")
+        self.assert_buttons_fit(window.library_dialog, "Library dialog")
         window.library_dialog.hide()
 
         # Acquire references dialog.
         window.details.acquire.click()
         self.pump()
         acq_dialog = window.acquisition.dialogs[main_doc["id"]]
-        assert_buttons_fit(acq_dialog, "Acquire references dialog")
+        self.assert_buttons_fit(acq_dialog, "Acquire references dialog")
         acq_dialog.close()
 
         # Sources dialog.
         window.sources_action.trigger()
         self.pump()
         sources_dlg = window.findChild(SourcesDialog)
-        assert_buttons_fit(sources_dlg, "Sources dialog")
+        self.assert_buttons_fit(sources_dlg, "Sources dialog")
         sources_dlg.reject()
 
         # Preferences dialog (including confirmation plan box).
@@ -761,7 +762,7 @@ class NativePreferencesTests(unittest.TestCase):
         window.preferences_dialog.library_edit.setText(str(other))
         window.preferences_dialog.library_check.click()
         self.pump()
-        assert_buttons_fit(window.preferences_dialog, "Preferences dialog")
+        self.assert_buttons_fit(window.preferences_dialog, "Preferences dialog")
         window.preferences_dialog.reject()
 
     def test_side_column_and_expanded_cards_widen_cleanly_for_wide_fonts_at_150_percent(self):
@@ -796,19 +797,6 @@ class NativePreferencesTests(unittest.TestCase):
         self.pump()
         self.assertGreaterEqual(window.details.acquire.sizeHint().width(), 338)
 
-        def assert_buttons_fit(root, context):
-            checked = 0
-            for cls in (QPushButton, QToolButton):
-                for btn in root.findChildren(cls):
-                    if not btn.isVisible() or not btn.text():
-                        continue
-                    self.assertLessEqual(
-                        btn.sizeHint().width(), btn.width(),
-                        f"{context}: button {btn.text()!r} ({btn.objectName()}) sizeHint {btn.sizeHint().width()} > width {btn.width()}",
-                    )
-                    checked += 1
-            return checked
-
         # References unlinked card with Browser searches expanded
         window.details._expand(window.details.list.item(0))
         card0 = window.details.list.itemWidget(window.details.list.item(0))
@@ -816,28 +804,56 @@ class NativePreferencesTests(unittest.TestCase):
             if btn.isCheckable() and "Browser searches" in btn.text():
                 btn.setChecked(True)
         self.pump()
-        self.assertGreater(assert_buttons_fit(window.details_column, "References panel (unlinked card)"), 0)
+        self.assertGreater(self.assert_buttons_fit(window.details_column, "References panel (unlinked card)"), 0)
 
         # References linked card
         window.details._expand(window.details.list.item(1))
         self.pump()
-        self.assertGreater(assert_buttons_fit(window.details_column, "References panel (linked card)"), 0)
+        self.assertGreater(self.assert_buttons_fit(window.details_column, "References panel (linked card)"), 0)
 
         # Comments idle
         window.comments.show_mode("comments")
         self.pump()
-        self.assertGreater(assert_buttons_fit(window.details_column, "Comments panel (idle)"), 0)
+        self.assertGreater(self.assert_buttons_fit(window.details_column, "Comments panel (idle)"), 0)
 
         # Comments composer
         window.comments.compose()
         window.comments.panel.text.setPlainText("Check 150% composer buttons")
         self.pump()
-        self.assertGreater(assert_buttons_fit(window.details_column, "Comments panel (composer)"), 0)
+        self.assertGreater(self.assert_buttons_fit(window.details_column, "Comments panel (composer)"), 0)
 
         # Comments with-comment
         window.comments.save_draft(window.pane())
         self.pump()
-        self.assertGreater(assert_buttons_fit(window.details_column, "Comments panel (with comment)"), 0)
+        self.assertGreater(self.assert_buttons_fit(window.details_column, "Comments panel (with comment)"), 0)
+
+    def test_expanded_card_refits_its_height_when_the_panel_narrows(self):
+        from test_library_window import cited_pdf
+
+        workspace = Workspace(self.dir / "refit-library")
+        self.addCleanup(workspace.close)
+        path = cited_pdf(self.dir / "refit.pdf", pages=3)
+        doc = workspace.library.import_stream(io.BytesIO(path.read_bytes()), path.name)
+        references.analyze(workspace.library, doc["id"])
+        window = self.make_window(workspace=workspace, size=(1400, 900))
+        panel, splitter = window.details, window.centralWidget()
+        splitter.setSizes([230, 400, 770])
+        tab = window.open_library_document(doc["id"])
+        self.pump(lambda: tab.main.view.has_page(0) and panel.list.count() >= 1)
+        for dlg in list(window.acquisition.dialogs.values()):
+            dlg.close()
+        item = panel.list.item(0)
+        item.setText("A long reference title that wraps once the column gets narrow " * 6 + "\nauthors\nstatus")
+        panel._expand(item)
+        self.pump()
+        wide = item.sizeHint().height()
+
+        splitter.setSizes([230, 1000, 170])  # clamped to the card's minimum width
+        self.pump()
+        card = panel.list.itemWidget(item)
+        needed = card.layout().totalHeightForWidth(panel.list.viewport().width())
+        self.assertGreater(needed, wide)
+        self.assertGreaterEqual(item.sizeHint().height(), needed)
 
 
 if __name__ == "__main__":
