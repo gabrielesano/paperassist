@@ -5,22 +5,20 @@ records are in [development/](development/).
 
 ## Current work
 
-1. Library and import: deterministic metadata, managed originals, SQLite catalog,
-   hash deduplication, manual correction and tested persistence.
-2. Native reader (Qt Widgets + PDFium, with pypdf for annotation writing): tabs, quick view, selection, highlights and
-   explicit save; then drawing, comments and editing existing annotations,
-   compatible with PDFs annotated by the web reader.
-3. References and background work without HTTP: citation analysis, shared local
-   resolution, selected open-access retrieval and web-search fallback, called
-   directly by the native interface.
-4. Native application parity with the web interface, following the
-   [migration checklist](development/native-migration.md): library, references
-   column, comments, preferences, shortcuts and accessibility. Then standalone
-   builds and PDF associations per OS/architecture, and removal of the web
-   interface, the HTTP server and the pywebview window
-   ([desktop plan](development/desktop-plan.md), transitional).
+Native parity is accepted in the [Linux migration inventory](development/native-migration.md):
+104 accepted rows and five host-only exclusions. CI is green on Ubuntu and
+Windows with Python 3.11 and 3.13 from commit `77ae453`. Cross-platform release
+readiness still requires the checks below.
 
-## Acceptance sequence
+1. Deliver the first Linux release installable with one command without requiring
+   Python, following the [session checklist](development/linux-release-plan.md).
+   Confirm the format and supported targets, rebuild, implement installation and
+   desktop integration, and verify clean installations before publication.
+2. Extend standalone builds and PDF associations to further OS/architecture
+   targets. Retire the web interface, HTTP server and pywebview host through a
+   deliberate transition ([desktop plan](development/desktop-plan.md)).
+
+## Regression acceptance sequence
 
 - Bulk import and reimport a real collection without duplicates or lost unresolved files.
 - Open a library paper, annotate, save, close and reopen without losing changes.
