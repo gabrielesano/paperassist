@@ -1,7 +1,7 @@
 """Main window: one paper per tab, save state everywhere, and the Save/Discard/Cancel rules."""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QTabWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QStackedWidget, QTabBar, QTabWidget, QToolBar
 
 from paperassist import settings
 
@@ -14,19 +14,21 @@ from .library_dialog import LibraryDialog
 from .library_source import LibrarySource
 from .outline import OutlinePanel, read_outline
 from .pane import Pane
-from .positions import PositionKeeper
+from .positions import PositionKeeper, current_page
 from .references_panel import ReferencesPanel
 from .rules import CANCEL, DISCARD, SAVE, apply_decisions, collect_decisions, locked_by_other
 from .shortcuts import install as install_shortcuts
 from .sidebar import DetailsPanel, SideColumn
 from .source import FileSource
 from .tab import DocTab
+from .toolbar import install_overflow
 
 MARKERS = {SaveState.UNSAVED: " ●", SaveState.SAVING: " …", SaveState.FAILED: " !"}
 WORST_FIRST = [SaveState.FAILED, SaveState.SAVING, SaveState.UNSAVED, SaveState.SAVED]
 STYLE = """
 QToolBar { background: #ece9e3; border: 0; border-bottom: 1px solid #cfcac1; spacing: 2px; }
 QToolButton { padding: 3px 8px; border: 1px solid transparent; border-radius: 4px; }
+QToolButton#qt_toolbar_ext_button { padding: 0px; border: 0px; }
 QToolButton:hover { background: #dfdbd3; }
 QToolButton:checked { background: #cfe3e0; border-color: #2f8f86; }
 QTabBar::tab { padding: 5px 12px; }
@@ -41,10 +43,11 @@ class MainWindow(QMainWindow):
     def __init__(self, client, workspace=None):
         """workspace is the opened library, or None for loose files."""
         super().__init__()
-        self.client, self.workspace, self.library_dialog = client, workspace, None
+        self.client, self.workspace, self.library_dialog, self.switch_target = client, workspace, None, None
         saved = settings.preferences()  # shared with the web reader
         self.side_by_side = saved.get("quick_view_layout") == "side"
         self.resize(1400, 900)
+        self.setMinimumSize(800, 600)
         self.setStyleSheet(STYLE)
         self.tabs = QTabWidget(tabsClosable=True, movable=True, documentMode=True)
         self.tabs.tabCloseRequested.connect(lambda index: self.close_tab(index))
@@ -54,9 +57,12 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.state_label)
         self._build_actions()
         self.annotation_bar = install_annotation_bar(self)
+        for toolbar in self.findChildren(QToolBar):
+            install_overflow(toolbar)
         install_shortcuts(self)
         install_app_menu(self)  # also Preferences, which applies the saved interface size, and About
         self.comments.draft_changed.connect(self.refresh)
+        QApplication.instance().focusChanged.connect(self._focus_pane)
         self.refresh()
 
     def _build_actions(self):
@@ -96,7 +102,13 @@ class MainWindow(QMainWindow):
         self.details_column.setVisible(saved.get("details_expanded") is not False)
         self._shown_for, self.outlines = {}, {}  # column -> key of the paper it shows; bookmarks by paper key
         splitter = QSplitter(Qt.Horizontal, childrenCollapsible=False)
-        for widget in (self.outline_column, self.tabs, self.details_column):
+        self.reader_stack = QStackedWidget()
+        self.welcome = QLabel("Open a PDF or choose a paper from Library to start reading.",
+                              alignment=Qt.AlignCenter, wordWrap=True)
+        self.welcome.setAccessibleName("Welcome to PaperAssist")
+        self.reader_stack.addWidget(self.welcome)
+        self.reader_stack.addWidget(self.tabs)
+        for widget in (self.outline_column, self.reader_stack, self.details_column):
             splitter.addWidget(widget)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([230, 840, 330])
@@ -175,6 +187,13 @@ class MainWindow(QMainWindow):
             return self.tab().quick  # clicking the paper that is already there changes nothing
         return self.open_quick(source)
 
+    def _focus_pane(self, previous, current):
+        if current is not None and (tab := self.tab()):
+            for pane in tab.panes():
+                if pane is current or pane.isAncestorOf(current):
+                    tab.activate(pane)
+                    break
+
     def _on_pane(self, action):
         if self.pane():
             action(self.pane())
@@ -217,11 +236,25 @@ class MainWindow(QMainWindow):
 
     def open_source(self, source):
         """Open a paper in a tab; a paper that already has a tab is selected instead of opened twice."""
-        for i in range(self.tabs.count()):
-            if self.tabs.widget(i).main.key == source.key:
-                self.tabs.setCurrentIndex(i)
-                return self.tabs.widget(i)
-        return self._add_tab(self._wrap(self._new_pane(source)))
+        matches = [(self.tabs.widget(i), pane) for i in range(self.tabs.count())
+                   for pane in self.tabs.widget(i).panes() if pane.key == source.key]
+        if matches:
+            tab, pane = next((pair for pair in matches if pair[1].modified), matches[0])
+            self.tabs.setCurrentWidget(tab)
+            tab.activate(pane)
+            pane.view.setFocus()
+            return tab
+        pane = self._open_pane(source)
+        return self._add_tab(self._wrap(pane)) if pane else None
+
+    def _open_pane(self, source):
+        try:
+            pane = self._new_pane(source)
+        except Exception as error:
+            self.statusBar().showMessage(f"Could not open {source.title}: {error}")
+            return None
+        self.statusBar().clearMessage()  # an earlier failure no longer describes what is open
+        return pane
 
     def _wrap(self, main):
         tab = DocTab(main, self.side_by_side)
@@ -247,9 +280,11 @@ class MainWindow(QMainWindow):
         tab = self.tab()
         if tab.quick and not self.confirm([tab.quick]):  # replacing a modified quick view asks first
             return None
+        pane = self._open_pane(source)
+        if pane is None:
+            return None
         if tab.quick:
             self.close_quick(ask=False)
-        pane = self._new_pane(source)
         pane.quick_layout_toggled.connect(self.toggle_quick_layout)
         pane.promote_requested.connect(self.promote_quick)
         pane.close_requested.connect(self.close_quick)
@@ -270,14 +305,23 @@ class MainWindow(QMainWindow):
             self.tabs.widget(i).set_side_by_side(self.side_by_side)
 
     def promote_quick(self):
-        """Move the quick pane into its own tab with its page, zoom and unsaved edits."""
-        tab = self.tab()
-        owner = next((t for t in map(self.tabs.widget, range(self.tabs.count())) if t is not tab and t.main.key == tab.quick.key), None)
-        if owner and not tab.quick.modified:  # that tab already is the editable owner
+        """Move the quick pane into its own tab with its page, zoom and unsaved edits.
+
+        A clean view of an already-open paper returns to its owner at the preview's page,
+        fitted to the owner's width, without creating a second tab.
+        """
+        quick = self.tab().quick
+        others = [pane for pane in self.all_panes() if pane is not quick and pane.key == quick.key]
+        if others and not quick.modified and not self.comments.has_draft(quick):
+            source = quick.view.doc.source
+            page = current_page(quick.view)
             self.close_quick(ask=False)
-            self.tabs.setCurrentWidget(owner)
+            self.open_source(source)
+            view = self.pane().view
+            view.fit_width()
+            view.goto(page)
         else:
-            self._add_tab(self._wrap(tab.take_quick()))
+            self._add_tab(self._wrap(self.tab().take_quick()))
 
     # ---- save state -----------------------------------------------------------------------
     def refresh(self, *_):
@@ -294,11 +338,17 @@ class MainWindow(QMainWindow):
             draft = any(self.comments.has_draft(p) for p in tab.panes())
             self.tabs.setTabText(i, tab.main.title[:28] + (MARKERS.get(state, "") or (" ●" if draft else "")))
             self.tabs.setTabToolTip(i, f"{tab.main.title} — {state.value}")
+            self.tabs.tabBar().setAccessibleTabName(i, f"{tab.main.title} — {state.value}"
+                                                   + (" — Comment draft" if draft else ""))
+            for side in (QTabBar.LeftSide, QTabBar.RightSide):
+                if button := self.tabs.tabBar().tabButton(i, side):
+                    button.setAccessibleName(f"Close {tab.main.title}")
         if hasattr(self, "annotation_bar"):  # refresh can run while the window is being built
             self.annotation_bar.refresh()
         self._update_columns()
         self.refreshed.emit()
         pane = self.pane()
+        self.reader_stack.setCurrentWidget(self.tabs if pane else self.welcome)
         if pane is None:
             self.setWindowTitle("PaperAssist")
             self.state_label.clear()
@@ -336,6 +386,11 @@ class MainWindow(QMainWindow):
 
     def confirm(self, panes):
         """True when closing these panes may go ahead: every modified one was saved or discarded."""
+        for pane in panes:
+            pane.view.finish_interaction()
+        if any(pane.state is SaveState.SAVING for pane in panes):  # a close request can arrive while the save repaints
+            self.statusBar().showMessage("Wait for the save to finish before closing.", 6000)
+            return False
         decisions = collect_decisions(panes, self.ask_decision,
                                       lambda p: p.modified or self.comments.has_draft(p))
         if decisions is None or not apply_decisions(decisions, self._save_pending):
@@ -368,6 +423,6 @@ class MainWindow(QMainWindow):
             pane.release()  # also stores the reading positions
         self.details.close()
         self.acquisition.close()
-        if self.library_dialog:
-            self.library_dialog.close()
+        for dialog in self.findChildren(QDialog):
+            dialog.close()
         event.accept()

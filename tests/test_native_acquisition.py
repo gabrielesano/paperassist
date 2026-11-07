@@ -229,3 +229,17 @@ class AcquisitionWidgetTests(unittest.TestCase):
             button.click()
             self.assertEqual(open_url.call_count, 1)
             card.deleteLater()
+
+    def test_repair_downloads_runs_workspace_job_and_emits_changed(self):
+        changed = []
+        self.controller.changed.connect(changed.append)
+        self.workspace.repair_downloads.return_value = {"id": "repair-1", "status": "pending"}
+        self.controller.repair(11)
+        self.workspace.repair_downloads.assert_called_once_with(11)
+        self.assertIn("Checking earlier downloads", self.controller.status.text())
+        self.workspace.job_status.return_value = {
+            "id": "repair-1", "status": "completed", "result": {"documents": [{"id": 8}, {"id": 9}]},
+        }
+        self.controller.jobs["repair-1"]._poll()
+        self.assertIn("2 results", self.controller.status.text())
+        self.assertEqual(changed, [11])

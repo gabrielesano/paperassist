@@ -117,6 +117,20 @@ class LibraryDialogTests(MetadataCase):
         self.dialog.refresh()
         self.assertFalse(self.dialog.hint.isVisible())
 
+    def test_search_finds_the_displayed_review_status_and_removes_corrected_papers(self):
+        document, _ = self.add("unidentified.pdf", 3)
+        self.dialog.show()
+        self.assertEqual(self.dialog.table.topLevelItem(0).text(3), "Needs review")
+        QTest.keyClicks(self.dialog.search, "Needs review")
+        self.pump(lambda: not self.dialog.typing.isActive())
+        self.assertEqual(self.titles(), ["unidentified"])
+        self.library.update_metadata(document["id"], {"title": "Confirmed title"})
+        self.dialog.refresh()
+        self.assertEqual(self.titles(), [])
+        self.dialog.search.clear()
+        self.pump(lambda: not self.dialog.typing.isActive())
+        self.assertEqual(self.titles(), ["Confirmed title"])
+
     def test_editing_the_selected_paper_updates_the_list(self):
         self.add("a.pdf", 3)
         self.dialog.show()
@@ -164,6 +178,59 @@ class LibraryDialogTests(MetadataCase):
         self.assertEqual(len(self.library.list_documents()), 2)
         self.assertFalse(self.dialog.estimate.isVisible())
         self.assertTrue(self.dialog.import_button.isEnabled())
+        self.assertEqual(self.dialog.message.text(),
+                         "2 added, 0 already in the library, 2 need metadata review, 0 failed")
+
+    def test_import_summary_separates_corrected_duplicates_review_files_and_failures(self):
+        existing, path = self.add("existing.pdf", 3)
+        self.library.update_metadata(existing["id"], {"title": "Confirmed title"})
+        fresh = make_pdf(self.dir / "fresh.pdf", pages=4)
+        bad = self.dir / "invalid.pdf"
+        bad.write_bytes(b"not a PDF")
+        self.dialog.show()
+        self.dialog.select_import([str(path), str(fresh), str(bad)])
+        self.dialog.start_button.click()
+        self.pump(lambda: self.dialog.watcher is None)
+        message = self.dialog.message.text()
+        self.assertIn("1 added, 1 already in the library, 1 need metadata review, 1 failed", message)
+        self.assertIn(str(bad), message)
+        self.assertEqual(len(self.library.list_documents()), 2)
+
+    def test_an_unreadable_only_selection_shows_its_error_instead_of_no_pdfs(self):
+        blocked = self.dir / "blocked"
+        blocked.mkdir()
+        self.dialog.show()
+        with patch("paperassist.native.library_dialog.os.scandir", side_effect=PermissionError("Access denied")):
+            self.dialog.select_import([blocked])
+        self.assertIn("Could not scan selection", self.dialog.message.text())
+        self.assertIn(str(blocked), self.dialog.message.text())
+        self.assertIn("Access denied", self.dialog.message.text())
+        self.assertFalse(self.dialog.start_button.isVisible())
+        self.assertEqual(self.dialog.pending, [])
+        self.assertEqual(self.library.list_documents(), [])
+
+    def test_a_partially_unreadable_selection_warns_and_imports_its_readable_files(self):
+        folder = self.make_files()
+        blocked = folder / "blocked"
+        blocked.mkdir()
+        scandir = os.scandir
+
+        def scan(path):
+            if Path(path) == blocked:
+                raise PermissionError("Access denied")
+            return scandir(path)
+
+        self.dialog.show()
+        with patch("paperassist.native.library_dialog.os.scandir", side_effect=scan):
+            self.dialog.select_import([str(folder)])
+            self.assertIn(str(blocked), self.dialog.message.text())
+            self.assertIn("estimate unavailable", self.dialog.estimate.text())
+            self.dialog.start_button.click()
+            self.pump(lambda: self.dialog.watcher is None)
+        self.assertIn("2 added, 0 already in the library, 2 need metadata review, 1 failed",
+                      self.dialog.message.text())
+        self.assertIn(str(blocked), self.dialog.message.text())
+        self.assertEqual(len(self.library.list_documents()), 2)
 
     def test_a_selection_can_be_dropped_and_non_pdfs_alone_start_nothing(self):
         folder = self.make_files()

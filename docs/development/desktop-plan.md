@@ -3,7 +3,7 @@
 PaperAssist uses pywebview to show the existing Flask/PDF.js reader in a dedicated
 window. Keep browser mode, managed PDF copies and explicit Save behavior.
 
-This window is transitional: the native Qt/MuPDF application replaces it, and it is
+This window is transitional: the native Qt/PDFium application replaces it, and it is
 removed with the web interface once the native one reaches parity (see the
 specification's technical direction).
 

@@ -72,6 +72,27 @@ class Frame:
         return Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
+def _search_ranges(text_page, query):
+    def fold(text):
+        return "".join(c for c in unicodedata.normalize("NFKD", text.casefold())
+                       if not unicodedata.combining(c))
+
+    needle = fold(query)
+    if not needle:
+        return
+    letters, owners = [], []
+    # PDFium character indices can differ from Python offsets in extracted text.
+    for index in range(text_page.count_chars()):
+        letter = fold(chr(raw.FPDFText_GetUnicode(text_page, index)))
+        letters.append(letter)
+        owners.extend([index] * len(letter))
+    text, start = "".join(letters), 0
+    while (found := text.find(needle, start)) >= 0:
+        first, last = owners[found], owners[found + len(needle) - 1]
+        yield first, last - first + 1
+        start = found + len(needle)
+
+
 class Pdf:
     def __init__(self, data):
         self.data = bytes(data)
@@ -177,8 +198,7 @@ class Pdf:
         for number in range(len(self.sizes)):
             frame, page = self.frame(number), self._doc[number]
             text_page = page.get_textpage()
-            searcher = text_page.search(text)
-            while match := searcher.get_next():
+            for match in _search_ranges(text_page, text):
                 line = None
                 for i in range(text_page.count_rects(*match)):
                     rect = Rect(*text_page.get_rect(i))
@@ -191,6 +211,12 @@ class Pdf:
             text_page.close()
             page.close()
         return hits
+
+    def render_data(self, highlights=True):
+        if highlights:
+            return self.data
+        from .annotations import without_highlights
+        return without_highlights(self.data)
 
     def _edit(self, kind, page, **values):
         from . import annotations
@@ -213,9 +239,10 @@ class Pdf:
             quads.append(annotations.bounds(points))
         self._edit('highlight', page, rects=quads, color=color, opacity=opacity)
 
-    def add_ink(self, page, strokes, color=(0, 0, 0), width=2):
+    def add_ink(self, page, strokes, color=(0, 0, 0), width=2, freehand=False):
         frame = self.frame(page)
-        self._edit('ink', page, strokes=[[frame.to_pdf(x, y) for x, y in stroke] for stroke in strokes], color=color, width=width)
+        self._edit('ink', page, strokes=[[frame.to_pdf(x, y) for x, y in stroke] for stroke in strokes],
+                   color=color, width=width, freehand=freehand)
 
     def annotations(self, page):
         from . import annotations
@@ -229,6 +256,12 @@ class Pdf:
 
     def update_annotation(self, page, index, color=None, width=None):
         self._edit('update', page, index=index, color=color, width=width)
+
+    def transform_annotation(self, page, index, rect):
+        from .annotations import bounds
+        frame = self.frame(page)
+        box = bounds([frame.to_pdf(rect.x0, rect.y0), frame.to_pdf(rect.x1, rect.y1)])
+        self._edit('transform', page, index=index, rect=box)
 
     def delete_annotation(self, page, index):
         self._edit('delete', page, index=index)
@@ -259,7 +292,8 @@ class RenderedPage:
 
 class PageRenderer:
     def __init__(self, data):
-        self._doc = pdfium.PdfDocument(data)
+        self.data = bytes(data)
+        self._doc = pdfium.PdfDocument(self.data)
 
     def render(self, page, scale):
         with closing(self._doc[page]) as target:

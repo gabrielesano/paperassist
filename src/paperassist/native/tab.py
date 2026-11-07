@@ -22,7 +22,7 @@ class Handle(QSplitterHandle):
         before, after = (Qt.Key_Up, Qt.Key_Down) if self.orientation() == Qt.Vertical else (Qt.Key_Left, Qt.Key_Right)
         splitter = self.splitter()
         index, position, total = splitter.indexOf(self), splitter.sizes()[0], sum(splitter.sizes())
-        target = {before: position - KEY_STEP, after: position + KEY_STEP, Qt.Key_Home: 0, Qt.Key_End: total}.get(event.key())
+        target = {before: position - KEY_STEP, after: position + KEY_STEP, Qt.Key_Home: round(total * 0.8), Qt.Key_End: round(total * 0.25)}.get(event.key())
         if target is None:
             return super().keyPressEvent(event)
         splitter.moveSplitter(max(0, min(target, total)), index)
@@ -35,7 +35,8 @@ class DocTab(QSplitter):
     def __init__(self, main, side_by_side=False):
         super().__init__(Qt.Vertical)
         self.main, self.quick, self.active = main, None, main
-        self.side_by_side, self.quick_share = side_by_side, 0.45
+        self.side_by_side, self._narrow = side_by_side, False
+        self.shares = {Qt.Vertical: 0.4, Qt.Horizontal: 0.5}
         self.setChildrenCollapsible(False)
         self.addWidget(main)
         main.view.activated.connect(lambda: self.activate(main))
@@ -87,20 +88,28 @@ class DocTab(QSplitter):
         return self.quick is None or not self.side_by_side or self.width() < NARROW
 
     def _arrange(self):
-        vertical = self._vertical()
+        vertical, self._narrow = self._vertical(), self.width() < NARROW
         self.setOrientation(Qt.Vertical if vertical else Qt.Horizontal)
         for pane in self.panes():
-            pane.set_vertical_split(vertical)
+            pane.set_vertical_split(vertical, narrow=self._narrow)
         if self.quick:
             total = (self.height() if vertical else self.width()) or 1000
             self.setSizes([round(total * (1 - self.quick_share)), round(total * self.quick_share)])
 
+    @property
+    def quick_share(self):
+        return self.shares[self.orientation()]
+
     def _remember_share(self):
         sizes = self.sizes()
         if len(sizes) == 2 and sum(sizes):
-            self.quick_share = sizes[1] / sum(sizes)
+            share = max(0.2, min(0.75, sizes[1] / sum(sizes)))
+            self.shares[self.orientation()] = share
+            if share != sizes[1] / sum(sizes):
+                total = sum(sizes)
+                self.setSizes([round(total * (1 - share)), round(total * share)])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.quick and self._vertical() != (self.orientation() == Qt.Vertical):
+        if self.quick and (self._vertical() != (self.orientation() == Qt.Vertical) or (self.width() < NARROW) != self._narrow):
             self._arrange()

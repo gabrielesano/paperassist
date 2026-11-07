@@ -3,7 +3,7 @@ import unicodedata
 import weakref
 from html import escape
 
-from PySide6.QtCore import QRect, QSize, QThread, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QStyle, QStyledItemDelegate,
@@ -13,31 +13,16 @@ from paperassist import references
 
 from .acquisition import reference_status, status_tone
 from .jobs import JobWatcher
-from .citations import (citation_matches, citation_position, locate_citations, next_citation_index,
+from .citations import (citation_matches, citation_position, next_citation_index,
                         reading_position, reveal_citation)
 
 SHOWN_CHARS = 240  # one bibliography entry can run to a page; the tooltip keeps the whole text
 PAD = 6
-TASKS = set()  # threads outlive a closed panel until their independent read has finished
 
 
-class ReadTask(QThread):
-    done = Signal(object)
-
-    def __init__(self, operation, context):
-        super().__init__()
-        self.operation, self.context = operation, context
-        self.result, self.error = None, None
-        TASKS.add(self)
-        self.finished.connect(lambda: TASKS.discard(self))
-        self.finished.connect(self.deleteLater)
-
-    def run(self):
-        try:
-            self.result = self.operation()
-        except Exception as error:
-            self.error = str(error) or type(error).__name__
-        self.done.emit(self)
+def _load_or_analyze(library, document_id):
+    payload = references.get(library, document_id)
+    return references.analyze(library, document_id) if payload["status"] == "not_analyzed" else payload
 
 
 def fold(text):
@@ -123,10 +108,9 @@ class ReferencesPanel(QWidget):
         super().__init__()
         self.workspace, self.document_id, self.refs = workspace, None, []
         self.view, self.acquisition = None, None
-        self.loaded, self.stored = {}, {}
+        self.loaded = {}
         self.series, self.located = weakref.WeakKeyDictionary(), weakref.WeakKeyDictionary()
-        self.loading, self.stepping = set(), set()
-        self.reading = set()  # library reads in flight; closing waits for them, they write into the library folder
+        self.stepping, self.pending_reload = set(), set()
         self.payload_status = "not_analyzed"
         self.filters, self.analyzing = {}, {}  # filter text and running jobs, by document id
         self.filter = QLineEdit(placeholderText="Filter references", clearButtonEnabled=True)
@@ -157,10 +141,8 @@ class ReferencesPanel(QWidget):
         column.addWidget(self.filter)
         column.addLayout(row)
         column.addWidget(self.analysis_note)
-        actions = QHBoxLayout()
-        actions.addWidget(self.acquire)
-        actions.addWidget(self.repair)
-        column.addLayout(actions)
+        column.addWidget(self.acquire)
+        column.addWidget(self.repair)
         column.addWidget(self.progress)
         column.addWidget(self.choices)
         column.addWidget(self.list, 1)
@@ -176,8 +158,8 @@ class ReferencesPanel(QWidget):
     def set_acquisition(self, acquisition):
         self.acquisition = acquisition
         acquisition.changed.connect(self.reload)
-        self.acquire.show()
-        self.repair.show()
+        self.acquire.setVisible(self.document_id is not None)
+        self.repair.setVisible(self.document_id is not None)
 
     def bind_view(self, view):
         self.view = view
@@ -186,88 +168,60 @@ class ReferencesPanel(QWidget):
 
     def reload(self, document_id):
         self.loaded.pop(document_id, None)
+        if document_id in self.analyzing:
+            self.pending_reload.add(document_id)
+            return
         if document_id == self.document_id:
             self.show_for(document_id)
+
+    def library_changed(self):
+        """Forget bibliographies affected by library imports or metadata edits."""
+        self.loaded.clear()
+        self.pending_reload.update(self.analyzing)
+        if self.document_id is not None:
+            self.reload(self.document_id)
 
     # ---- what is shown ------------------------------------------------------------------
     def show_for(self, document_id):
         """Show the bibliography of a library paper; anything else gets an explanation."""
+        same = document_id == self.document_id
         self.filters[self.document_id] = self.filter.text()
-        if document_id != self.document_id:
+        if not same:
             self.expanded = None
         self.document_id = document_id
+        available = document_id is not None and self.workspace is not None
+        self.acquire.setVisible(available)
+        self.repair.setVisible(available)
+        self.acquire.setEnabled(available)
+        self.repair.setEnabled(available)
         self.choices.hide()
         self.filter.blockSignals(True)
         self.filter.setText(self.filters.get(document_id, ""))
         self.filter.blockSignals(False)
-        self.refs = []
-        self.list.clear()
         self.retry.hide()
-        if document_id is None:
+        if not same:
+            self.refs = []
+            self.list.clear()
+        if document_id is None or self.workspace is None:
             self.analysis_note.hide()
             return self._message("References are available for papers in the library.")
-        if document_id in self.analyzing:
-            return self._message("Analyzing references…", busy=True)
-        try:
-            payload = references._load(self.workspace.library, document_id)
-        except Exception as error:  # a broken PDF or catalog must leave the column usable
-            return self._message(f"Could not read the references: {error}", retry=True)
-        if (payload["status"] == "not_analyzed" or payload.get("extraction_version") != references.EXTRACTION_VERSION
-                or payload.get("destination_version") != references.DESTINATION_VERSION):
-            return self.analyze(document_id)
-        if document_id in self.loaded and payload == self.stored.get(document_id):
-            cached = self.loaded[document_id]
+        if same:
+            self.loaded.pop(document_id, None)
+        cached = self.loaded.get(document_id)
+        if (cached and cached.get("extraction_version") == references.EXTRACTION_VERSION
+                and cached.get("destination_version") == references.DESTINATION_VERSION):
             self.refs, self.payload_status = cached["references"], cached["status"]
             self._fill()
             self.references_loaded.emit(document_id, self.refs)
             return
-        self.stored[document_id] = payload
-        self.refs = payload["references"]
-        self.payload_status = payload["status"]
-        self._fill()
-        if document_id not in self.loading:
-            self.loading.add(document_id)
-            library = self.workspace.library
-            def read():
-                return references.get(library, document_id)
-            self._start(read, ("load", document_id))
+        if document_id in self.analyzing:
+            return self._message("Loading references…", busy=True)
+        self._load(document_id)
 
-    def _start(self, operation, context):
-        task = ReadTask(operation, context)
-        task.done.connect(self._read_done)
-        if context[0] == "load":
-            self.reading.add(task)
-        task.start()
-
-    def _read_done(self, task):
-        self.reading.discard(task)
-        kind, document_id, *extra = task.context
-        if kind == "load":
-            self.loading.discard(document_id)
-            if task.error:
-                if document_id == self.document_id:
-                    self._message(f"Could not read the references: {task.error}", retry=True)
-                return
-            payload = task.result
-            self.loaded[document_id] = payload
-            if document_id == self.document_id and (payload["references"], payload["status"]) != (self.refs, self.payload_status):
-                self.refs, self.payload_status = payload["references"], payload["status"]
-                self._fill()
-            self.references_loaded.emit(document_id, payload["references"])
-            self.refs_changed.emit(document_id, payload["references"])
-        else:
-            target, ref = extra
-            view = target()
-            if view is None:
-                return
-            self.stepping.discard(view)
-            if task.error:
-                if view is self.view:
-                    self._message(f"Citations could not be read from this PDF: {task.error}")
-                return
-            self.located.setdefault(view, {})[ref["id"]] = task.result
-            if view is self.view:
-                self._show_citation(view, ref, task.result)
+    def _load(self, document_id):
+        library = self.workspace.library
+        self._run_job(document_id, lambda: self.workspace.submit(
+            lambda job, cancel: _load_or_analyze(library, document_id)), "load")
 
     def _message(self, text, busy=False, retry=False):
         self.status.setText(text)
@@ -404,6 +358,10 @@ class ReferencesPanel(QWidget):
             self.open_requested.emit(ref["local_document_id"])
         elif self.acquisition:
             self.acquisition.show_reference(self.document_id, ref)
+            if item := self._item(ref["id"]):
+                self._collapse(item)
+                self._expand(item)
+                self.list.scrollToItem(item)
 
     def step(self, ref):
         self.choices.hide()
@@ -414,9 +372,20 @@ class ReferencesPanel(QWidget):
         if cached is not None:
             return self._show_citation(view, ref, cached)
         self.stepping.add(view)
-        data = view.doc.pdf.data
-        self._start(lambda: locate_citations(data, ref),
-                    ("locate", self.document_id, weakref.ref(view), ref))
+        target = weakref.ref(view)
+        view.client.locate(view.doc_id, ref, lambda result, error: self._located(target(), ref, result, error))
+
+    def _located(self, view, ref, result, error):
+        if view is None:
+            return
+        self.stepping.discard(view)
+        if error:
+            if view is self.view:
+                self._message(f"Citations could not be read from this PDF: {error}")
+            return
+        self.located.setdefault(view, {})[ref["id"]] = result
+        if view is self.view:
+            self._show_citation(view, ref, result)
 
     def _show_citation(self, view, ref, citations):
         if not citations:
@@ -459,31 +428,41 @@ class ReferencesPanel(QWidget):
 
     # ---- analysis job ---------------------------------------------------------------------
     def analyze(self, document_id):
-        if document_id is None or document_id in self.analyzing:
+        if document_id is None or self.workspace is None or document_id in self.analyzing:
             return
-        try:
-            job = self.workspace.analyze_references(document_id)
-        except Exception as error:  # too many jobs, or the document is gone
-            return self._message(f"Could not start the analysis: {error}", retry=True)
-        watcher = self.analyzing[document_id] = JobWatcher(self.workspace, job, self)
-        watcher.finished.connect(lambda result: self._analyzed(document_id, result))
-        if document_id == self.document_id:
-            self._message("Analyzing references…", busy=True)
+        self.loaded.pop(document_id, None)
+        self._run_job(document_id, lambda: self.workspace.analyze_references(document_id), "analyze")
 
-    def _analyzed(self, document_id, job):
-        self.analyzing.pop(document_id).deleteLater()
-        if job["status"] == "completed":
+    def _run_job(self, document_id, start, operation):
+        try:
+            job = start()
+        except Exception as error:  # too many jobs, or the document is gone
+            return self._message(f"Could not {operation} the references: {error}", retry=True)
+        watcher = self.analyzing[document_id] = JobWatcher(self.workspace, job, self)
+        watcher.finished.connect(lambda result, doc_id=document_id: self._job_done(doc_id, result, operation))
+        if document_id == self.document_id:
+            self._message("Loading references…" if operation == "load" else "Analyzing references…", busy=True)
+
+    def _job_done(self, document_id, job, operation):
+        if watcher := self.analyzing.pop(document_id, None):
+            watcher.deleteLater()
+        if document_id in self.pending_reload:
+            self.pending_reload.remove(document_id)
+            self._load(document_id)
+            return
+        if job["status"] != "completed":
             if document_id == self.document_id:
-                self.show_for(document_id)
-            else:
-                library = self.workspace.library
-                self._start(lambda: references.get(library, document_id), ("load", document_id))
-        elif document_id == self.document_id:
-            self._message(f"Could not analyze the references: {job.get('error') or job['status']}", retry=True)
+                self._message(f"Could not {operation} the references: {job.get('error') or job['status']}", retry=True)
+            return
+        payload = job["result"]
+        self.loaded[document_id] = payload
+        if document_id == self.document_id:
+            self.refs, self.payload_status = payload["references"], payload["status"]
+            self._fill()
+        self.references_loaded.emit(document_id, payload["references"])
+        self.refs_changed.emit(document_id, payload["references"])
 
     def close(self):
         for watcher in self.analyzing.values():
             watcher.stop()
-        for task in [task for task in self.reading if task in TASKS]:  # the others are already deleted
-            task.wait()  # a read may still be writing into the library folder
         return super().close()

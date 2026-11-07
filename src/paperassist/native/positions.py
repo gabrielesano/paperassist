@@ -46,12 +46,13 @@ class PositionKeeper(QObject):
 
     def __init__(self, pane, workspace):
         super().__init__(pane)
-        self.view, self.workspace, self.document_id = pane.view, workspace, pane.view.doc.source.document_id
+        self.pane, self.view, self.workspace, self.document_id = pane, pane.view, workspace, pane.view.doc.source.document_id
         self.active = self.dirty = False  # moves before the restore are the window settling, not the reader
         self.known = self.restored = None  # the stored (page, scale); the restored (scale, zoom, fit)
         self.timer = QTimer(self, singleShot=True, interval=SAVE_DELAY_MS, timeout=self.save)
         self.view.moved.connect(self._moved)
         pane.released.connect(self.close)
+        pane.split_changed.connect(self.refit)
         QTimer.singleShot(0, self.restore)  # the view needs its final size to place itself
 
     def restore(self):
@@ -68,11 +69,20 @@ class PositionKeeper(QObject):
             area = view.viewport()
             zoom, fit = to_zoom(saved["scale"], (area.width() - 2 * MARGIN) / widest,
                                 min((area.width() - 2 * MARGIN) / width, (area.height() - 2 * MARGIN) / height))
-            view.fit_width() if fit else view.zoom_by(zoom / view.zoom)
+            view.fit_width() if fit or self._beside() else view.zoom_by(zoom / view.zoom)
             view.goto(page)
             self.known = (saved["page"], saved["scale"])
             self.restored = (saved["scale"], view.zoom, view.fit)
         self.active = True
+
+    def _beside(self):
+        """A quick view in half the width fits it until the user zooms, whatever zoom was stored."""
+        return self.pane.quick and not self.pane.vertical
+
+    def refit(self):
+        """Side by side after a stacked layout: refit unless the zoom is one the user chose."""
+        if self._beside() and self.restored and self.restored[1:] == (self.view.zoom, self.view.fit) and not self.view.fit:
+            self.view.fit_width()
 
     def _moved(self):
         if self.active:

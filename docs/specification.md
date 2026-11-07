@@ -26,6 +26,10 @@ position is preserved. Keep one quick preview per tab. Resize it by dragging
 the separator between the panes; support keyboard arrows and Home/End without
 covering PDF text or activating annotation tools.
 
+A clean quick view of an already-open PDF may edit until another view has unsaved
+edits. Promoting it to an existing owner transfers the preview's page and always
+uses Fit width in the destination. The owner's unsaved edits are preserved.
+
 Each side column collapses with a "−" button in its header. One toolbar button
 hides both columns when both are visible and otherwise shows both, which also
 brings back a single collapsed column. The states persist per viewer, and the
@@ -43,6 +47,9 @@ offer a choice. Papers not yet available offer retrieval and prefilled search.
 
 Existing ink, highlights and comments can be selected, recolored and deleted using
 contextual controls in the top toolbar. Tool menus must not float over the PDF.
+Selected ink drawings can be dragged by their bounds and resized proportionally
+with corner handles. Each gesture is one undo step; Escape cancels it. Text
+highlights keep their text geometry.
 Selecting text before Comment creates a phrase-linked note with its quote and
 page-linked PDF-coordinate rectangles. Navigation focuses that phrase after zoom
 and reopen. Notes created without a selection remain page comments. The composer
@@ -168,6 +175,14 @@ keeps the reader and edits. Collect decisions before closing a multi-pane tab.
 A failed save keeps the unsaved state and requires an explicit retry. Quitting
 the application warns about pending work. Read-only previews may show the last saved version
 of an open modified PDF, clearly labeled; its editable tab retains unsaved edits.
+
+SIGTERM requests the same Save/Discard/Cancel flow as closing the window. Cancel
+keeps the application and edits open; repeated requests during a close prompt do
+not open duplicate prompts. Shutdown cancels or drains admitted jobs before
+releasing the library lock. It never saves PDF changes without an explicit choice.
+If a library selected in Preferences fails to open, report the error, restore the
+previous library choice and reopen it. Do not create an empty replacement when
+the previous library is unavailable too; report that failure instead.
 
 Use a single local backend per library with an effective process lock and per-work
 download serialization. Check the local library again after acquiring a lock.

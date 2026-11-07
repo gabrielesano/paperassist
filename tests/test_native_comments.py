@@ -204,6 +204,78 @@ class CommentsTests(unittest.TestCase):
         self.assertEqual(self.view.doc.pdf.data, self.data)
         self.assertFalse(self.view.doc.modified)
 
+    def test_panel_rebuilds_only_on_note_or_view_change_and_keeps_composer_cursor_and_focus(self):
+        from types import SimpleNamespace
+        from PySide6.QtGui import QTextCursor
+        from PySide6.QtWidgets import QMainWindow
+        from paperassist.native.comments import CommentsPanel
+
+        host = QMainWindow()
+        self.addCleanup(host.deleteLater)
+        pane = SimpleNamespace(view=self.view)
+        controller = SimpleNamespace(
+            compose=lambda: None,
+            save_draft=lambda p: None,
+            discard_draft=lambda p: None,
+            draft_changed=SimpleNamespace(emit=lambda: None),
+            window=SimpleNamespace(pane=lambda: pane),
+        )
+        panel = CommentsPanel(controller)
+        host.setCentralWidget(panel)
+        host.resize(400, 600)
+        host.show()
+        host.activateWindow()
+        self.app.processEvents()
+
+        self.model.append({"page": 2, "text": "Second comment"})
+        with patch.object(panel, "_build_rows", wraps=panel._build_rows) as build_rows:
+            panel.refresh(self.view)
+            self.assertEqual(build_rows.call_count, 1)
+            row_widgets = [row for _, row in panel._rows]
+
+            # Repeated refreshes and comment selection changes update styles in place without rebuilding.
+            panel.refresh(self.view)
+            panel.refresh(self.view)
+            self.view.select_comment(self.model.notes[0])
+            panel.refresh(self.view)
+            self.assertIn("#e6eeeb", row_widgets[0].styleSheet())
+            self.assertEqual(row_widgets[1].styleSheet(), "")
+            self.view.select_comment(self.model.notes[1])
+            panel.refresh(self.view)
+            self.assertEqual(row_widgets[0].styleSheet(), "")
+            self.assertIn("#e6eeeb", row_widgets[1].styleSheet())
+            self.view.select_comment(None)
+            panel.refresh(self.view)
+            self.assertEqual(row_widgets[0].styleSheet(), "")
+            self.assertEqual(row_widgets[1].styleSheet(), "")
+            self.assertEqual(build_rows.call_count, 1)
+
+            # Draft composer keeps text, mid-word cursor position, and focus across refreshes.
+            self.view.comment_draft = {"page": 1, "text": "Alpha Beta"}
+            panel.refresh(self.view)
+            panel.text.setFocus()
+            cursor = panel.text.textCursor()
+            cursor.setPosition(5, QTextCursor.MoveAnchor)
+            panel.text.setTextCursor(cursor)
+            self.app.processEvents()
+            self.assertIs(self.app.focusWidget(), panel.text)
+            for _ in range(3):
+                panel.refresh(self.view)
+            self.assertEqual(panel.text.toPlainText(), "Alpha Beta")
+            self.assertEqual(panel.text.textCursor().position(), 5)
+            self.assertIs(self.app.focusWidget(), panel.text)
+            self.assertEqual(build_rows.call_count, 1)
+
+            # Changing notes or switching the bound view rebuilds once each.
+            self.model.append({"page": 1, "text": "Third comment"})
+            panel.refresh(self.view)
+            self.assertEqual(build_rows.call_count, 2)
+            other = self.make_view()
+            panel.refresh(other)
+            self.assertEqual(build_rows.call_count, 3)
+            panel.refresh(other)
+            self.assertEqual(build_rows.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

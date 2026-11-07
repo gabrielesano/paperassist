@@ -7,16 +7,18 @@ It is started with multiprocessing's explicit "spawn" context and pipes. Unlike
 `sys.executable -m ...` this keeps working in a frozen app, where the executable is
 the app itself and `freeze_support()` routes the child to `serve`.
 
-Protocol, parent to child: ("open", id, path), ("close", id), ("want", id, jobs) and
-("quit",). A want list replaces the previous one for that document, most urgent first,
-so a fast scroll overtakes pages nobody looks at any more. Child to parent: a header
-tuple ("page", id, page, scale, width, height, seconds) followed by the raw RGB bytes.
+Protocol, parent to child: ("open", id, path), ("close", id), ("want", id, jobs),
+("locate", req_id, id, ref) and ("quit",). A want list replaces the previous one for that
+document, most urgent first, so a fast scroll overtakes pages nobody looks at any more.
+Child to parent: ("page", id, page, scale, width, height, seconds) followed by raw RGB
+bytes, or ("citations", req_id, result, error).
 """
 import multiprocessing
 import threading
 import time
 from pathlib import Path
 
+from .citations import CitationIndex
 from .engine import PageRenderer, trim_caches
 from .trim import trim_heap
 
@@ -68,7 +70,7 @@ def listen(inbox, queue):
 
 
 def serve(inbox, outbox):
-    queue, docs, trimmed = WantQueue(), {}, True
+    queue, docs, indices, trimmed = WantQueue(), {}, {}, True
     threading.Thread(target=listen, args=(inbox, queue), daemon=True).start()
     while True:
         with queue.cond:
@@ -89,7 +91,24 @@ def serve(inbox, outbox):
             elif kind == "close":
                 if document := docs.pop(args[0], None):
                     document.close()
+                if index := indices.pop(args[0], None):
+                    index.close()
+            elif kind == "locate":
+                req_id, doc_id, ref = args
+                try:
+                    if doc_id not in docs:
+                        raise ValueError("Document is closed")
+                    if doc_id not in indices:
+                        indices[doc_id] = CitationIndex(docs[doc_id].data)
+                    outbox.send(("citations", req_id, indices[doc_id].locate(ref), ""))
+                except Exception as error:
+                    outbox.send(("citations", req_id, None, str(error) or type(error).__name__))
+                trimmed = False
             elif kind == "quit":
+                for index in indices.values():
+                    index.close()
+                for document in docs.values():
+                    document.close()
                 return
         with queue.cond:
             job = queue.next_job(docs)

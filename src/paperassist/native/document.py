@@ -16,6 +16,13 @@ class SaveState(Enum):
     FAILED = "Save failed"
 
 
+def same(a, b):
+    """Equal annotation state; rewriting a PDF only keeps about seven digits of every number."""
+    if isinstance(a, (list, tuple)):
+        return isinstance(b, (list, tuple)) and len(a) == len(b) and all(map(same, a, b))
+    return abs(a - b) < 1e-3 if isinstance(a, float) else a == b
+
+
 class PdfDocument:
     def __init__(self, source):
         self.source = source
@@ -25,7 +32,7 @@ class PdfDocument:
         self.pending = {}  # page -> highlighted rects the render process has not drawn yet
         self._words, self._links = {}, {}
         self._undo, self._redo = [], []
-        self._token = self._saved_token = self._sequence = 0
+        self._saved = {}  # page -> annotation state at the last save, for every page edited since
         self._annotations = {}
 
     def __len__(self):
@@ -74,8 +81,11 @@ class PdfDocument:
                     key, band, texts = bands[-1]
                     across_y = min(band.y1, rect.y1) - max(band.y0, rect.y0)
                     across_x = min(band.x1, rect.x1) - max(band.x0, rect.x0)
-                    horizontal = across_y > 0.5 * min(band.height, rect.height) and (rect.x0 >= band.x1 - 2 or rect.x1 <= band.x0 + 2)
-                    vertical = across_x > 0.5 * min(band.width, rect.width) and (rect.y0 >= band.y1 - 2 or rect.y1 <= band.y0 + 2)
+                    # A gap wider than two line heights is a column gutter, not a word space.
+                    gap_x = max(rect.x0 - band.x1, band.x0 - rect.x1)
+                    gap_y = max(rect.y0 - band.y1, band.y0 - rect.y1)
+                    horizontal = across_y > 0.5 * min(band.height, rect.height) and -2 <= gap_x <= 2 * max(band.height, rect.height)
+                    vertical = across_x > 0.5 * min(band.width, rect.width) and -2 <= gap_y <= 2 * max(band.width, rect.width)
                     if horizontal or vertical:
                         bands[-1] = (key, band.union(rect), texts + [w[4]])
                         continue
@@ -90,12 +100,14 @@ class PdfDocument:
             self._annotations[page] = self.pdf.annotations(page)
         return self._annotations[page]
 
-    def annotation_at(self, page, x, y, tolerance=4):
+    def annotation_at(self, page, x, y, tolerance=4, highlights=True):
         def near(a, b):
             dx, dy = b[0] - a[0], b[1] - a[1]
             fraction = max(0, min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy or 1)))
             return (x - a[0] - fraction * dx) ** 2 + (y - a[1] - fraction * dy) ** 2
         for item in reversed(self.annotations(page)):
+            if not highlights and (item['subtype'] == 'highlight' or item['freehand']):
+                continue  # hidden highlights must not be clickable
             if item['subtype'] == 'highlight':
                 if any(rect.contains(x, y) for rect in item['quads'] or [item['rect']]):
                     return item
@@ -104,19 +116,30 @@ class PdfDocument:
                 return item
         return None
 
+    def _state(self, page):
+        return [(a['subtype'], a['quads'], a['strokes'], a['color'], a['opacity'], a['width'], a['freehand'])
+                for a in self.annotations(page)]
+
+    def _remember_saved(self, pages):
+        # A page that was not edited since the last save still shows its saved annotations.
+        for page in pages:
+            if page not in self._saved:
+                self._saved[page] = self._state(page)
+
     def _change(self, pages, apply):
-        before, token = len(self.pdf.data), self._token
+        self._remember_saved(pages)
+        before = len(self.pdf.data)
         apply()
-        self._sequence += 1
-        self._token = self._sequence
         # Only offsets are retained: every previous revision is already a prefix of these bytes.
-        self._undo.append((before, len(self.pdf.data), pages, token, self._token))
+        self._undo.append((before, len(self.pdf.data), pages))
         self._redo.clear()
         self._changed()
 
     def _changed(self):
+        # Like the web reader's serialized hash: changing something back is not a change.
         self._annotations.clear()
-        self.state = SaveState.SAVED if self._token == self._saved_token else SaveState.UNSAVED
+        clean = all(same(self._state(page), saved) for page, saved in self._saved.items())
+        self.state = SaveState.SAVED if clean else SaveState.UNSAVED
         self.error = ''
 
     def add_highlight(self, page, rects, color=None):
@@ -130,8 +153,8 @@ class PdfDocument:
                 self.pdf.add_highlight(page, rects, color=color)
         self._change(list(pages), apply)
 
-    def add_ink(self, page, strokes, color=(0, 0, 0), width=2):
-        self._change([page], lambda: self.pdf.add_ink(page, strokes, color, width))
+    def add_ink(self, page, strokes, color=(0, 0, 0), width=2, freehand=False):
+        self._change([page], lambda: self.pdf.add_ink(page, strokes, color, width, freehand))
 
     def update_annotation(self, page, index, color=None, width=None):
         item = next(item for item in self.annotations(page) if item['index'] == index)
@@ -142,23 +165,31 @@ class PdfDocument:
         self._change([page], lambda: self.pdf.update_annotation(page, index, color, width))
         return True
 
+    def transform_annotation(self, page, index, rect):
+        item = next(item for item in self.annotations(page) if item['index'] == index)
+        if (item['subtype'] != 'ink' or item['rect'].width <= 0 or item['rect'].height <= 0
+                or rect.width <= 0 or rect.height <= 0 or same(item['rect'], rect)):
+            return False
+        self._change([page], lambda: self.pdf.transform_annotation(page, index, rect))
+        return True
+
     def delete_annotation(self, page, index):
         self._change([page], lambda: self.pdf.delete_annotation(page, index))
 
     def undo(self):
-        return self._step(self._undo, self._redo, 0, 3)
+        return self._step(self._undo, self._redo, 0)
 
     def redo(self):
-        return self._step(self._redo, self._undo, 1, 4)
+        return self._step(self._redo, self._undo, 1)
 
-    def _step(self, source, target, revision, token):
+    def _step(self, source, target, revision):
         if not source:
             return []
         entry = source[-1]
+        self._remember_saved(entry[2])
         self.pdf.restore_annotations(self.pdf.data[:entry[revision]], entry[2])
         source.pop()
         target.append(entry)
-        self._token = entry[token]
         self.pending.clear()
         self._changed()
         return entry[2]
@@ -173,7 +204,7 @@ class PdfDocument:
         except Exception as error:  # the disk, permissions or the PDF engine: all are shown to the user
             self.state, self.error = SaveState.FAILED, str(error) or type(error).__name__
             return False
-        self._saved_token = self._token
+        self._saved.clear()
         self.state, self.error = SaveState.SAVED, ""
         return True
 
@@ -187,7 +218,7 @@ class PdfDocument:
         if not keep_history or self.pdf.data != previous:
             self._undo.clear()
             self._redo.clear()
-            self._token = self._saved_token = 0
+            self._saved.clear()
         self._words.clear()
         self._links.clear()
 

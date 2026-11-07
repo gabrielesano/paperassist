@@ -1,6 +1,5 @@
 """Citation matching and geometry. Rectangles use the engine's displayed points."""
 import math
-import multiprocessing
 import re
 import unicodedata
 from collections import defaultdict
@@ -151,84 +150,60 @@ def citation_matches(refs, text, destination=None):
 
 
 class CitationIndex:
-    """A compact index of named links; text geometry is read only for requested occurrences."""
-    def __init__(self, data, named=True):
-        self.data, self.links, self.destination_pages = data, [], {}
-        if not named:
+    """Per-document index of named links and cached word boxes for citation stepping."""
+    def __init__(self, data):
+        self._pdf = Pdf(data)
+        self._pages = {}
+        self._links_loaded = False
+        self.links, self.destination_pages = [], {}
+
+    def _load_links(self):
+        if self._links_loaded:
             return
-        pdf = Pdf(data)
-        try:
-            self.destination_pages = pdf.named_destinations()
-            for page_number in range(len(pdf.sizes)):
-                for link in pdf.links(page_number):
-                    if link.destination is not None:
-                        self.links.append({"page": page_number + 1, "dest": link.destination, "rects": [link.rect]})
-                        self.destination_pages[link.destination] = link.page
-        finally:
-            pdf.close()
+        self._links_loaded = True
+        self.destination_pages = self._pdf.named_destinations()
+        for page_number in range(len(self._pdf.sizes)):
+            for link in self._pdf.links(page_number):
+                if link.destination is not None:
+                    self.links.append({"page": page_number + 1, "dest": link.destination, "rects": [link.rect]})
+                    self.destination_pages[link.destination] = link.page
 
     def destination_at(self, page, rect):
+        self._load_links()
         return next((link["dest"] for link in self.links if link["page"] == page + 1 and
                      all(abs(a - b) < 1 for a, b in zip(link["rects"][0], rect))), None)
 
+    def _items(self, number):
+        if number not in self._pages:
+            self._pages[number] = [{"str": word[4], "rect": Rect(*word[:4])} for word in self._pdf.words(number - 1)]
+        return self._pages[number]
+
     def locate(self, ref):
-        pdf, pages = Pdf(self.data), {}
-        def items(number):
-            if number not in pages:
-                pages[number] = [{"str": word[4], "rect": Rect(*word[:4])} for word in pdf.words(number - 1)]
-            return pages[number]
-        try:
-            names = ref.get("destinations") or []
-            bibliography = min((self.destination_pages[name] + 1 for name in names if name in self.destination_pages), default=math.inf)
-            links = [{**link, "key": nearest_item(items(link["page"]), link["rects"][0])}
-                     for link in self.links if link["dest"] in names and link["page"] < bibliography]
-            if links:
-                return merge_links(sorted(links, key=lambda link: (link["page"], link["key"], link["rects"][0][1], link["rects"][0][0])), displayed=True)
-            markers = defaultdict(list)
-            for occurrence in ref.get("occurrences", []):
-                if 1 <= occurrence.get("page", 0) <= len(pdf.sizes):
-                    markers[occurrence["page"]].append(occurrence.get("marker", ""))
-            citations = []
-            for page, values in sorted(markers.items()):
-                text = items(page)
-                index = build_text_index(text)
-                found = [{"page": page, "rects": match_rects(text, index, match) if match else [],
-                          "key": match["start"] if match else math.inf} for match in find_markers(index, values)]
-                citations.extend(sorted(found, key=lambda item: item["key"]))
-            return citations
-        finally:
-            pdf.close()
+        names = ref.get("destinations") or []
+        if names:
+            self._load_links()
+        bibliography = min((self.destination_pages[name] + 1 for name in names if name in self.destination_pages), default=math.inf)
+        links = [{**link, "key": nearest_item(self._items(link["page"]), link["rects"][0])}
+                 for link in self.links if link["dest"] in names and link["page"] < bibliography]
+        if links:
+            return merge_links(sorted(links, key=lambda link: (link["page"], link["key"], link["rects"][0][1], link["rects"][0][0])), displayed=True)
+        markers = defaultdict(list)
+        for occurrence in ref.get("occurrences", []):
+            if 1 <= occurrence.get("page", 0) <= len(self._pdf.sizes):
+                markers[occurrence["page"]].append(occurrence.get("marker", ""))
+        citations = []
+        for page, values in sorted(markers.items()):
+            text = self._items(page)
+            index = build_text_index(text)
+            found = [{"page": page, "rects": match_rects(text, index, match) if match else [],
+                      "key": match["start"] if match else math.inf} for match in find_markers(index, values)]
+            citations.extend(sorted(found, key=lambda item: item["key"]))
+        return citations
 
-
-def _locate_child(data, ref, connection):
-    try:
-        connection.send((CitationIndex(data, named=bool(ref.get("destinations"))).locate(ref), None))
-    except Exception as error:
-        connection.send((None, str(error) or type(error).__name__))
-    finally:
-        connection.close()
-
-
-def locate_citations(data, ref):
-    """PDFium is not thread safe: a disposable process keeps text work off the UI thread."""
-    context = multiprocessing.get_context("spawn")
-    receiving, sending = context.Pipe(duplex=False)
-    process = context.Process(target=_locate_child, args=(data, ref, sending), daemon=True)
-    process.start()
-    sending.close()
-    try:
-        if not receiving.poll(60):
-            raise TimeoutError("Citation location took too long")
-        result, error = receiving.recv()
-        if error:
-            raise ValueError(error)
-        return result
-    finally:
-        receiving.close()
-        process.join(timeout=1)
-        if process.is_alive():
-            process.terminate()
-            process.join()
+    def close(self):
+        self._pages.clear()
+        if not self._pdf.is_closed:
+            self._pdf.close()
 
 
 def reading_position(view):

@@ -189,9 +189,16 @@ class Library:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM documents ORDER BY title COLLATE NOCASE, id").fetchall()
         needle = query.casefold().strip()
-        return [doc for row in rows if (doc := self._document(row)) and
-                (not needle or needle in " ".join(str(doc.get(k) or "") for k in
-                 ("title", "authors", "year", "doi", "filename", "metadata_status")).casefold())]
+        documents = []
+        for row in rows:
+            doc = self._document(row)
+            fields = [str(doc.get(key) or "") for key in
+                      ("title", "authors", "year", "doi", "filename", "metadata_status")]
+            if doc["metadata_status"] in ("needs_review", "incomplete"):
+                fields.append("Metadata needs review")
+            if not needle or needle in " ".join(fields).casefold():
+                documents.append(doc)
+        return documents
 
     def get_document(self, document_id: int) -> dict:
         with self._connect() as db:

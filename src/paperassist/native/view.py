@@ -2,10 +2,11 @@
 import time
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QEventLoop, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QKeyCombination, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea, QScrollBar
 
+from .document import SaveState
 from .engine import HIGHLIGHT, Rect
 from .layout import MARGIN, PageCache, PageLayout
 from .trim import trim_heap
@@ -28,6 +29,7 @@ class PdfView(QAbstractScrollArea):
     def __init__(self, doc, client):
         super().__init__()
         self.doc, self.client = doc, client
+        self.highlights_visible = True
         self.doc_id = client.open(doc.source.path)
         client.page_ready.connect(self._page_ready)
         self.zoom, self.fit = 1.0, True
@@ -37,7 +39,7 @@ class PdfView(QAbstractScrollArea):
         self.highlighting = False
         self.drawing = False
         self.highlight_color, self.ink_color = HIGHLIGHT, (0, 0, 0)
-        self.ink_width = 2
+        self.ink_width, self.highlight_width = 2, 12  # a highlight's width only matters for freehand ones
         self.selected_annotation = None
         self.notes_model = None
         self.selected_comment = None
@@ -46,7 +48,7 @@ class PdfView(QAbstractScrollArea):
         self._comment_bands, self._comment_paths, self._comment_focus = {}, {}, []
         self._comment_pen = QPen(QColor("#d42020"), 1.5, Qt.DashLine)
         self._comment_focus_pen = QPen(QColor("#aa700f"), 1)
-        self._stroke = []
+        self._stroke, self._stroke_freehand = [], False
         self.selection, self.selection_lines = None, []  # ((page, word), (page, word))
         self.hits, self.hit = [], -1
         self.history = []
@@ -56,6 +58,7 @@ class PdfView(QAbstractScrollArea):
         self._outline_timer = QTimer(self, singleShot=True, timeout=self.clear_outlines)
         self.first_paint = None
         self._press, self._anchor_word, self._drag = None, None, QPointF()
+        self._transform = None
         self._autoscroll = QTimer(self, interval=40, timeout=self._autoscroll_step)
         self.setFocusPolicy(Qt.StrongFocus)
         self.viewport().setMouseTracking(True)
@@ -72,6 +75,11 @@ class PdfView(QAbstractScrollArea):
         self._highlighting = value
         if value:
             self.drawing = False
+
+    @property
+    def read_only(self):
+        """No edit may start while another view holds unsaved edits or this one is being written."""
+        return self.locked or self.doc.state is SaveState.SAVING
 
     # ---- geometry -------------------------------------------------------------------
     def _scale(self):
@@ -173,13 +181,24 @@ class PdfView(QAbstractScrollArea):
 
     def refresh_render(self, pages=None):
         """After the file changed: render from the new bytes, keep showing the old pixels meanwhile."""
-        old, self.doc_id = self.doc_id, self.client.open(self.doc.pdf.data)
+        old, self.doc_id = self.doc_id, self.client.open(self.doc.pdf.render_data(self.highlights_visible))
         if pages is not None:
             for page, ((scale, _, pixmap), size) in list(self.cache.entries.items()):
                 if page not in pages:
                     self.cache.entries[page] = ((scale, self.doc_id, pixmap), size)
         self.client.close(old)
         self._want()
+
+    def set_highlights_visible(self, visible):
+        if visible != self.highlights_visible:
+            self.highlights_visible = visible
+            if not visible and self.selected_annotation:  # a hidden highlight must not stay selected
+                page, index = self.selected_annotation
+                item = next((a for a in self.doc.annotations(page) if a['index'] == index), None)
+                if item and (item['subtype'] == 'highlight' or item['freehand']):
+                    self.select_annotation(None)
+            self.refresh_render()  # the old pixels stay on screen until the new ones arrive
+            self.viewport().update()
 
     def reload(self):
         self.doc.reload()
@@ -225,9 +244,11 @@ class PdfView(QAbstractScrollArea):
                  Qt.Key_Home: QScrollBar.SliderToMinimum, Qt.Key_End: QScrollBar.SliderToMaximum}
         if event.matches(QKeySequence.Copy):
             self.copy()
+        elif event.matches(QKeySequence.SelectAll):
+            self.select_all()
         elif event.matches(QKeySequence.Undo):
             self.undo()
-        elif event.matches(QKeySequence.Redo):
+        elif event.matches(QKeySequence.Redo) or event.keyCombination() == QKeyCombination(Qt.ControlModifier, Qt.Key_Y):
             self.redo()
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.delete_annotation()
@@ -279,14 +300,21 @@ class PdfView(QAbstractScrollArea):
             if item:
                 painter.setPen(QColor('#286eb8'))
                 painter.setBrush(Qt.NoBrush)
-                painter.drawRect(self._band(page, item['rect']).adjusted(-2, -2, 2, 2))
+                rect = self._transform['rect'] if self._transform else item['rect']
+                box = self._band(page, rect).adjusted(-2, -2, 2, 2)
+                painter.drawRect(box)
+                if item['subtype'] == 'ink' and not self.read_only:
+                    painter.setBrush(Qt.white)
+                    for corner in (box.topLeft(), box.topRight(), box.bottomLeft(), box.bottomRight()):
+                        painter.drawRect(QRectF(corner.x() - 4, corner.y() - 4, 8, 8))
         if self._stroke:
-            from PySide6.QtGui import QPen
-            painter.setPen(QPen(QColor.fromRgbF(*self.ink_color), self.ink_width * self.zoom,
-                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            color, width = (self.highlight_color, self.highlight_width) if self._stroke_freehand else (self.ink_color, self.ink_width)
+            painter.setCompositionMode(QPainter.CompositionMode_Multiply if self._stroke_freehand else QPainter.CompositionMode_SourceOver)
+            painter.setPen(QPen(QColor.fromRgbF(*color), width * self.zoom, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             page = self._stroke_page
             for a, b in zip(self._stroke, self._stroke[1:]):
                 painter.drawLine(self._band(page, Rect(*a, *a)).topLeft(), self._band(page, Rect(*b, *b)).topLeft())
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
         for page, rect, _ in self.selection_lines:
             painter.fillRect(self._band(page, rect), SELECTION)
         for i, (page, rect) in enumerate(self.hits):
@@ -323,15 +351,34 @@ class PdfView(QAbstractScrollArea):
         if event.button() != Qt.LeftButton:
             return
         page, x, y = self._locate(event.position())
-        if self.drawing and not self.locked:
+        if self.selected_annotation and not (self.highlighting or self.drawing or self.commenting or self.read_only):
+            selected_page, index = self.selected_annotation
+            item = next((a for a in self.doc.annotations(selected_page) if a['index'] == index), None)
+            if item and item['subtype'] == 'ink':
+                box = self._band(selected_page, item['rect']).adjusted(-2, -2, 2, 2)
+                corners = (box.topLeft(), box.topRight(), box.bottomLeft(), box.bottomRight())
+                handle = next((i for i, corner in enumerate(corners)
+                               if abs(event.position().x() - corner.x()) <= 7 and abs(event.position().y() - corner.y()) <= 7), None)
+                if handle is not None or box.adjusted(-4, -4, 4, 4).contains(event.position()):
+                    self._transform = dict(page=selected_page, index=index, start=event.position(),
+                                           original=item['rect'], rect=item['rect'], handle=handle)
+                    return
+        # Without any text to select (a scan), the Highlight tool paints a freehand stroke instead.
+        freehand = self.highlighting and not self.doc.words(page)
+        if (self.drawing or freehand) and not self.read_only:
             self.select_annotation(None)
-            self._stroke_page, self._stroke = page, [(x, y)]
+            self.selection, self.selection_lines = None, []
+            self._stroke_page, self._stroke, self._stroke_freehand = page, [(x, y)], freehand
             return
-        picked = self.doc.annotation_at(page, x, y, tolerance=4 / self.zoom) if not self.highlighting else None
+        picked = self.doc.annotation_at(page, x, y, 4 / self.zoom, self.highlights_visible) if not self.highlighting else None
         comment = self.comment_at(page, x, y) if not self.highlighting and not self.drawing else None
         self._press = {"link": self.doc.link_at(page, x, y), "moved": False, "annotation": picked, "page": page, "comment": comment}
-        self.selection, self.selection_lines = None, []
         word = self.doc.word_at(page, x, y)
+        if event.modifiers() & Qt.ShiftModifier and self._anchor_word and word is not None:
+            self._press["moved"] = True  # Shift+click grows the selection like a drag would
+            self._extend_selection(event.position())
+            return
+        self.selection, self.selection_lines = None, []
         self._anchor_word = None if word is None else (page, word)
         self.viewport().update()
 
@@ -350,6 +397,22 @@ class PdfView(QAbstractScrollArea):
             self._extend_selection(self._drag)
 
     def mouseMoveEvent(self, event):
+        if self._transform:
+            drag = self._transform
+            dx = (event.position().x() - drag['start'].x()) / self.zoom
+            dy = (event.position().y() - drag['start'].y()) / self.zoom
+            rect = drag['original']
+            if drag['handle'] is None:
+                drag['rect'] = Rect(rect.x0 + dx, rect.y0 + dy, rect.x1 + dx, rect.y1 + dy)
+            else:
+                left, top = drag['handle'] in (0, 2), drag['handle'] in (0, 1)
+                ax, ay = (rect.x1 if left else rect.x0), (rect.y1 if top else rect.y0)
+                vx, vy = (-rect.width if left else rect.width), (-rect.height if top else rect.height)
+                scale = max(0.05, 1 + (dx * vx + dy * vy) / (vx * vx + vy * vy or 1))
+                drag['rect'] = Rect(ax + (rect.x0 - ax) * scale, ay + (rect.y0 - ay) * scale,
+                                    ax + (rect.x1 - ax) * scale, ay + (rect.y1 - ay) * scale)
+            self.viewport().update()
+            return
         page, x, y = self._locate(event.position())
         if self._stroke:
             if page == self._stroke_page:
@@ -367,11 +430,11 @@ class PdfView(QAbstractScrollArea):
         self._extend_selection(event.position())
 
     def mouseReleaseEvent(self, event):
+        if self._transform:
+            self._finish_transform()
+            return
         if self._stroke:
-            stroke, self._stroke = self._stroke, []
-            if not self.locked and len(stroke) > 1:
-                self.doc.add_ink(self._stroke_page, [stroke], self.ink_color, self.ink_width)
-                self._annotation_changed([self._stroke_page])
+            self._finish_stroke()
             return
         press, self._press = self._press, None
         self._autoscroll.stop()
@@ -383,12 +446,48 @@ class PdfView(QAbstractScrollArea):
             self.select_annotation((press['page'], press['annotation']['index']))
         elif not press["moved"] and press["link"]:
             self.follow(press["link"])
-        elif press["moved"] and self.highlighting and not self.locked:
+        elif press["moved"] and self.highlighting and not self.read_only:
             self.highlight_selection()
         elif not press['moved']:
             self.select_annotation(None)
             self.select_comment(None)
         if press['moved']:
+            self.selection_changed.emit()
+
+    def _finish_transform(self):
+        drag, self._transform = self._transform, None
+        if not self.read_only and self.doc.transform_annotation(drag['page'], drag['index'], drag['rect']):
+            self._annotation_changed([drag['page']])
+        self.viewport().update()
+
+    def _finish_stroke(self):
+        stroke, self._stroke = self._stroke, []
+        if self.read_only or len(stroke) < 2:
+            return
+        free = self._stroke_freehand
+        color, width = (self.highlight_color, self.highlight_width) if free else (self.ink_color, self.ink_width)
+        self.doc.add_ink(self._stroke_page, [stroke], color, width, free)
+        self._annotation_changed([self._stroke_page], reveal=free)
+
+    def event(self, event):
+        # A shortcut such as Save or Close must see the stroke under the mouse as part of the document.
+        if event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress) and event.key() == Qt.Key_Escape and self._transform:
+            self._transform = None
+            self.viewport().update()
+            return True
+        if event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress) and self._transform:
+            self._finish_transform()
+        if event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress) and self._stroke:
+            self._finish_stroke()
+        return super().event(event)
+
+    def select_all(self):
+        pages = [page for page in range(len(self.doc)) if self.doc.words(page)]
+        if pages:
+            self._anchor_word = (pages[0], 0)
+            self.selection = (self._anchor_word, (pages[-1], len(self.doc.words(pages[-1])) - 1))
+            self.selection_lines = self.doc.selection_lines(*self.selection)
+            self.viewport().update()
             self.selection_changed.emit()
 
     def selected_text(self):
@@ -402,11 +501,11 @@ class PdfView(QAbstractScrollArea):
         pages = {}
         for page, rect, _ in self.selection_lines:
             pages.setdefault(page, []).append(rect)
-        if self.locked or not pages:
+        if self.read_only or not pages:
             return
         self.doc.add_highlights(pages, self.highlight_color)
-        self.selection, self.selection_lines = None, []
-        self._annotation_changed(list(pages))
+        self.selection, self.selection_lines, self._anchor_word = None, [], None
+        self._annotation_changed(list(pages), reveal=True)
 
     def set_tool(self, tool):
         self.highlighting, self.drawing = tool == 'highlight', tool == 'ink'
@@ -421,9 +520,12 @@ class PdfView(QAbstractScrollArea):
         self.annotation_selection_changed.emit()
         self.viewport().update()
 
-    def _annotation_changed(self, pages):
+    def _annotation_changed(self, pages, reveal=False):
+        """A new highlight appears at once, even if highlights were hidden: then every page redraws."""
+        shown = reveal and not self.highlights_visible
+        self.highlights_visible = self.highlights_visible or reveal
         self.doc.pending.clear()
-        self.refresh_render(pages)
+        self.refresh_render(None if shown else pages)
         self.viewport().update()
         self.annotation_selection_changed.emit()
         self.edited.emit()
@@ -434,7 +536,7 @@ class PdfView(QAbstractScrollArea):
             if self.notes_model.update(self.selected_comment, note["color"]):
                 self.select_comment(note)
             return
-        if self.locked:
+        if self.read_only:
             return
         if self.selected_annotation:
             page, index = self.selected_annotation
@@ -446,12 +548,14 @@ class PdfView(QAbstractScrollArea):
             self.highlight_color = color
 
     def set_annotation_width(self, width):
-        if self.locked:
+        if self.read_only:
             return
         if self.selected_annotation:
             page, index = self.selected_annotation
             if self.doc.update_annotation(page, index, width=width):
                 self._annotation_changed([page])
+        elif self.highlighting:
+            self.highlight_width = width
         else:
             self.ink_width = width
 
@@ -460,7 +564,7 @@ class PdfView(QAbstractScrollArea):
             if self.notes_model.update(self.selected_comment):
                 self.select_comment(None)
             return
-        if self.selected_annotation and not self.locked:
+        if self.selected_annotation and not self.read_only:
             page, index = self.selected_annotation
             self.doc.delete_annotation(page, index)
             self.select_annotation(None)
@@ -470,12 +574,12 @@ class PdfView(QAbstractScrollArea):
         if self.notes_model and self.notes_model.deleted is not None:
             self.notes_model.undo_delete()
             return
-        if not self.locked and (pages := self.doc.undo()):
+        if not self.read_only and (pages := self.doc.undo()):
             self.select_annotation(None)
             self._annotation_changed(pages)
 
     def redo(self):
-        if not self.locked and (pages := self.doc.redo()):
+        if not self.read_only and (pages := self.doc.redo()):
             self.select_annotation(None)
             self._annotation_changed(pages)
 
@@ -539,8 +643,15 @@ class PdfView(QAbstractScrollArea):
         self.edited.emit()  # let "Saving…" paint before the possibly slow write blocks the loop
         QGuiApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
+    def finish_interaction(self):
+        if self._transform:
+            self._finish_transform()
+        if self._stroke:
+            self._finish_stroke()
+
     def save(self):
         """Explicit save of this view's document. False keeps the unsaved state for a retry."""
+        self.finish_interaction()
         saved = self.doc.save(on_saving=self._show_saving)
         if saved:
             self.refresh_render()

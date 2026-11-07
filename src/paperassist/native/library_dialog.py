@@ -15,20 +15,23 @@ REVIEW = QColor("#a15c00")  # amber: not an error, a paper whose metadata nobody
 NEEDS_REVIEW = ("needs_review", "incomplete")
 
 
-def pdf_files(paths):
+def pdf_files(paths, errors=None):
     """The PDFs under these files and folders, found as the importer finds them: no symlinks, any case of ".pdf"."""
     found = []
     for path in map(Path, paths):
-        if path.is_symlink():
-            continue
-        if path.is_dir():
-            try:
+        try:
+            if path.is_symlink():
+                continue
+            if path.is_dir():
                 with os.scandir(path) as entries:
-                    found += pdf_files(sorted(entry.path for entry in entries))
-            except OSError:
-                pass  # an unreadable folder is reported by the import itself
-        elif path.is_file() and path.suffix.lower() == ".pdf":
-            found.append(path)
+                    found += pdf_files(sorted(entry.path for entry in entries), errors)
+            elif path.is_file() and path.suffix.lower() == ".pdf":
+                found.append(path)
+            elif not path.exists():
+                raise FileNotFoundError(path)
+        except OSError as error:
+            if errors is not None:
+                errors.append({"path": str(path), "error": str(error)})
     return found
 
 
@@ -52,9 +55,9 @@ class LibraryDialog(QDialog):
         self.search.setAccessibleName("Search the library")
         self.table = QTreeWidget(rootIsDecorated=False, uniformRowHeights=True, headerLabels=["Title", "Authors", "Year", "Metadata"])
         self.table.setAccessibleName("Papers")
-        self.table.setColumnWidth(0, 460)
+        self.table.setColumnWidth(0, 420)
         self.table.setColumnWidth(1, 240)
-        self.table.setColumnWidth(2, 50)
+        self.table.setColumnWidth(2, 70)
         self.open_button = QPushButton("Open")
         self.quick_button = QPushButton("Quick view")
         self.edit_button = QPushButton("Edit details…")
@@ -70,8 +73,11 @@ class LibraryDialog(QDialog):
         self.start_button = QPushButton("Start import")
         self.discard_button = QPushButton("Cancel selection")
         self.message = QLabel(wordWrap=True)
+        import_row = QHBoxLayout()
+        import_row.addWidget(self.progress, 1)
+        import_row.addWidget(self.cancel_button)
         buttons = QHBoxLayout()
-        for widget in (self.import_button, self.folder_button, self.progress, self.cancel_button):
+        for widget in (self.import_button, self.folder_button):
             buttons.addWidget(widget)
         buttons.addWidget(self.message, 1)
         for widget in (self.edit_button, self.quick_button, self.open_button):
@@ -84,6 +90,7 @@ class LibraryDialog(QDialog):
         column.addWidget(self.table, 1)
         column.addWidget(self.hint, 1)
         column.addLayout(self.confirm_row)
+        column.addLayout(import_row)
         column.addLayout(buttons)
         self.pending = []
         self.typing = QTimer(self, singleShot=True, interval=150, timeout=self.refresh)
@@ -174,9 +181,8 @@ class LibraryDialog(QDialog):
             if getattr(source, "document_id", None) == document["id"]:
                 source.title = display_title(document)
         window.refresh()
-        # The current paper may cite the corrected one, so its panel is reread whichever paper was edited.
-        if window.details.document_id is not None:
-            window.details.reload(window.details.document_id)
+        # Open tabs may cite the corrected paper, so drop cached resolutions before reloading the active one.
+        window.details.library_changed()
 
     # ---- import ---------------------------------------------------------------------------
     def import_dialog(self):
@@ -191,21 +197,29 @@ class LibraryDialog(QDialog):
 
     def select_import(self, names):
         """Show what the selection would add and wait for the user to confirm; non-PDF files are ignored."""
-        files = pdf_files(names)
+        errors = []
+        files = pdf_files(names, errors)
         if not files:
             self._discard_selection()
-            self.message.setText("No PDF files in the selection.")
+            self.message.setText("Could not scan selection: " + "; ".join(f"{e['path']}: {e['error']}" for e in errors)
+                                 if errors else "No PDF files in the selection.")
             return
         total = 0
         for path in files:
             try:
                 total += path.stat().st_size
-            except OSError:
-                pass  # vanished since the scan; the import reports it
+            except OSError as error:
+                errors.append({"path": str(path), "error": str(error)})
         # Duplicates are not copied, so the total is an upper bound.
         self.estimate.setText(f"{len(files)} PDF{'s' if len(files) != 1 else ''}, {size_text(total)}. "
                               f"Importing copies them: up to {size_text(total)} of extra storage.")
+        if errors:
+            self.estimate.setText(f"Found {len(files)} PDF{'s' if len(files) != 1 else ''}. "
+                                  "Total storage estimate unavailable because some paths could not be read. "
+                                  "Importing copies readable PDFs.")
         self.pending = list(names)
+        self.message.setText("Could not scan some paths: " + "; ".join(f"{e['path']}: {e['error']}" for e in errors)
+                             if errors else "")
         self._show_estimate(True)
         self.start_button.setFocus()
 
@@ -253,11 +267,16 @@ class LibraryDialog(QDialog):
             text = "Import cancelled"
         else:
             result = job["result"]
-            text = (f"{result['imported']} added, {result['duplicates']} already in the library"
-                    + (f", {len(result['errors'])} failed: " + "; ".join(f"{e['path']}: {e['error']}" for e in result["errors"])
+            review = sum(doc["metadata_status"] in NEEDS_REVIEW for doc in result["documents"])
+            text = (f"{result['imported']} added, {result['duplicates']} already in the library, "
+                    f"{review} need metadata review, {len(result['errors'])} failed"
+                    + (": " + "; ".join(f"{e['path']}: {e['error']}" for e in result["errors"])
                        if result["errors"] else "") + (" (cancelled)" if result["cancelled"] else ""))
         self.refresh()
         self.message.setText(text)
+        window = self.parent()
+        if job.get("result", {}).get("imported") and hasattr(window, "details"):
+            window.details.library_changed()
 
     def _importing(self, running):
         self.import_button.setEnabled(not running)

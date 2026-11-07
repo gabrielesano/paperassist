@@ -154,6 +154,7 @@ class CommentsPanel(QWidget):
     def __init__(self, controller):
         super().__init__()
         self.controller, self.view = controller, None
+        self._built, self._rows = object(), []
         self.column = QVBoxLayout(self)
         self.column.setContentsMargins(6, 0, 6, 6)
         self.status = QLabel(wordWrap=True)
@@ -220,16 +221,23 @@ class CommentsPanel(QWidget):
                 self.text.setPlainText(draft.get("text", ""))
                 self.text.blockSignals(False)
             self.save_button.setEnabled(bool(draft.get("text", "").strip()))
+        notes = [note for note in (model.notes if model else []) if isinstance(note, dict)]
+        if (view, model) != self._built or notes != [note for note, _ in self._rows]:
+            self._build_rows(view, model, notes)
+        selected = view.selected_comment if view else None
+        for note, row in self._rows:
+            style = "#comment-row { background: #e6eeeb; }" if selected == note else ""
+            if row.styleSheet() != style:
+                row.setStyleSheet(style)
+        self.undo.setVisible(bool(model and model.deleted is not None))
+
+    def _build_rows(self, view, model, notes):
+        self._built, self._rows = (view, model), []
         host = QWidget()
         rows = QVBoxLayout(host)
         rows.setContentsMargins(0, 0, 0, 0)
-        for note in model.notes if model else []:
-            if not isinstance(note, dict):
-                continue
-            row = QWidget()
-            row.setObjectName("comment-row")
-            if view.selected_comment == note:
-                row.setStyleSheet("#comment-row { background: #e6eeeb; }")
+        for note in notes:
+            row = QWidget(objectName="comment-row")
             column = QVBoxLayout(row)
             jump = QPushButton(f"Page {note.get('page', '?')}")
             jump.clicked.connect(lambda _=False, note=note: view.select_comment(note, scroll=True))
@@ -245,14 +253,14 @@ class CommentsPanel(QWidget):
             remove.clicked.connect(lambda _=False, note=note: model.update(note))
             column.addWidget(remove)
             rows.addWidget(row)
-        if model and not model.notes:
+            self._rows.append((note, row))
+        if model and not notes:
             rows.addWidget(QLabel("No comments on this document yet.", wordWrap=True))
         rows.addStretch()
         old = self.scroll.takeWidget()
         self.scroll.setWidget(host)
         if old:
             old.deleteLater()
-        self.undo.setVisible(bool(model and model.deleted is not None))
 
 
 class CommentsController(QObject):

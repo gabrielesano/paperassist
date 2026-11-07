@@ -102,7 +102,8 @@ class PageField(QWidget):
         self.edit = QLineEdit(alignment=Qt.AlignRight, toolTip="Go to page (G)")
         self.edit.setAccessibleName("Page number")
         self.edit.setValidator(QIntValidator(1, 99999))
-        self.edit.setFixedWidth(52)
+        self.edit.setMinimumWidth(52)
+        self.edit.setMaximumWidth(68)
         self.total = QLabel()
         row = QHBoxLayout(self)
         row.setContentsMargins(6, 0, 6, 0)
@@ -113,6 +114,7 @@ class PageField(QWidget):
 
     def show_page(self, view):
         self.view = view
+        self.setVisible(view is not None)
         self.setEnabled(view is not None)
         if view is None:
             self.edit.clear()

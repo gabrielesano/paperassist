@@ -46,6 +46,10 @@ class AnnotationBar(QToolBar):
         self.remove = self.addAction('Delete', lambda: self.call('delete_annotation'))
         self.undo = self.addAction('Undo', lambda: self.call('undo'))
         self.redo = self.addAction('Redo', lambda: self.call('redo'))
+        self.visibility = self.addAction('Show highlights')
+        self.visibility.setCheckable(True)
+        self.visibility.setChecked(True)
+        self.visibility.toggled.connect(lambda visible: self.call('set_highlights_visible', visible))
         window.highlight_action.toggled.connect(self.highlight)
         window.tabs.currentChanged.connect(self.refresh)
         self.refresh()
@@ -71,6 +75,8 @@ class AnnotationBar(QToolBar):
     def color(self, index):
         color = QColor(self.colors.itemData(index))
         self.call('set_annotation_color', color.getRgbF()[:3])
+        if view := self.view():
+            view.setFocus()  # Delete and Ctrl+Z keep working after picking a color
 
     @Slot()
     def refresh(self, *_):
@@ -82,11 +88,14 @@ class AnnotationBar(QToolBar):
                 view.activated.connect(self.refresh)
                 view.annotation_selection_changed.connect(self.refresh)
         view = self.view()
+        self.visibility.setEnabled(view is not None)
+        with QSignalBlocker(self.visibility):
+            self.visibility.setChecked(view.highlights_visible if view else True)
         item = None
         if view and view.selected_annotation:
             page, index = view.selected_annotation
             item = next((a for a in view.doc.annotations(page) if a['index'] == index), None)
-        active = bool(view and not view.locked)
+        active = bool(view and not view.read_only)
         comment = view.selected_comment if view else None
         notes = bool(view and view.notes_model)
         self.select.setEnabled(active)
@@ -98,7 +107,8 @@ class AnnotationBar(QToolBar):
                                 (self.window.highlight_action, bool(view and view.highlighting))):
             with QSignalBlocker(action):
                 action.setChecked(checked)
-        self.label.setText('Selected comment' if comment is not None else ('Selected ' + item['subtype']) if item else '')
+        kind = item and ('highlight' if item['freehand'] else item['subtype'])
+        self.label.setText('Selected comment' if comment is not None else f'Selected {kind}' if item else '')
         self.colors.setEnabled(notes if comment is not None else active and bool(item or view.drawing or view.highlighting))
         if comment is not None:
             from .comments import note_color
@@ -108,10 +118,10 @@ class AnnotationBar(QToolBar):
         hex_color = QColor.fromRgbF(*color).name().lower()
         with QSignalBlocker(self.colors):
             self.colors.setCurrentIndex(next((i for i, (_, value) in enumerate(COLORS) if value.lower() == hex_color), -1))
-        self.width_action.setVisible(bool(view and (item['subtype'] == 'ink' if item else view.drawing)))
+        self.width_action.setVisible(bool(view and (item['subtype'] == 'ink' if item else view.drawing or view.highlighting)))
         self.thickness.setEnabled(active)
         with QSignalBlocker(self.thickness):
-            self.thickness.setValue(round(item['width'] if item else view.ink_width if view else 2))
+            self.thickness.setValue(round(item['width'] if item else (view.highlight_width if view.highlighting else view.ink_width) if view else 2))
         self.remove.setEnabled(notes if comment is not None else active and item is not None)
         self.undo.setEnabled(bool(view and ((view.notes_model and view.notes_model.deleted is not None) or active and view.doc._undo)))
         self.redo.setEnabled(active and bool(view.doc._redo))

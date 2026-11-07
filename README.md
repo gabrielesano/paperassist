@@ -46,6 +46,20 @@ starts and stops its own server. Modified PDFs and comment drafts offer **Save**
 **Discard**, or **Cancel**. Windows/macOS are unverified. See the
 [plan](docs/development/desktop-plan.md) and [verification](docs/development/desktop-verification.md).
 
+### Native reader
+
+From a source checkout, install and launch the Qt Widgets/PDFium reader:
+
+```bash
+.venv/bin/python -m pip install -e '.[native]'
+.venv/bin/python -m paperassist.native
+```
+
+Missing native dependencies produce an installation message. The browser command
+`paperassist serve --open` remains available without the native extra. Standalone
+builds report missing components as an installation problem and recommend
+reinstalling the complete application.
+
 ### Command-line options
 
 | Command | What it does |

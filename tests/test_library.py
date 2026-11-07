@@ -49,6 +49,17 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(original.read_bytes(), self.payload)
         self.assertNotEqual(original, self.library.get_path(doc['id']))
 
+    def test_search_matches_displayed_review_labels_and_preserves_raw_status_queries(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'unidentified.pdf')
+        for status in ('needs_review', 'incomplete', 'corrected', 'verified'):
+            self.library.update_metadata(doc['id'], {'title': 'Unidentified paper'}, status=status)
+            with self.subTest(status=status):
+                for query in ('Needs review', 'Metadata needs review', '  NEEDS REVIEW  '):
+                    expected = [doc['id']] if status in ('needs_review', 'incomplete') else []
+                    self.assertEqual([item['id'] for item in self.library.list_documents(query)], expected)
+                self.assertEqual([item['id'] for item in self.library.list_documents(status)], [doc['id']])
+                self.assertEqual([item['id'] for item in self.library.list_documents()], [doc['id']])
+
     def test_missing_snapshot_and_orphan_do_not_replace_current(self):
         doc = self.library.import_stream(io.BytesIO(self.payload), 'file.pdf')
         document_id = doc['id']

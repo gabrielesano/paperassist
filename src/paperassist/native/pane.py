@@ -1,10 +1,11 @@
 """A pane is one PDF view with its own find bar, and a title bar when it is a quick view or read-only."""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QToolBar, QVBoxLayout, QWidget
 
 from .document import PdfDocument
 from .view import PdfView
+from .toolbar import install_overflow
 
 
 class FindBar(QWidget):
@@ -52,27 +53,31 @@ class Pane(QFrame):
     promote_requested = Signal()
     close_requested = Signal()
     released = Signal()  # the document is about to close; last chance to store its reading position
+    split_changed = Signal()  # the tab stacked or unstacked its panes
 
     def __init__(self, source, client):
         super().__init__()
         self.setObjectName("pane")
         self.view = PdfView(PdfDocument(source), client)
         self.find_bar = FindBar(self.view)
-        self.quick = False
+        self.quick, self.vertical = False, True  # vertical: the other pane sits above or below
         self.title_label = QLabel()
-        self.title_label.setMinimumWidth(40)  # long titles are clipped, never widen the pane
-        self.layout_button = QToolButton(toolTip="Stack the papers or put them side by side")
-        self.layout_button.clicked.connect(self.quick_layout_toggled)
-        promote, close = QToolButton(text="Open in tab"), QToolButton(text="Close", toolTip="Close the quick view (Esc)")
-        promote.clicked.connect(self.promote_requested)
-        close.clicked.connect(self.close_requested)
-        self.bar = QWidget()
-        row = QHBoxLayout(self.bar)
-        row.setContentsMargins(6, 2, 6, 2)
-        row.addWidget(self.title_label, 1)
-        self.quick_buttons = [self.layout_button, promote, close]
-        for button in self.quick_buttons:
-            row.addWidget(button)
+        self.head, self.note = "", ""  # the label elides the head, never the note: a toolbar widget needs an exact width or it overlaps the buttons
+        self.bar = QToolBar("Quick view", objectName="pane-bar")
+        self.bar.setMovable(False)
+        self.title_action = self.bar.addWidget(self.title_label)
+        self.quick_buttons = []
+        for text, tooltip, signal in (
+            ("Side by side", "Stack the papers or put them side by side", self.quick_layout_toggled),
+            ("Open in tab", "Move the quick view to a tab", self.promote_requested),
+            ("Close", "Close the quick view (Esc)", self.close_requested),
+        ):
+            action = self.bar.addAction(text)
+            action.setToolTip(tooltip)
+            action.triggered.connect(signal)
+            self.quick_buttons.append(self.bar.widgetForAction(action))
+        self.layout_button = self.quick_buttons[0]
+        install_overflow(self.bar)
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
@@ -108,17 +113,37 @@ class Pane(QFrame):
     def set_quick(self, quick):
         self.quick = quick
         for button in self.quick_buttons:
-            button.setVisible(quick)
+            button.defaultAction().setVisible(quick)
         self.refresh_bar()
 
-    def set_vertical_split(self, vertical):
-        self.layout_button.setText("Side by side" if vertical else "Stacked")
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.title_action.setVisible(self.width() >= 500)
+        self._fit_title()
+        self.bar.setToolTip(self.title_label.toolTip())
+
+    def _fit_title(self):
+        label = self.title_label
+        tail = (" · " if self.head and self.note else "") + self.note
+        room = self.width() - sum(button.sizeHint().width() for button in self.quick_buttons) - 60 - label.fontMetrics().horizontalAdvance(tail)
+        text = label.fontMetrics().elidedText(self.head, Qt.ElideRight, max(room, 60)) + tail
+        label.setText(text)
+        label.setFixedWidth(label.fontMetrics().horizontalAdvance(text) + 12)
+
+    def set_vertical_split(self, vertical, narrow=False):
+        """narrow: the reader is too small for two columns, so the saved preference waits."""
+        action = self.layout_button.defaultAction()
+        action.setText("Side by side" if vertical else "Stacked")
+        action.setEnabled(not narrow)
+        action.setToolTip("The reader is too narrow for two columns" if narrow else "Stack the papers or put them side by side")
+        changed, self.vertical = vertical != self.vertical, vertical
+        if changed:
+            self.split_changed.emit()
 
     def refresh_bar(self):
-        notes = [("Quick view: " + self.title) if self.quick else ""]
-        if self.view.locked:
-            notes.append("Last saved version")
-        self.title_label.setText(" · ".join(n for n in notes if n))
+        self.head = ("Quick view: " + self.title) if self.quick else ""
+        self.note = "Last saved version" if self.view.locked else ""
+        self._fit_title()
         self.title_label.setToolTip(self.title + ("\nAnother view of this paper has unsaved changes; save it there." if self.view.locked else ""))
         self.bar.setVisible(self.quick or self.view.locked)
 

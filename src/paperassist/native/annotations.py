@@ -130,6 +130,8 @@ def apply(data, kind, page, **values):
                                NameObject('/Rect'): RectangleObject(bounds([p for stroke in strokes for p in stroke], width / 2)),
                                NameObject('/InkList'): ArrayObject(numbers(v for point in stroke for v in point) for stroke in strokes),
                                NameObject('/BS'): DictionaryObject({NameObject('/W'): FloatObject(width)})})
+            if values.get('freehand'):  # PDF.js's name for a thick multiplied stroke used as a highlighter
+                annotation[NameObject('/IT')] = NameObject('/InkHighlight')
         regenerate(writer, annotation)
         writer.add_annotation(page, annotation)
     else:
@@ -140,6 +142,19 @@ def apply(data, kind, page, **values):
             del references[values['index']]
             if popup in references:
                 references.remove(popup)
+        elif kind == 'transform':
+            old = list(map(float, annotation['/Rect']))
+            new = values['rect']
+            sx = (new[2] - new[0]) / (old[2] - old[0])
+            sy = (new[3] - new[1]) / (old[3] - old[1])
+            annotation[NameObject('/InkList')] = ArrayObject(
+                numbers(new[0] + (v - old[0]) * sx if i % 2 == 0 else new[1] + (v - old[1]) * sy
+                        for i, v in enumerate(stroke)) for stroke in annotation['/InkList'])
+            annotation[NameObject('/Rect')] = RectangleObject(new)
+            if '/BS' in annotation:
+                border = DictionaryObject(annotation['/BS'].get_object())
+                border[NameObject('/W')] = FloatObject(float(border.get('/W', 1)) * sx)
+                annotation[NameObject('/BS')] = border
         elif kind == 'update':
             color, width = values.get('color'), values.get('width')
             if color is not None:
@@ -172,6 +187,19 @@ def restore(data, previous, pages):
         array = reader.pages[page].get('/Annots', ArrayObject()).get_object()
         writer.pages[page][NameObject('/Annots')] = ArrayObject(
             item.clone(writer, force_duplicate=True) for item in array)
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def without_highlights(data):
+    """A render-only revision; the editable document and source file stay untouched."""
+    writer = incremental_writer(data)
+    for page in writer.pages:
+        if '/Annots' in page:
+            page[NameObject('/Annots')] = ArrayObject(
+                ref for ref in page['/Annots'] if ref.get_object().get('/Subtype') != '/Highlight'
+                and ref.get_object().get('/IT') != '/InkHighlight')
     output = io.BytesIO()
     writer.write(output)
     return output.getvalue()

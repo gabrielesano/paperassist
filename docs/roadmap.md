@@ -7,7 +7,7 @@ records are in [development/](development/).
 
 1. Library and import: deterministic metadata, managed originals, SQLite catalog,
    hash deduplication, manual correction and tested persistence.
-2. Native reader (Qt Widgets + MuPDF): tabs, quick view, selection, highlights and
+2. Native reader (Qt Widgets + PDFium, with pypdf for annotation writing): tabs, quick view, selection, highlights and
    explicit save; then drawing, comments and editing existing annotations,
    compatible with PDFs annotated by the web reader.
 3. References and background work without HTTP: citation analysis, shared local

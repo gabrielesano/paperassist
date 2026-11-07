@@ -14,7 +14,7 @@ from test_native_support import make_pdf, needs_qt, pdf_available
 if pdf_available:
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QMessageBox, QTreeWidget
 
     from paperassist import references, settings
     from paperassist.native import app as native_app
@@ -386,6 +386,51 @@ class ColumnTests(LibraryWindowCase):
 
 
 class ReferencesTests(LibraryWindowCase):
+    def test_link_picker_preserves_candidate_rank_after_filtering_and_requires_explicit_link(self):
+        library = self.workspace.library
+        source_id = self.docs[2]["id"]
+        lower = library.update_metadata(self.docs[0]["id"], {
+            "title": "Alpha candidate", "authors": "Peres G., Guarrasi M., Reale F.", "year": 2014})
+        higher = library.update_metadata(self.docs[1]["id"], {
+            "title": "Zulu candidate", "authors": "Guarrasi M., Reale F.", "year": 2014})
+        other_ids = []
+        for pages, title in ((6, "Aardvark unrelated"), (7, "Beta unrelated")):
+            path = make_pdf(self.dir / f"other{pages}.pdf", pages=pages)
+            document = library.import_stream(io.BytesIO(path.read_bytes()), path.name)
+            library.update_metadata(document["id"], {"title": title})
+            other_ids.append(document["id"])
+        ref = {"id": "1", "raw": "Guarrasi, M., Reale, F. 2014, A&A, 564, A48",
+               "authors": "Guarrasi", "year": "2014"}
+        references._save(library, source_id, {"references": [ref], "status": "partial",
+                         "extraction_version": references.EXTRACTION_VERSION,
+                         "destination_version": references.DESTINATION_VERSION})
+        ref = references.get(library, source_id)["references"][0]
+        ranked_ids = [higher["id"], lower["id"]]
+        self.assertEqual([candidate["id"] for candidate in ref["local_candidates"]], ranked_ids)
+        window = self.make_window()
+        window.acquisition.choose_link(source_id, ref)
+        dialog = window.acquisition._link_dialog
+        table, search = dialog.findChild(QTreeWidget), dialog.findChild(QLineEdit)
+        button = dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok)
+
+        def listed():
+            return [table.topLevelItem(i).data(0, Qt.UserRole) for i in range(table.topLevelItemCount())]
+
+        self.assertEqual(listed(), ranked_ids + other_ids)
+        self.assertFalse(button.isEnabled())
+        QTest.keyClicks(search, "candidate")
+        self.pump(lambda: table.topLevelItemCount() == 2)
+        self.assertEqual(listed(), ranked_ids)
+        self.assertTrue(all(table.topLevelItem(i).text(3) == "Possible match — verify" for i in range(2)))
+        self.assertFalse(references.get(library, source_id)["references"][0].get("manual_link"))
+        table.setCurrentItem(table.topLevelItem(0))
+        self.assertTrue(button.isEnabled())
+        button.click()
+        self.pump(lambda: not window.acquisition.jobs)
+        linked = references.get(library, source_id)["references"][0]
+        self.assertTrue(linked["manual_link"])
+        self.assertEqual(linked["manual_target_id"], higher["id"])
+
     def test_the_filter_ignores_case_accents_and_word_order(self):
         matches = reference_matcher("antolin 2012")
         self.assertTrue(matches({"authors": "Antolín, J.", "year": "2012", "raw": "..."}))
@@ -459,7 +504,7 @@ class ReferenceCardTests(LibraryWindowCase):
         self.window.acquisition.main_opened = lambda document_id: None
         self.panel = self.window.details
         self.open_document(self.window, self.docs[0])
-        self.pump(lambda: self.panel.list.count() == 2 and not self.panel.reading)
+        self.pump(lambda: self.panel.list.count() == 2 and not self.panel.analyzing)
 
     def widgets(self):
         items = [self.panel.list.item(i) for i in range(self.panel.list.count())]
@@ -482,7 +527,7 @@ class ReferenceCardTests(LibraryWindowCase):
         refs = references.get(self.workspace.library, self.docs[0]["id"])["references"]
         references.link(self.workspace.library, self.docs[0]["id"], refs[0]["id"], self.docs[1]["id"])
         self.panel.reload(self.docs[0]["id"])
-        self.pump(lambda: self.panel.list.count() == 2 and not self.panel.reading)
+        self.pump(lambda: self.panel.list.count() == 2 and not self.panel.analyzing)
         self.window.activateWindow()
         list_, tab = self.panel.list, self.window.tab()
         list_.setFocus()
@@ -496,7 +541,8 @@ class ReferenceCardTests(LibraryWindowCase):
         card.title.linkActivated.emit("open")  # what Enter does on the focused title link
         self.assertEqual(tab.quick.key, f"library:{self.docs[1]['id']}")
         found = [{"page": 1, "rects": [Rect(20, 70, 60, 80)]}, {"page": 2, "rects": [Rect(20, 70, 60, 80)]}]
-        with patch("paperassist.native.references_panel.locate_citations", return_value=found):
+        with patch.object(self.panel.view.client, "locate", create=True,
+                          side_effect=lambda doc, ref, callback: callback(found, "")):
             QTest.keyClick(card.count, Qt.Key_Space)
             self.pump(lambda: card.count.text() == "1 of 2")
         self.assertIs(self.widgets()[0], card)  # stepping updates text in place, so focus stays on the button

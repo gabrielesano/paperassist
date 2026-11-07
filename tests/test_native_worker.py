@@ -125,6 +125,24 @@ class WorkerProcessTests(unittest.TestCase):
         process.join(10)
         self.assertFalse(process.is_alive())
 
+    def test_locate_finds_citations_and_handles_unknown_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cited = make_pdf(Path(directory) / "cited.pdf", pages=2)
+            process, send, receive = self.start()
+            send.send(("open", 1, str(cited)))
+            ref = {"id": "1", "number": 1, "occurrences": [{"page": 1, "marker": "[1]"}]}
+            send.send(("locate", 10, 1, ref))
+            send.send(("locate", 11, 99, ref))
+            self.assertTrue(receive.poll(20))
+            kind1, req1, res1, err1 = receive.recv()
+            self.assertTrue(receive.poll(20))
+            kind2, req2, res2, err2 = receive.recv()
+            self.assertEqual((kind1, req1, err1), ("citations", 10, ""))
+            self.assertGreaterEqual(len(res1), 1)
+            self.assertEqual((kind2, req2, res2), ("citations", 11, None))
+            self.assertIn("closed", err2)
+            self.assertTrue(process.is_alive())
+
 
 @needs_qt
 class SelfTestTests(unittest.TestCase):

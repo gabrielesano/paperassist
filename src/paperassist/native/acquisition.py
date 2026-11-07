@@ -8,7 +8,7 @@ from urllib.parse import quote, urlencode, urlsplit
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QScrollArea, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -370,6 +370,7 @@ class AcquisitionController(QObject):
             column = QVBoxLayout(dialog)
             column.addWidget(QLabel(result.get("summary", "Choose the correct PDF."), wordWrap=True))
             table = QTreeWidget(headerLabels=["File", "Size", "Modified"], rootIsDecorated=False)
+            table.setAccessibleName("Downloaded PDFs")
             for candidate in result["candidates"]:
                 item = QTreeWidgetItem([candidate["name"], f"{candidate.get('size', 0) / 1024:.0f} KB", str(candidate.get("modified", ""))[:10]])
                 item.setData(0, Qt.UserRole, candidate["name"])
@@ -405,16 +406,19 @@ class AcquisitionController(QObject):
         column = QVBoxLayout(dialog)
         column.addWidget(QLabel(ref.get("raw") or ref.get("title") or "Choose the cited paper.", wordWrap=True))
         search = QLineEdit(placeholderText="Search title, author, year or DOI")
+        search.setAccessibleName("Search local PDFs")
         table = QTreeWidget(headerLabels=["Title", "Authors", "Year", "Match"], rootIsDecorated=False)
+        table.setAccessibleName("Local PDFs")
         table.setColumnWidth(0, 370)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Link selected PDF")
         buttons.button(QDialogButtonBox.Ok).setEnabled(False)
-        suggestions = {candidate["id"] for candidate in ref.get("local_candidates") or []}
+        candidates = ref.get("local_candidates") or []
+        suggestions = {candidate["id"]: rank for rank, candidate in enumerate(candidates)}
         def fill():
             table.clear()
             documents = self.workspace.library.list_documents(search.text())
-            for document in sorted(documents, key=lambda doc: doc["id"] not in suggestions):
+            for document in sorted(documents, key=lambda doc: suggestions.get(doc["id"], len(candidates))):
                 if document["id"] == document_id:
                     continue
                 item = QTreeWidgetItem([document.get("title") or document["filename"], document.get("authors") or "",
@@ -445,7 +449,6 @@ class AcquisitionController(QObject):
 
     def show_reference(self, document_id, ref):
         self.expanded.add((document_id, str(ref["id"])))
-        self.changed.emit(document_id)
 
     def card_actions(self, document_id, ref, parent=None):
         widget = CardActions(parent)
@@ -462,8 +465,6 @@ class AcquisitionController(QObject):
             label = QLabel(details, wordWrap=True)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             column.addWidget(label)
-        grid = QGridLayout()
-        column.addLayout(grid)
         actions = []
         local = ref.get("local_document_id")
         if local and not ref.get("local_invalid"):
@@ -476,15 +477,16 @@ class AcquisitionController(QObject):
             actions.append(("Reset PDF link", lambda: self.link(document_id, ref, None)))
         if not local:
             actions.append(("Check folder", lambda: self.check_folder(document_id, ref)))
-        for index, (text, callback) in enumerate(actions):
+        for text, callback in actions:
             button = QPushButton(text)
             button.clicked.connect(callback)
             button.setEnabled(not (ref.get("legacy") and text == "Find open access"))
-            grid.addWidget(button, index // 2, index % 2)
+            column.addWidget(button)
         if not local:
             extra = QWidget()
-            more = QGridLayout(extra)
+            more = QVBoxLayout(extra)
             more.setContentsMargins(0, 0, 0, 0)
+            more.setSpacing(4)
             links = search_links(ref)
             doi = ref.get("doi")
             if doi:
@@ -497,15 +499,15 @@ class AcquisitionController(QObject):
             for label, target in list(links):
                 if label in ("Publisher / DOI", "Open PDF in browser") and (url := proxy_url(proxy, target)):
                     links.append((label + " via library", url))
-            for index, (text, url) in enumerate(links):
+            for text, url in links:
                 button = QPushButton(text)
                 button.setToolTip(url)
                 button.clicked.connect(lambda checked=False, target=url: QDesktopServices.openUrl(QUrl(target)))
-                more.addWidget(button, index // 2, index % 2)
+                more.addWidget(button)
             if doi:
                 button = QPushButton("Resolve DOI metadata")
                 button.clicked.connect(lambda: self.resolve(document_id, ref))
-                more.addWidget(button, (len(links) + 1) // 2, 0, 1, 2)
+                more.addWidget(button)
             toggle = QPushButton("Browser searches and links", checkable=True)
             key = (document_id, str(ref["id"]))
             toggle.setChecked(key in self.expanded)

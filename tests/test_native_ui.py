@@ -1,5 +1,6 @@
 """Native reader widgets under Qt's offscreen platform: real events, the real render process."""
 import collections
+import hashlib
 import sys
 import tempfile
 import time
@@ -7,7 +8,7 @@ import unittest
 
 from pypdf import PdfReader
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from test_native_support import make_pdf, needs_qt, pdf_available
 
@@ -20,6 +21,7 @@ if pdf_available:
     from paperassist import settings
     from paperassist.native.document import SaveState
     from paperassist.native.engine import Link, Rect
+    from paperassist.native.positions import current_page
     from paperassist.native.renderer import RenderClient
     from paperassist.native.rules import CANCEL, DISCARD, SAVE
     from paperassist.native.source import FileSource
@@ -105,6 +107,161 @@ class WindowTests(unittest.TestCase):
     def annotations(self, path):
         return sum(1 for page in PdfReader(path).pages for a in page.get('/Annots', [])
                    if a.get_object()['/Subtype'] != '/Link')
+
+    def test_open_selects_the_existing_quick_view_owner_without_duplicate(self):
+        tab = self.open("main-owner")
+        source = FileSource(self.pdf("quick-owner"))
+        quick = self.window.open_quick(source)
+        self.pump(lambda: quick.view.has_page(0))
+        self.open("other-owner")
+        self.assertIs(self.window.open_source(source), tab)
+        self.assertIs(self.window.pane(), quick)
+        self.assertEqual(len([p for p in self.window.all_panes() if p.key == source.key]), 1)
+
+    def test_full_accessible_tab_title_and_last_close_welcome(self):
+        tab = self.open("a-long-title-that-must-not-be-truncated-for-accessibility")
+        bar = self.window.tabs.tabBar()
+        self.assertIn(tab.main.title, bar.accessibleTabName(0))
+        self.assertLess(len(self.window.tabs.tabText(0)), len(tab.main.title))
+        self.assertIs(self.window.reader_stack.currentWidget(), self.window.tabs)
+        self.assertTrue(self.window.close_tab(0))
+        self.assertIs(self.window.reader_stack.currentWidget(), self.window.welcome)
+        self.assertTrue(self.window.welcome.isVisible())
+
+    def test_tab_switch_preserves_view_search_edits_and_quick_view(self):
+        first = self.open("retained-main")
+        quick = self.window.open_quick(FileSource(self.pdf("retained-quick")))
+        self.pump(lambda: quick.view.has_page(0))
+        view = first.main.view
+        self.highlight(first.main)
+        view.zoom_by(1.25)
+        first.main.find_bar.field.setText("nanoflares")
+        first.main.find_bar._run(1)
+        view.goto(2)
+        self.pump()
+        position, zoom = view.verticalScrollBar().value(), view.zoom
+        data = view.doc.pdf.data
+        self.open("retained-other")
+        self.window.tabs.setCurrentWidget(first)
+        self.pump(lambda: view.has_page(2))
+        self.assertEqual(view.verticalScrollBar().value(), position)
+        self.assertEqual(view.zoom, zoom)
+        self.assertEqual(first.main.find_bar.field.text(), "nanoflares")
+        self.assertTrue(view.hits)
+        self.assertEqual(view.doc.pdf.data, data)
+        self.assertTrue(first.main.modified)
+        self.assertIs(first.quick, quick)
+
+    def test_new_window_does_not_restore_tabs(self):
+        self.open("session-local")
+        other = MainWindow(self.client)
+        self.assertEqual(other.tabs.count(), 0)
+        other.close()
+        other.deleteLater()
+
+    def test_empty_window_hides_reference_actions_and_page_field(self):
+        self.pump()
+        self.assertFalse(self.window.details.acquire.isVisible())
+        self.assertFalse(self.window.details.repair.isVisible())
+        self.assertFalse(self.window.shortcuts.page_field.isVisible())
+        self.open("empty-controls")
+        self.assertTrue(self.window.shortcuts.page_field.isVisible())
+        self.assertFalse(self.window.details.acquire.isVisible())
+        self.window.close_tab(0)
+        self.assertFalse(self.window.shortcuts.page_field.isVisible())
+
+    def test_failed_open_keeps_existing_tabs_and_quick_view_usable(self):
+        tab = self.open("valid-before-error")
+        quick = self.window.open_quick(FileSource(self.pdf("valid-quick")))
+        bad = self.dir / "invalid.pdf"
+        bad.write_bytes(b"not a PDF")
+        self.assertIsNone(self.window.open_source(FileSource(bad)))
+        self.assertIsNone(self.window.open_quick(FileSource(bad)))
+        self.assertEqual(self.window.tabs.count(), 1)
+        self.assertIs(tab.quick, quick)
+        self.assertIn("Could not open", self.window.statusBar().currentMessage())
+        self.assertEqual(self.open("valid-after-error"), self.window.tab())
+        self.assertEqual(self.window.statusBar().currentMessage(), "")
+
+    def test_keyboard_focus_activates_main_and_quick_panes(self):
+        tab = self.open("focus-main")
+        quick = self.window.open_quick(FileSource(self.pdf("focus-quick")))
+        self.window.activateWindow()
+        self.pump()
+        for pane in (tab.main, quick, tab.main):
+            pane.view.setFocus(Qt.TabFocusReason)
+            self.pump()
+            self.assertIs(self.window.pane(), pane)
+            pane.find_bar.open()
+            self.pump()
+            self.assertIs(self.window.pane(), pane)
+            with patch.object(pane, "save", return_value=True) as save:
+                with patch.object(type(pane), "modified", new_callable=PropertyMock, return_value=True):
+                    self.window.save()
+                save.assert_called_once()
+
+    def test_find_ignores_case_and_accents_in_a_synthetic_pdf(self):
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+        writer = PdfWriter()
+        page = writer.add_blank_page(400, 500)
+        font = writer._add_object(DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"), NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+        }))
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})})
+        content = DecodedStreamObject()
+        content.set_data("BT /F1 12 Tf 40 400 Td (Café CAFÉ cafe) Tj ET".encode("cp1252"))
+        page[NameObject("/Contents")] = writer._add_object(content)
+        path = self.dir / "accented.pdf"
+        writer.write(path)
+        pane = self.window.open_source(FileSource(path)).main
+        for query in ("cafe", "CAFÉ", "CaFé"):
+            self.assertEqual(pane.view.find(query), 3, query)
+        pane.find_bar.open()
+        pane.find_bar.field.setText("cafe")
+        QTest.keyClick(pane.find_bar.field, Qt.Key_Return)
+        self.assertEqual(pane.view.hit, 0)
+        QTest.keyClick(pane.find_bar.field, Qt.Key_Return)
+        self.assertEqual(pane.view.hit, 1)
+        QTest.keyClick(pane.find_bar.field, Qt.Key_Return, Qt.ShiftModifier)
+        self.assertEqual(pane.view.hit, 0)
+
+    def test_highlight_visibility_changes_rendering_without_editing_or_saving(self):
+        pane = self.open("visibility").main
+        self.highlight(pane)
+        self.pump(lambda: pane.view.has_page(0))
+        original = pane.view.doc.source.path.read_bytes()
+        revision, state = pane.view.doc.pdf.data, pane.state
+        before = pane.view.cache.get(0)[2].toImage()
+        pane.view.set_highlights_visible(False)
+        self.pump(lambda: pane.view.has_page(0))
+        after = pane.view.cache.get(0)[2].toImage()
+        self.assertNotEqual(before, after)
+        self.assertEqual(pane.view.doc.pdf.data, revision)
+        self.assertEqual(pane.state, state)
+        self.assertEqual(pane.view.doc.source.path.read_bytes(), original)
+        pane.view.set_highlights_visible(True)
+        self.pump(lambda: pane.view.has_page(0))
+        self.assertEqual(pane.view.cache.get(0)[2].toImage(), before)
+
+    def test_split_sizes_are_remembered_separately_per_orientation(self):
+        self.window.set_columns(outline=False, details=False)
+        tab = self.open("split-main")
+        self.window.open_quick(FileSource(self.pdf("split-quick")))
+        self.pump()
+        tab.setSizes([300, 250])
+        tab._remember_share()
+        vertical = tab.quick_share
+        tab.set_side_by_side(True)
+        tab.setSizes([600, 300])
+        tab._remember_share()
+        horizontal = tab.quick_share
+        tab.set_side_by_side(False)
+        self.assertEqual(tab.quick_share, vertical)
+        tab.set_side_by_side(True)
+        self.assertEqual(tab.quick_share, horizontal)
 
     # ---- reading ------------------------------------------------------------------------
     def test_a_paper_opens_fit_to_width_and_renders_in_the_other_process(self):
@@ -306,7 +463,8 @@ class WindowTests(unittest.TestCase):
         self.pump()
         self.assertEqual(tab.orientation(), Qt.Horizontal)
         self.assertEqual(settings.preferences()["quick_view_layout"], "side")
-        self.window.resize(600, 800)
+        self.window.set_columns(outline=True)
+        self.window.resize(800, 800)
         self.pump()
         self.assertEqual(tab.orientation(), Qt.Vertical)
         self.window.resize(1200, 800)
@@ -322,7 +480,10 @@ class WindowTests(unittest.TestCase):
         QTest.keyClick(handle, Qt.Key_Down)
         self.assertEqual(tab.sizes()[0], before + KEY_STEP)
         QTest.keyClick(handle, Qt.Key_Home)
-        self.assertEqual(tab.sizes()[0], tab.main.minimumHeight())
+        self.assertGreaterEqual(tab.quick_share, 0.2)
+        self.assertLess(tab.quick_share, 0.3)
+        QTest.keyClick(handle, Qt.Key_End)
+        self.assertLessEqual(tab.quick_share, 0.75)
         self.assertGreater(tab.quick_share, 0.5)
 
     def test_replacing_a_modified_quick_view_asks_and_cancel_keeps_it(self):
@@ -388,6 +549,194 @@ class WindowTests(unittest.TestCase):
         self.window.promote_quick()
         self.assertEqual((self.window.tabs.count(), self.window.tab()), (2, tab))
         self.assertIsNone(other.quick)
+
+    def test_the_main_paper_keeps_its_place_and_zoom_while_the_quick_view_comes_and_goes(self):
+        self.window.set_columns(outline=False, details=False)
+        tab = self.open("place-main")
+        view = tab.main.view
+        view.zoom_by(1.25)
+        view.goto(2)
+        self.pump()
+        place = (view.verticalScrollBar().value(), view.zoom, current_page(view))
+
+        def main_place():
+            return (view.verticalScrollBar().value(), view.zoom, current_page(view))
+        first = self.window.open_quick(FileSource(self.pdf("place-quick-1")))
+        self.pump(lambda: first.view.has_page(0))
+        first.view.zoom_by(1.5)  # panes zoom and scroll on their own
+        first.view.goto(1)
+        self.assertEqual(main_place(), place)
+        self.assertNotEqual(first.view.zoom, view.zoom)
+        second = self.window.open_quick(FileSource(self.pdf("place-quick-2")))
+        self.assertIsNot(second, first)
+        self.assertEqual(main_place(), place)
+        self.window.toggle_quick_layout()  # side by side narrows the main paper but keeps its place
+        self.pump()
+        self.assertEqual((view.zoom, current_page(view)), place[1:])
+        self.window.close_quick()
+        self.assertEqual((view.zoom, current_page(view)), place[1:])
+
+    def test_dragging_the_separator_resizes_within_the_limits(self):
+        self.window.set_columns(outline=False, details=False)
+        tab = self.open("drag-main")
+        self.window.open_quick(FileSource(self.pdf("drag-quick")))
+        self.pump()
+        handle = tab.handle(1)
+        centre = handle.rect().center()
+        QTest.mousePress(handle, Qt.LeftButton, Qt.NoModifier, centre)
+        QTest.mouseMove(handle, QPoint(centre.x(), centre.y() - tab.height()))
+        QTest.mouseRelease(handle, Qt.LeftButton, Qt.NoModifier, QPoint(centre.x(), centre.y() - tab.height()))
+        self.assertAlmostEqual(tab.quick_share, 0.75, places=2)
+        centre = handle.rect().center()
+        QTest.mousePress(handle, Qt.LeftButton, Qt.NoModifier, centre)
+        QTest.mouseMove(handle, QPoint(centre.x(), centre.y() + tab.height()))
+        QTest.mouseRelease(handle, Qt.LeftButton, Qt.NoModifier, QPoint(centre.x(), centre.y() + tab.height()))
+        self.assertAlmostEqual(tab.quick_share, 0.2, places=2)
+
+    def test_the_quick_view_title_never_overlaps_its_buttons(self):
+        self.open("title-main")
+        for name in ("short", "a-very-long-paper-title-" * 6):
+            quick = self.window.open_quick(FileSource(self.pdf(name)))
+            self.pump(lambda: quick.view.has_page(0))
+            self.assertTrue(quick.title_label.isVisible())
+            self.assertLessEqual(quick.title_label.geometry().right(), quick.quick_buttons[0].geometry().left())
+            self.assertTrue(all(button.isVisible() for button in quick.quick_buttons))
+
+    def test_a_narrow_reader_stacks_and_says_why_the_layout_switch_waits(self):
+        self.window.set_columns(outline=False, details=False)
+        tab = self.open("narrow-main")
+        quick = self.window.open_quick(FileSource(self.pdf("narrow-quick")))
+        self.assertTrue(quick.layout_button.isEnabled())
+        self.window.set_columns(outline=True, details=True)
+        self.window.resize(900, 700)
+        self.pump()
+        self.assertLess(tab.width(), 720)
+        self.assertFalse(quick.layout_button.isEnabled())
+        self.assertIn("too narrow", quick.layout_button.defaultAction().toolTip())
+        self.window.resize(1400, 700)
+        self.pump()
+        self.assertTrue(quick.layout_button.isEnabled())
+
+    def test_closing_a_modified_quick_view_offers_save_discard_cancel(self):
+        tab = self.open("close-main")
+        path = self.pdf("close-quick")
+        quick = self.window.open_quick(FileSource(path))
+        self.pump(lambda: quick.view.has_page(0))
+        original = path.read_bytes()
+        self.highlight(quick)
+        self.answers.append(CANCEL)
+        quick.quick_buttons[2].click()  # the Close button of the quick view
+        self.assertEqual((tab.quick, quick.modified, len(self.asked)), (quick, True, 1))
+        self.assertEqual(path.read_bytes(), original)
+        self.answers.append(DISCARD)
+        quick.quick_buttons[2].click()
+        self.assertIsNone(tab.quick)
+        self.assertEqual(path.read_bytes(), original)
+        quick = self.window.open_quick(FileSource(path))
+        self.pump(lambda: quick.view.has_page(0))
+        self.highlight(quick)
+        self.answers.append(SAVE)
+        QTest.keyClick(quick.view, Qt.Key_Escape)
+        self.assertIsNone(tab.quick)
+        self.assertEqual(self.annotations(path), 1)
+
+    def test_replacing_a_modified_quick_view_with_save_writes_only_the_replaced_paper(self):
+        tab = self.open("replace-main")
+        first_path, second_path = self.pdf("replace-first"), self.pdf("replace-second")
+        first = self.window.open_quick(FileSource(first_path))
+        self.pump(lambda: first.view.has_page(0))
+        self.highlight(first)
+        main_bytes = tab.main.view.doc.source.path.read_bytes()
+        second_bytes = second_path.read_bytes()
+        self.answers.append(SAVE)
+        replacement = self.window.open_quick(FileSource(second_path))
+        self.assertIs(tab.quick, replacement)
+        self.assertEqual(self.annotations(first_path), 1)
+        self.assertEqual((second_path.read_bytes(), tab.main.view.doc.source.path.read_bytes()), (second_bytes, main_bytes))
+
+    def test_a_fresh_quick_view_of_a_paper_that_is_a_main_goes_back_to_it_when_promoted(self):
+        tab = self.open("owner")
+        quick = self.window.open_quick(FileSource(tab.main.view.doc.source.path))
+        self.pump(lambda: quick.view.has_page(0))
+        quick.view.zoom_by(1.5)
+        quick.view.goto(2)
+        self.pump()
+        self.assertEqual(current_page(quick.view), 2)
+        self.window.promote_quick()
+        self.pump()
+        self.assertEqual((self.window.tabs.count(), self.window.tab(), tab.quick), (1, tab, None))
+        self.assertIs(self.window.pane(), tab.main)
+        self.assertEqual(current_page(tab.main.view), 2)
+        self.assertTrue(tab.main.view.fit)
+
+    def test_promoting_keeps_the_page_and_zoom_of_the_quick_view(self):
+        self.open("promote-main")
+        quick = self.window.open_quick(FileSource(self.pdf("promote-quick")))
+        self.pump(lambda: quick.view.has_page(0))
+        quick.view.zoom_by(1.5)
+        quick.view.goto(2)
+        self.pump()
+        place = (quick.view.zoom, quick.view.fit, current_page(quick.view))
+        self.window.promote_quick()
+        self.pump()
+        view = self.window.tab().main.view
+        self.assertIs(view, quick.view)
+        self.assertEqual((view.zoom, view.fit, current_page(view)), place)
+
+    def test_a_close_request_during_a_save_is_refused_and_asks_nothing(self):
+        outcomes = []
+
+        class ClosingSource(FileSource):
+            def save(inner, doc):
+                outcomes.append((self.window.close_tab(0), self.window.close()))
+                FileSource.save(inner, doc)
+        source = ClosingSource(self.pdf("saving"))
+        tab = self.window.open_source(source)
+        self.pump(lambda: tab.main.view.has_page(0))
+        self.highlight(tab.main)
+        self.window.save()
+        self.assertEqual(outcomes, [(False, False)])
+        self.assertEqual((self.asked, self.window.tabs.count(), tab.main.state), ([], 1, SaveState.SAVED))
+        self.assertEqual(self.annotations(source.path), 1)
+        self.assertTrue(self.window.isVisible())
+
+    def test_nothing_is_written_to_any_pdf_until_the_user_chooses_save(self):
+        def files():
+            return {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in self.dir.glob(f"{self.id()}-*.pdf")}
+        first, other = self.open("first"), self.open("second")
+        self.window.tabs.setCurrentWidget(first)
+        self.highlight(first.main)
+        before = files()
+        self.assertEqual(len(before), 2)
+        self.window.tabs.setCurrentWidget(other)  # hiding a tab
+        first.main.view.zoom_by(1.25)
+        first.main.view.goto(2)
+        self.window.tabs.setCurrentWidget(first)
+        third = self.window.open_quick(FileSource(self.pdf("third")))  # opening, laying out and replacing quick views
+        self.window.toggle_quick_layout()
+        self.window.open_quick(FileSource(self.pdf("fourth")))
+        self.window.promote_quick()  # promotion
+        self.window.tabs.setCurrentWidget(first)
+        mirror = self.window.open_quick(FileSource(first.main.view.doc.source.path))  # a read-only view of the edited paper
+        self.assertTrue(mirror.view.locked)
+        self.window.promote_quick()  # a locked view of an open paper goes back to its owner
+        self.assertIs(self.window.tab(), first)
+        self.answers.append(CANCEL)  # Cancel
+        self.assertFalse(self.window.close_tab(self.window.tabs.indexOf(first)))
+        self.pump(seconds=1.5)  # no timer saves either
+        self.assertEqual({k: v for k, v in files().items() if k in before}, before)
+        self.answers.append(DISCARD)
+        self.assertTrue(self.window.close_tab(self.window.tabs.indexOf(first)))
+        self.assertEqual({k: v for k, v in files().items() if k in before}, before)
+        self.assertIs(third.state, SaveState.SAVED)
+        path = next(iter(before))
+        tab = self.window.open_source(FileSource(path))
+        self.pump(lambda: tab.main.view.has_page(0))
+        self.highlight(tab.main)
+        self.answers.append(SAVE)  # only the Save choice writes, and only that file
+        self.assertTrue(self.window.close_tab(self.window.tabs.indexOf(tab)))
+        changed = [k for k, v in files().items() if before.get(k, v) != v]
+        self.assertEqual(changed, [path])
 
     def test_annotation_toolbar_palette_undo_and_exact_revision_rendering(self):
         from paperassist.native.annotation_bar import COLORS, install

@@ -116,7 +116,7 @@ class CitationLogicTests(unittest.TestCase):
     def test_pdfium_locates_repeated_occurrences_and_page_only_fallback(self):
         with tempfile.TemporaryDirectory() as folder:
             data = make_pdf(Path(folder) / "paper.pdf").read_bytes()
-            index = CitationIndex(data, named=False)
+            index = CitationIndex(data)
             found = index.locate({"occurrences": [{"page": 1, "marker": "Smith [1]"}, {"page": 2, "marker": "missing marker"}]})
             self.assertEqual([citation["page"] for citation in found], [1, 2])
             self.assertTrue(found[0]["rects"])
@@ -159,13 +159,6 @@ class CitationLogicTests(unittest.TestCase):
                 pdf.close()
         self.assertEqual(positions, [1.05, 1.05, 1.925, 1.75])
 
-    def test_location_runs_in_a_disposable_pdfium_process(self):
-        from paperassist.native.citations import locate_citations
-        with tempfile.TemporaryDirectory() as folder:
-            data = make_pdf(Path(folder) / "paper.pdf").read_bytes()
-            found = locate_citations(data, {"occurrences": [{"page": 1, "marker": "Smith [1]"}]})
-        self.assertEqual(found[0]["page"], 1)
-        self.assertTrue(found[0]["rects"])
 
 
 @needs_qt
@@ -175,6 +168,13 @@ class CitationPanelTests(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    def delete(self, widget):
+        """Destroy now, on this thread: the Mock client keeps the view in a reference cycle, and a
+        cycle collected later on a Workspace job thread would stop the view's running timer there and crash Qt."""
+        from PySide6.QtCore import QCoreApplication, QEvent
+        widget.deleteLater()
+        QCoreApplication.sendPostedEvents(widget, QEvent.DeferredDelete)
+
     def pump(self, condition):
         end = time.monotonic() + 10
         while not condition() and time.monotonic() < end:
@@ -182,40 +182,207 @@ class CitationPanelTests(unittest.TestCase):
             time.sleep(0.002)
         self.assertTrue(condition())
 
+    def test_reload_waits_for_running_load_or_analysis(self):
+        from unittest.mock import Mock
+        from paperassist.native.references_panel import ReferencesPanel
+
+        for analysis in (False, True):
+            with self.subTest(analysis=analysis):
+                workspace = Mock()
+                workspace.submit.return_value = {"id": "load"}
+                workspace.analyze_references.return_value = {"id": "analysis"}
+                panel = ReferencesPanel(workspace)
+                panel.document_id = 1
+                if analysis:
+                    panel.analyze(1)
+                else:
+                    panel.show_for(1)
+                first = panel.analyzing[1]
+                panel.reload(1)
+                panel.reload(1)
+                self.assertIs(panel.analyzing[1], first)
+                self.assertEqual(workspace.submit.call_count, 0 if analysis else 1)
+                first.stop()
+                first.finished.emit({"status": "completed", "result": {}})
+                self.assertIsNot(panel.analyzing[1], first)
+                self.assertEqual(workspace.submit.call_count, 1 if analysis else 2)
+                panel.close()
+
+    def test_load_and_analysis_errors_name_the_operation(self):
+        from unittest.mock import Mock
+        from paperassist.native.references_panel import ReferencesPanel
+        for operation in ("load", "analyze"):
+            workspace = Mock()
+            start = workspace.submit if operation == "load" else workspace.analyze_references
+            panel = ReferencesPanel(workspace)
+            panel.document_id = 1
+            start.side_effect = RuntimeError("queue full")
+            run = panel._load if operation == "load" else panel.analyze
+            run(1)
+            self.assertIn(f"Could not {operation}", panel.status.text())
+            start.side_effect = None
+            start.return_value = {"id": "test-job"}
+            run(1)
+            watcher = panel.analyzing[1]
+            watcher.stop()
+            watcher.finished.emit({"status": "failed", "error": "unreadable"})
+            self.assertIn(f"Could not {operation}", panel.status.text())
+            panel.close()
+
+    def test_load_and_analysis_errors_name_the_operation(self):
+        from unittest.mock import Mock
+        from paperassist.native.references_panel import ReferencesPanel
+        for operation in ("load", "analyze"):
+            workspace = Mock()
+            start = workspace.submit if operation == "load" else workspace.analyze_references
+            panel = ReferencesPanel(workspace)
+            panel.document_id = 1
+            start.side_effect = RuntimeError("queue full")
+            run = panel._load if operation == "load" else panel.analyze
+            run(1)
+            self.assertIn(f"Could not {operation}", panel.status.text())
+            start.side_effect = None
+            start.return_value = {"id": "test-job"}
+            run(1)
+            watcher = panel.analyzing[1]
+            watcher.stop()
+            watcher.finished.emit({"status": "failed", "error": "unreadable"})
+            self.assertIn(f"Could not {operation}", panel.status.text())
+            panel.close()
+
     def test_stale_extraction_is_a_workspace_job_never_a_synchronous_get(self):
         from paperassist import references
+        from paperassist.workspace import Workspace
+        from test_library_window import cited_pdf
         from paperassist.native.references_panel import ReferencesPanel
-        from unittest.mock import Mock
-        workspace = Mock()
-        workspace.analyze_references.return_value = {"id": "job"}
-        panel = ReferencesPanel(workspace)
-        self.addCleanup(panel.close)
-        payload = {"status": "partial", "references": [], "extraction_version": -1}
-        with patch.object(references, "_load", return_value=payload), patch.object(references, "get") as get:
-            panel.show_for(4)
-        workspace.analyze_references.assert_called_once_with(4)
-        get.assert_not_called()
-        self.assertIn(4, panel.analyzing)
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            workspace = Workspace(root / "library")
+            self.addCleanup(workspace.close)
+            doc = workspace.library.import_stream(io.BytesIO(cited_pdf(root / "p.pdf").read_bytes()), "p.pdf")
+            references.analyze(workspace.library, doc["id"])
+            panel = ReferencesPanel(workspace)
+            self.addCleanup(panel.close)
+
+            # A bumped extraction version triggers reanalysis inside the background Workspace job, never on the UI thread.
+            ui_thread = threading.get_ident()
+            analyze_threads = []
+            real_analyze = references.analyze
+            def tracked_analyze(lib, doc_id):
+                analyze_threads.append(threading.get_ident())
+                return real_analyze(lib, doc_id)
+
+            with patch.object(references, "EXTRACTION_VERSION", references.EXTRACTION_VERSION + 1), \
+                 patch.object(references, "analyze", side_effect=tracked_analyze):
+                panel.show_for(doc["id"])
+                self.assertIn(doc["id"], panel.analyzing)
+                self.pump(lambda: doc["id"] in panel.loaded and not panel.analyzing)
+            self.assertEqual(len(analyze_threads), 1)
+            self.assertNotEqual(analyze_threads[0], ui_thread)
 
     def test_resolving_a_fresh_analysis_runs_off_the_ui_thread_and_is_cached(self):
         from paperassist import references
-        from paperassist.native.references_panel import ReferencesPanel
-        from unittest.mock import Mock
-        payload = {"status": "partial", "references": [], "extraction_version": references.EXTRACTION_VERSION,
-                   "destination_version": references.DESTINATION_VERSION}
-        threads = []
-        def get(*_):
-            threads.append(threading.get_ident())
-            time.sleep(0.03)
-            return payload
-        panel = ReferencesPanel(Mock())
-        self.addCleanup(panel.close)
-        with patch.object(references, "_load", return_value=payload), patch.object(references, "get", side_effect=get):
-            panel.show_for(4)
-            self.pump(lambda: 4 in panel.loaded)
-            panel.show_for(4)
-        self.assertEqual(len(threads), 1)
-        self.assertNotEqual(threads[0], threading.get_ident())
+        from paperassist.workspace import Workspace
+        from test_library_window import cited_pdf
+        from paperassist.native.acquisition import AcquisitionController
+        from paperassist.native.window import MainWindow
+        from paperassist.native.renderer import RenderClient
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            with patch("paperassist.paths.config_file", return_value=root / "config.json"):
+                workspace = Workspace(root / "library")
+                self.addCleanup(workspace.close)
+                client = RenderClient()
+                self.addCleanup(client.shutdown)
+                docs = [
+                    workspace.library.import_stream(io.BytesIO(cited_pdf(root / f"p{n}.pdf", pages=n).read_bytes()), f"p{n}.pdf")
+                    for n in (3, 4)
+                ]
+                for doc in docs:
+                    references.analyze(workspace.library, doc["id"])
+
+                window = MainWindow(client, workspace)
+                window.acquisition.main_opened = lambda document_id: None
+                window.resize(1200, 800)
+                window.show()
+                self.addCleanup(lambda: (window.close(), window.deleteLater()))
+
+                ui_thread = threading.get_ident()
+                disk_reads = []
+                real_load = references._load
+                def tracked_load(lib, doc_id):
+                    disk_reads.append((doc_id, threading.get_ident()))
+                    return real_load(lib, doc_id)
+
+                with patch.object(references, "_load", side_effect=tracked_load):
+                    # Opening each analyzed paper reads its stored payload once, off the UI thread.
+                    window.open_library_document(docs[0]["id"])
+                    self.pump(lambda: window.details.list.count() == 2 and not window.details.analyzing)
+                    self.assertEqual(len(disk_reads), 1)
+                    self.assertNotEqual(disk_reads[0][1], ui_thread)
+
+                    window.open_library_document(docs[1]["id"])
+                    self.pump(lambda: window.details.list.count() == 2 and not window.details.analyzing)
+                    self.assertEqual(len(disk_reads), 2)
+
+                    # Switching tabs and expanding cards or browser links never touch the disk.
+                    disk_reads.clear()
+                    window.tabs.setCurrentIndex(0)
+                    self.app.processEvents()
+                    window.tabs.setCurrentIndex(1)
+                    self.app.processEvents()
+                    window.tabs.setCurrentIndex(0)
+                    self.app.processEvents()
+                    self.assertEqual(disk_reads, [])
+
+                    first_item = window.details.list.item(0)
+                    window.details._expand(first_item)
+                    ref = window.details.refs[0]
+                    window.details._reference_open(ref)
+                    card = window.details.list.itemWidget(first_item)
+                    self.assertIn((window.details.document_id, str(ref["id"])), window.acquisition.expanded)
+                    self.assertEqual(disk_reads, [])
+
+    def test_stepping_multiple_references_uses_render_worker_with_zero_process_spawns(self):
+        import multiprocessing
+        from paperassist import references
+        from paperassist.workspace import Workspace
+        from test_library_window import cited_pdf
+        from paperassist.native.renderer import RenderClient
+        from paperassist.native.window import MainWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            with patch("paperassist.paths.config_file", return_value=root / "config.json"):
+                workspace = Workspace(root / "library")
+                self.addCleanup(workspace.close)
+                client = RenderClient()
+                self.addCleanup(client.shutdown)
+                doc = workspace.library.import_stream(io.BytesIO(cited_pdf(root / "p.pdf", pages=3).read_bytes()), "p.pdf")
+                references.analyze(workspace.library, doc["id"])
+
+                window = MainWindow(client, workspace)
+                window.acquisition.main_opened = lambda document_id: None
+                window.resize(1200, 800)
+                window.show()
+                self.addCleanup(lambda: (window.close(), window.deleteLater()))
+                tab = window.open_library_document(doc["id"])
+                self.pump(lambda: window.details.list.count() == 2 and tab.main.view.has_page(0))
+
+                spawns = []
+                real_ctx = multiprocessing.get_context
+                def forbid_spawn(*args, **kwargs):
+                    spawns.append(args)
+                    return real_ctx(*args, **kwargs)
+
+                with patch("multiprocessing.get_context", side_effect=forbid_spawn):
+                    for ref in list(window.details.refs):
+                        window.details.step(ref)
+                        self.pump(lambda r=ref: r["id"] in window.details.located.get(tab.main.view, {}))
+                self.assertEqual(spawns, [])
+                self.assertEqual(len(window.details.located[tab.main.view]), 2)
 
     def test_reveal_and_rotated_position_do_not_edit_pdf(self):
         from paperassist.native.document import PdfDocument
@@ -227,7 +394,7 @@ class CitationPanelTests(unittest.TestCase):
             doc = PdfDocument(source)
             self.addCleanup(doc.close)
             view = PdfView(doc, Mock())
-            self.addCleanup(view.close)
+            self.addCleanup(self.delete, view)
             view.resize(500, 400)
             view.show()
             self.app.processEvents()
