@@ -12,12 +12,12 @@ steps. Update completed tasks with the tested commit, commands and outcomes.
 - Native parity: 104 accepted rows, five host-only exclusions and no open rows in
   [the acceptance inventory](native-migration.md). That Linux acceptance record
   does not establish release portability.
-- Commit `b3457bc` contains the current implementation. The last local full suite
+- Commit `ae1754d` contains the current implementation. The last local full suite
   passed 614 Python tests with four skips; 61 Node tests passed. Window-manager
   focus checks passed separately under Mutter/Wayland.
 - [CI for that commit](https://github.com/gabrielesano/paperassist/actions/runs/42358543088)
   passed Ubuntu/Python 3.13 and Node, but failed Ubuntu/Python 3.11 and both Windows
-  jobs. Session 1 fixed them; CI is green again from commit `77ae453`.
+  jobs. Session 1 fixed them; CI is green again from commit `f73ce91`.
 - [PyInstaller packaging](../../packaging/README.md) and a manual three-platform
   build workflow already exist. Earlier bundle measurements and successful builds
   must not be presented as verification of the latest commit.
@@ -27,7 +27,7 @@ steps. Update completed tasks with the tested commit, commands and outcomes.
 
 ## Session 1 — Restore green CI
 
-Completed 2026-11-07 on commit `77ae453`.
+Completed 2026-11-07 on commit `f73ce91`.
 
 - [x] Refresh the latest run and reproduce its failures before changing code.
   The 3.11 cause came from the CI log and code: before Python 3.12,
@@ -44,7 +44,9 @@ Completed 2026-11-07 on commit `77ae453`.
   Python tests on 3.14 and 3.11, 61 Node tests, and the native window under Xvfb.
   [CI run 42364131549](https://github.com/gabrielesano/paperassist/actions/runs/42364131549)
   passed all five jobs: Ubuntu and Windows on Python 3.11 and 3.13 (619 tests
-  each), and Node. Both 150% layout tests ran and passed on Windows.
+  each), and Node. Both 150% layout tests ran and passed on Windows. That run
+  tested the same source tree before agent instruction files were removed from
+  the history, which changed every commit hash.
 
 The same commit escapes `&` in Qt labels built from titles, starts find from the
 current page, and delivers SIGTERM through a wakeup socket instead of polling.

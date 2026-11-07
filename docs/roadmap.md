@@ -7,7 +7,7 @@ records are in [development/](development/).
 
 Native parity is accepted in the [Linux migration inventory](development/native-migration.md):
 104 accepted rows and five host-only exclusions. CI is green on Ubuntu and
-Windows with Python 3.11 and 3.13 from commit `77ae453`. Cross-platform release
+Windows with Python 3.11 and 3.13 from commit `f73ce91`. Cross-platform release
 readiness still requires the checks below.
 
 1. Deliver the first Linux release installable with one command without requiring
