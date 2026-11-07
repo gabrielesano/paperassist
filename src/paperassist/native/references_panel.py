@@ -3,7 +3,7 @@ import unicodedata
 import weakref
 from html import escape
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QStyle, QStyledItemDelegate,
@@ -154,6 +154,28 @@ class ReferencesPanel(QWidget):
         self._set_busy(False)
         self.acquire.hide()
         self.repair.hide()
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        width = hint.width()
+        if self.expanded is not None and (item := self._item(self.expanded)) and (card := self.list.itemWidget(item)):
+            card.ensurePolished()
+            margins = self.contentsMargins()
+            bar = self.list.verticalScrollBar()
+            frame = self.list.frameWidth() * 2 + (bar.sizeHint().width() if bar.isVisible() else 0)
+            chrome = max(self.width() - self.list.viewport().width(), margins.left() + margins.right() + frame)
+            width = max(width, card.minimumSizeHint().width() + chrome)
+        return QSize(width, hint.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.expanded is not None and (item := self._item(self.expanded)) and self.list.itemWidget(item) is not None:
+            self._fit_item(item)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.StyleChange and self.expanded is not None and (item := self._item(self.expanded)) and self.list.itemWidget(item) is not None:
+            self._fit(item)
 
     def set_acquisition(self, acquisition):
         self.acquisition = acquisition
@@ -310,16 +332,25 @@ class ReferencesPanel(QWidget):
             self.list.itemWidget(item).title.setFocus()
 
     def _fit(self, item):
+        self.updateGeometry()
+        self._fit_item(item)
+
+    def _fit_item(self, item):
         card = self.list.itemWidget(item)
+        if card is None:
+            return
         width = max(self.list.viewport().width(), 40)
         card.ensurePolished()  # unpolished buttons report smaller hints and the card would be clipped
-        item.setSizeHint(QSize(width, max(card.layout().totalHeightForWidth(width), card.sizeHint().height())))
-        self.list.doItemsLayout()
+        size = QSize(width, max(card.layout().totalHeightForWidth(width), card.sizeHint().height()))
+        if size != item.sizeHint():
+            item.setSizeHint(size)
+            self.list.doItemsLayout()
 
     def _collapse(self, item):
         self.list.removeItemWidget(item)
         item.setSizeHint(QSize())  # back to the delegate's size
         self.list.doItemsLayout()
+        self.updateGeometry()
 
     def _collapse_current(self):
         if self.expanded is not None and (item := self._item(self.expanded)):
@@ -419,7 +450,8 @@ class ReferencesPanel(QWidget):
                 self.choice_layout.takeAt(0).widget().deleteLater()
             self.choice_layout.addWidget(QLabel(f"Citation {text}: choose a reference", wordWrap=True))
             for ref in matches:
-                button = QPushButton(f"{ref.get('label', '')} {ref.get('title') or ref.get('raw') or 'Reference'}")
+                label = f"{ref.get('label', '')} {ref.get('title') or ref.get('raw') or 'Reference'}"
+                button = QPushButton(label.replace("&", "&&"))
                 button.clicked.connect(lambda _=False, target=ref: self._reference_open(target))
                 self.choice_layout.addWidget(button)
             self.choices.show()

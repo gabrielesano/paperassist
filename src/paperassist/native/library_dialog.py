@@ -1,5 +1,4 @@
 """The library list: search, open in a tab or quick view, and import PDFs as a background job."""
-import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -7,32 +6,13 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
+from paperassist.library import pdf_files
 from .jobs import JobWatcher
 from .library_source import display_title
 from .metadata_dialog import MetadataDialog
 
 REVIEW = QColor("#a15c00")  # amber: not an error, a paper whose metadata nobody confirmed
 NEEDS_REVIEW = ("needs_review", "incomplete")
-
-
-def pdf_files(paths, errors=None):
-    """The PDFs under these files and folders, found as the importer finds them: no symlinks, any case of ".pdf"."""
-    found = []
-    for path in map(Path, paths):
-        try:
-            if path.is_symlink():
-                continue
-            if path.is_dir():
-                with os.scandir(path) as entries:
-                    found += pdf_files(sorted(entry.path for entry in entries), errors)
-            elif path.is_file() and path.suffix.lower() == ".pdf":
-                found.append(path)
-            elif not path.exists():
-                raise FileNotFoundError(path)
-        except OSError as error:
-            if errors is not None:
-                errors.append({"path": str(path), "error": str(error)})
-    return found
 
 
 def size_text(size):

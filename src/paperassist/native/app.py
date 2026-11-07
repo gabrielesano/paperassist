@@ -2,11 +2,12 @@ import argparse
 import gc
 import os
 import signal
+import socket
 import sqlite3
 import sys
 from contextlib import ExitStack, contextmanager
 
-from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QSocketNotifier, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from paperassist import paths
@@ -72,18 +73,22 @@ def open_workspace(data_dir):
 @contextmanager
 def termination_requests(app):
     """Deliver SIGTERM through the normal close guard, outside the signal handler."""
-    pending = closing = False
+    closing = False
 
-    def request(_signum, _frame):
-        nonlocal pending
-        if not closing:
-            pending = True
-
-    def poll():
-        nonlocal pending, closing
-        if not pending or closing:
+    def wakeup(*_args):
+        nonlocal closing
+        received = bytearray()
+        while True:
+            try:
+                data = reader.recv(256)
+                if not data:
+                    break
+                received.extend(data)
+            except (BlockingIOError, InterruptedError):
+                break
+        if closing or signal.SIGTERM not in received:
             return
-        pending, closing = False, True
+        closing = True
         try:
             windows = [window for window in app.topLevelWidgets()
                        if isinstance(window, MainWindow) and window.isVisible()]
@@ -94,16 +99,23 @@ def termination_requests(app):
         finally:
             closing = False
 
-    previous = signal.signal(signal.SIGTERM, request)
-    timer = QTimer(app, interval=100, timeout=poll)
-    timer.start()
+    reader, writer = socket.socketpair()
+    reader.setblocking(False)
+    writer.setblocking(False)
+    notifier = QSocketNotifier(reader.fileno(), QSocketNotifier.Read, app)
+    notifier.activated.connect(wakeup)
+    previous_wakeup = signal.set_wakeup_fd(writer.fileno(), warn_on_full_buffer=False)
+    previous = signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
     try:
         yield
     finally:
-        timer.stop()
+        notifier.setEnabled(False)
         signal.signal(signal.SIGTERM, previous)
-        timer.deleteLater()
-        QCoreApplication.sendPostedEvents(timer, QEvent.DeferredDelete)
+        signal.set_wakeup_fd(previous_wakeup)
+        notifier.deleteLater()
+        QCoreApplication.sendPostedEvents(notifier, QEvent.DeferredDelete)
+        writer.close()
+        reader.close()
 
 
 def run(argv=None):

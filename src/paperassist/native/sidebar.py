@@ -1,5 +1,5 @@
 """A collapsible side column: a header with a "−" button above the panel that belongs to it."""
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QEvent, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QStackedWidget, QToolButton, QVBoxLayout, QWidget
 
 
@@ -36,7 +36,6 @@ class SideColumn(QWidget):
 
     def __init__(self, title, body):
         super().__init__()
-        self.setMinimumWidth(160)
         button = QToolButton(text="−", toolTip=f"Hide {title}")
         button.setAccessibleName(f"Hide {title}")
         button.clicked.connect(self.hide_requested)
@@ -49,3 +48,15 @@ class SideColumn(QWidget):
         column.setSpacing(0)
         column.addLayout(header)
         column.addWidget(body, 1)
+        self._sync_minimum_width()
+
+    def _sync_minimum_width(self):
+        target = max(160, self.minimumSizeHint().width())
+        if self.minimumWidth() != target:
+            self.setMinimumWidth(target)
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() in (QEvent.LayoutRequest, QEvent.StyleChange, QEvent.Show):
+            self._sync_minimum_width()
+        return handled

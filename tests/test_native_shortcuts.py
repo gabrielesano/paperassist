@@ -248,6 +248,25 @@ class ShortcutTests(unittest.TestCase):
         self.assertEqual(self.workspace.library.get_document(document["id"])["filename"], "alpha.pdf")
         self.assertTrue(bar.hasFocus())
 
+    def test_ampersand_in_tab_title_escapes_mnemonic_in_tab_text(self):
+        document = self.workspace.library.import_stream(io.BytesIO(self.paths[0].read_bytes()), "alpha.pdf")
+        self.window.open_library_document(document["id"])
+        bar = self.window.tabs.tabBar()
+        QTest.mouseDClick(bar, Qt.LeftButton, Qt.NoModifier, bar.tabRect(0).center())
+        self.edit_tab_name("A&A & Keppens", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
+        self.app.processEvents()
+
+        tab_text = self.window.tabs.tabText(0)
+        self.assertIn("A&&A && Keppens", tab_text)
+        self.assertTrue(QKeySequence.mnemonic(tab_text).isEmpty())
+        self.assertIn("A&A & Keppens", self.window.tabs.tabToolTip(0))
+        self.assertNotIn("&&", self.window.tabs.tabToolTip(0))
+
+        self.window.shortcuts.rename_tab(0)
+        editor = next(e for e in bar.findChildren(QLineEdit) if e.isVisible())
+        self.assertEqual(editor.text(), "A&A & Keppens")
+        QTest.keyClick(editor, Qt.Key_Escape)
+
     def test_escape_cancels_and_an_empty_label_restores_the_paper_title(self):
         document = self.workspace.library.import_stream(io.BytesIO(self.paths[0].read_bytes()), "alpha.pdf")
         self.window.open_library_document(document["id"])

@@ -14,7 +14,7 @@ from test_native_support import make_pdf, needs_qt, pdf_available
 if pdf_available:
     import paperassist
     from PySide6.QtCore import Qt, QTimer
-    from PySide6.QtGui import QAction, QShortcut
+    from PySide6.QtGui import QAction, QFont, QShortcut
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import (
         QApplication, QDialog, QFileDialog, QMessageBox,
@@ -763,6 +763,81 @@ class NativePreferencesTests(unittest.TestCase):
         self.pump()
         assert_buttons_fit(window.preferences_dialog, "Preferences dialog")
         window.preferences_dialog.reject()
+
+    def test_side_column_and_expanded_cards_widen_cleanly_for_wide_fonts_at_150_percent(self):
+        from test_library_window import cited_pdf
+
+        workspace = Workspace(self.dir / "wide-fonts-library")
+        self.addCleanup(workspace.close)
+        workspace.update_settings({"proxy": "https://login.proxy.example.edu/login?url="})
+        p_main = cited_pdf(self.dir / "main-wide.pdf", pages=3)
+        p_cited = cited_pdf(self.dir / "cited-wide.pdf", pages=4)
+        main_doc = workspace.library.import_stream(io.BytesIO(p_main.read_bytes()), p_main.name)
+        cited_doc = workspace.library.import_stream(io.BytesIO(p_cited.read_bytes()), p_cited.name)
+        analyzed = references.analyze(workspace.library, main_doc["id"])
+        references.link(workspace.library, main_doc["id"], analyzed["references"][1]["id"], cited_doc["id"])
+
+        window = self.make_window(workspace=workspace, size=(1400, 900))
+        window.centralWidget().setSizes([230, 840, 330])
+        tab = window.open_library_document(main_doc["id"])
+        quick = window.open_library_document_in_quick_view(cited_doc["id"])
+        self.pump(lambda: tab.main.view.has_page(0) and quick.view.has_page(0) and window.details.list.count() == 2)
+        for dlg in list(window.acquisition.dialogs.values()):
+            dlg.close()
+
+        # Wide font metrics where 'Acquire references' asks for >= 338 px at 150%
+        pt = 15
+        window.preferences_dialog.base_font = QFont("DejaVu Sans Mono", pt)
+        window.preferences_dialog.apply_zoom(1.5)
+        while window.details.acquire.sizeHint().width() < 338 and pt < 30:
+            pt += 1
+            window.preferences_dialog.base_font = QFont("DejaVu Sans Mono", pt)
+            window.preferences_dialog.apply_zoom(1.5)
+        self.pump()
+        self.assertGreaterEqual(window.details.acquire.sizeHint().width(), 338)
+
+        def assert_buttons_fit(root, context):
+            checked = 0
+            for cls in (QPushButton, QToolButton):
+                for btn in root.findChildren(cls):
+                    if not btn.isVisible() or not btn.text():
+                        continue
+                    self.assertLessEqual(
+                        btn.sizeHint().width(), btn.width(),
+                        f"{context}: button {btn.text()!r} ({btn.objectName()}) sizeHint {btn.sizeHint().width()} > width {btn.width()}",
+                    )
+                    checked += 1
+            return checked
+
+        # References unlinked card with Browser searches expanded
+        window.details._expand(window.details.list.item(0))
+        card0 = window.details.list.itemWidget(window.details.list.item(0))
+        for btn in card0.findChildren(QPushButton):
+            if btn.isCheckable() and "Browser searches" in btn.text():
+                btn.setChecked(True)
+        self.pump()
+        self.assertGreater(assert_buttons_fit(window.details_column, "References panel (unlinked card)"), 0)
+
+        # References linked card
+        window.details._expand(window.details.list.item(1))
+        self.pump()
+        self.assertGreater(assert_buttons_fit(window.details_column, "References panel (linked card)"), 0)
+
+        # Comments idle
+        window.comments.show_mode("comments")
+        self.pump()
+        self.assertGreater(assert_buttons_fit(window.details_column, "Comments panel (idle)"), 0)
+
+        # Comments composer
+        window.comments.compose()
+        window.comments.panel.text.setPlainText("Check 150% composer buttons")
+        self.pump()
+        self.assertGreater(assert_buttons_fit(window.details_column, "Comments panel (composer)"), 0)
+
+        # Comments with-comment
+        window.comments.save_draft(window.pane())
+        self.pump()
+        self.assertGreater(assert_buttons_fit(window.details_column, "Comments panel (with comment)"), 0)
 
 
 if __name__ == "__main__":

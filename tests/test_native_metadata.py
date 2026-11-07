@@ -200,7 +200,7 @@ class LibraryDialogTests(MetadataCase):
         blocked = self.dir / "blocked"
         blocked.mkdir()
         self.dialog.show()
-        with patch("paperassist.native.library_dialog.os.scandir", side_effect=PermissionError("Access denied")):
+        with patch("paperassist.library.os.scandir", side_effect=PermissionError("Access denied")):
             self.dialog.select_import([blocked])
         self.assertIn("Could not scan selection", self.dialog.message.text())
         self.assertIn(str(blocked), self.dialog.message.text())
@@ -221,7 +221,7 @@ class LibraryDialogTests(MetadataCase):
             return scandir(path)
 
         self.dialog.show()
-        with patch("paperassist.native.library_dialog.os.scandir", side_effect=scan):
+        with patch("paperassist.library.os.scandir", side_effect=scan):
             self.dialog.select_import([str(folder)])
             self.assertIn(str(blocked), self.dialog.message.text())
             self.assertIn("estimate unavailable", self.dialog.estimate.text())

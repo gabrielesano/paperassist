@@ -43,6 +43,26 @@ def _surname(authors: str) -> str:
     return words[-1] if words else ""
 
 
+def pdf_files(paths, errors: list[dict] | None = None) -> list[Path]:
+    """The PDFs under these files and folders: no symlinks, any case of .pdf."""
+    found = []
+    for path in map(Path, paths):
+        try:
+            if path.is_symlink():
+                continue
+            if path.is_dir():
+                with os.scandir(path) as entries:
+                    found += pdf_files(sorted(Path(entry.path) for entry in entries), errors)
+            elif path.is_file() and path.suffix.lower() == ".pdf":
+                found.append(path)
+            elif not path.exists():
+                raise FileNotFoundError(path)
+        except OSError as exc:
+            if errors is not None:
+                errors.append({"path": str(path), "error": str(exc)})
+    return found
+
+
 class Library:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
@@ -209,24 +229,7 @@ class Library:
 
     def import_paths(self, paths: list[str | Path], progress=None, cancel=None) -> dict:
         result = {"documents": [], "imported": 0, "duplicates": 0, "errors": [], "cancelled": False}
-        found = []
-
-        def scan(path):
-            try:
-                if path.is_symlink():
-                    return
-                if path.is_dir():
-                    for item in sorted(path.iterdir()):
-                        scan(item)
-                elif path.is_file() and path.suffix.lower() == ".pdf":
-                    found.append(path)
-                elif not path.exists():
-                    raise FileNotFoundError(path)
-            except OSError as exc:
-                result["errors"].append({"path": str(path), "error": str(exc)})
-
-        for name in paths:
-            scan(Path(name))
+        found = pdf_files(paths, result["errors"])
         for index, path in enumerate(found):
             if cancel is not None and cancel.is_set():
                 result["cancelled"] = True

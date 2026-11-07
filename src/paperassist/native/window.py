@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
             tab = self.tabs.widget(i)
             state = min((p.state for p in tab.panes()), key=WORST_FIRST.index)
             draft = any(self.comments.has_draft(p) for p in tab.panes())
-            self.tabs.setTabText(i, tab.main.title[:28] + (MARKERS.get(state, "") or (" ●" if draft else "")))
+            self.tabs.setTabText(i, tab.main.title[:28].replace("&", "&&") + (MARKERS.get(state, "") or (" ●" if draft else "")))
             self.tabs.setTabToolTip(i, f"{tab.main.title} — {state.value}")
             self.tabs.tabBar().setAccessibleTabName(i, f"{tab.main.title} — {state.value}"
                                                    + (" — Comment draft" if draft else ""))

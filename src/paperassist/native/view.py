@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QAbstractScrollArea, QScrollBar
 from .document import SaveState
 from .engine import HIGHLIGHT, Rect
 from .layout import MARGIN, PageCache, PageLayout
+from .positions import current_page
 from .trim import trim_heap
 
 CACHE_BYTES = 120 * 1024 * 1024  # about five fit-width pages at 1.5x HiDPI
@@ -659,16 +660,30 @@ class PdfView(QAbstractScrollArea):
         return saved
 
     # ---- search -----------------------------------------------------------------------
-    def find(self, text):
-        self.hits, self.hit = (self.doc.search(text) if text else []), -1
-        self.step_hit(1)
+    def _show_hit(self):
+        page, rect = self.hits[self.hit]
+        band = self._band(page, rect)
+        if band.top() < 0 or band.bottom() > self.viewport().height():
+            self.goto(page, max(0, rect.y0 - 120 / self.zoom))
+        self.viewport().update()
+
+    def find(self, text, direction=1):
+        self.hits = self.doc.search(text) if text else []
+        if not self.hits:
+            self.hit = -1
+            self.viewport().update()
+            return 0
+        page = current_page(self)
+        if direction >= 0:
+            self.hit = next((i for i, (p, _) in enumerate(self.hits) if p >= page), 0)
+        else:
+            self.hit = next((i for i in range(len(self.hits) - 1, -1, -1) if self.hits[i][0] <= page), len(self.hits) - 1)
+        self._show_hit()
         return len(self.hits)
 
     def step_hit(self, direction):
         if self.hits:
             self.hit = (self.hit + direction) % len(self.hits)
-            page, rect = self.hits[self.hit]
-            band = self._band(page, rect)
-            if band.top() < 0 or band.bottom() > self.viewport().height():
-                self.goto(page, max(0, rect.y0 - 120 / self.zoom))
-        self.viewport().update()
+            self._show_hit()
+        else:
+            self.viewport().update()

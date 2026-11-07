@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from test_native_support import needs_qt, pdf_available, PySide6
 
 if pdf_available and PySide6:
+    from PySide6.QtGui import QKeySequence
     from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton
     from paperassist.native.acquisition import (AcquisitionController, AcquisitionDialog, SelectionStore,
                                                current_retrieval, provider_summary, proxy_url,
@@ -131,6 +132,18 @@ class AcquisitionWidgetTests(unittest.TestCase):
         dialog.select_all(True)
         self.assertEqual(self.controller.selections.load(11), {"1"})
         dialog.close()
+
+    def test_ampersand_in_reference_title_escapes_mnemonic_in_checkbox(self):
+        title = "Fang, X., Xia, C., & Keppens — A&A"
+        refs = [{"id": "4", "title": title}]
+        dialog = AcquisitionDialog(self.controller, 11, refs)
+        self.addCleanup(dialog.close)
+        box = dialog.boxes[0]
+        self.assertIn("&&", box.text())
+        self.assertTrue(QKeySequence.mnemonic(box.text()).isEmpty())
+        self.assertEqual(box.text(), "Fang, X., Xia, C., && Keppens — A&&A")
+        self.assertEqual(box.toolTip().strip(), title)
+        self.assertNotIn("&&", box.toolTip())
 
     def test_new_main_open_waits_for_references_and_offers_once(self):
         self.controller.main_opened(22)

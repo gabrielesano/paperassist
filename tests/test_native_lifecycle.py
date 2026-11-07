@@ -3,6 +3,7 @@ import json
 import os
 import selectors
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from pypdf import PdfReader
 from test_native_support import needs_qt, pdf_available
 
 if pdf_available:
+    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
     from paperassist import paths
     from paperassist.native import app as native_app
@@ -67,9 +69,23 @@ class SwitchRecoveryTests(unittest.TestCase):
     def test_signal_handler_is_restored_after_an_exception(self):
         app = QApplication.instance() or QApplication([])
         previous = signal.getsignal(signal.SIGTERM)
-        with self.assertRaises(ValueError), native_app.termination_requests(app):
-            raise ValueError("startup failed")
+        probe_reader, probe_writer = socket.socketpair()
+        probe_writer.setblocking(False)
+        try:
+            previous_wakeup = signal.set_wakeup_fd(probe_writer.fileno(), warn_on_full_buffer=False)
+            try:
+                with self.assertRaises(ValueError), native_app.termination_requests(app):
+                    self.assertEqual([t for t in app.findChildren(QTimer) if t.isActive() and not t.isSingleShot()], [])
+                    raise ValueError("startup failed")
+                current_wakeup = signal.set_wakeup_fd(previous_wakeup)
+                self.assertEqual(current_wakeup, probe_writer.fileno())
+            finally:
+                signal.set_wakeup_fd(previous_wakeup)
+        finally:
+            probe_reader.close()
+            probe_writer.close()
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+        self.assertEqual([t for t in app.findChildren(QTimer) if t.isActive() and not t.isSingleShot()], [])
 
     def test_unavailable_previous_library_reports_failure_without_creating_an_empty_one(self):
         app = QApplication.instance() or QApplication([])

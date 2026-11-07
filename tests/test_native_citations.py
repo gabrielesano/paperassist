@@ -208,6 +208,33 @@ class CitationPanelTests(unittest.TestCase):
                 self.assertEqual(workspace.submit.call_count, 1 if analysis else 2)
                 panel.close()
 
+    def test_grouped_citation_choices_escape_ampersand_mnemonic(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from PySide6.QtGui import QKeySequence
+        from PySide6.QtWidgets import QPushButton
+        from paperassist.native.references_panel import ReferencesPanel
+
+        workspace = Mock()
+        panel = ReferencesPanel(workspace)
+        self.addCleanup(panel.close)
+        view = SimpleNamespace()
+        panel.view = view
+        link = SimpleNamespace(destination=None, rect=Rect(10, 10, 50, 20))
+        doc = SimpleNamespace(_links={0: [link]}, words=lambda page: [(10, 10, 50, 20, "[1, 2]")])
+        view.doc = doc
+        panel.refs = [
+            {"id": 1, "label": "1", "title": "A&A & Keppens"},
+            {"id": 2, "label": "2", "title": "Second paper"},
+        ]
+        self.assertTrue(panel._citation_link(view, link))
+        buttons = panel.choices.findChildren(QPushButton)
+        self.assertEqual(len(buttons), 2)
+        keppens_button = next(b for b in buttons if "Keppens" in b.text())
+        self.assertIn("&&", keppens_button.text())
+        self.assertTrue(QKeySequence.mnemonic(keppens_button.text()).isEmpty())
+        self.assertEqual(keppens_button.text(), "1 A&&A && Keppens")
+
     def test_load_and_analysis_errors_name_the_operation(self):
         from unittest.mock import Mock
         from paperassist.native.references_panel import ReferencesPanel

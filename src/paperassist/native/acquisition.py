@@ -143,7 +143,7 @@ class AcquisitionDialog(QDialog):
         for ref in refs:
             local = bool(ref.get("local_document_id"))
             text = f"{ref.get('label') or ''} {ref.get('title') or ref.get('raw') or 'Unidentified reference'}"
-            box = QCheckBox(text.strip())
+            box = QCheckBox(text.strip().replace("&", "&&"))
             box.setToolTip(text)
             box.setEnabled(not local and not ref.get("legacy"))
             box.setChecked(box.isEnabled() and str(ref["id"]) in saved)

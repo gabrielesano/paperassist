@@ -29,7 +29,7 @@ class FindBar(QWidget):
     def _run(self, direction):
         if self.field.text() != self._last:
             self._last = self.field.text()
-            count = self.view.find(self._last)
+            count = self.view.find(self._last, direction)
         else:
             self.view.step_hit(direction)
             count = len(self.view.hits)
