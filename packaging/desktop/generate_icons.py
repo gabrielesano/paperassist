@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,7 @@ def main() -> int:
         help="Target directory for generated icons (default: script directory)",
     )
     parser.add_argument("--icns", type=Path, help="Also generate a macOS ICNS icon (requires iconutil)")
+    parser.add_argument("--ico", type=Path, help="Also generate a Windows ICO icon")
     args = parser.parse_args()
 
     out_dir = args.output_dir
@@ -125,6 +127,21 @@ def main() -> int:
 
     generate_svg(svg_file)
     generate_png(png_file)
+    if args.ico:
+        args.ico.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="paperassist-icon-") as temporary:
+            images = []
+            for size in (16, 32, 48, 64, 128, 256):
+                path = Path(temporary) / f"{size}.png"
+                generate_png(path, size)
+                images.append((size, path.read_bytes()))
+            header = struct.pack("<HHH", 0, 1, len(images))
+            offset = len(header) + 16 * len(images)
+            entries = []
+            for size, data in images:
+                entries.append(struct.pack("<BBBBHHII", size % 256, size % 256, 0, 0, 1, 32, len(data), offset))
+                offset += len(data)
+            args.ico.write_bytes(header + b"".join(entries) + b"".join(data for _, data in images))
     if args.icns:
         args.icns.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="paperassist-icon-") as temporary:

@@ -103,7 +103,8 @@ a.datas = [entry for entry in a.datas if not unwanted(entry)]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, [], exclude_binaries=True, name="PaperAssist",
-    console=sys.platform != "darwin",
+    console=sys.platform not in ("darwin", "win32"),
+    icon=str(root / "build" / "icons" / "PaperAssist.ico") if sys.platform == "win32" else None,
     target_arch="arm64" if sys.platform == "darwin" else None,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="PaperAssist")

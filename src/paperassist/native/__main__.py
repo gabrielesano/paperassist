@@ -4,19 +4,28 @@ import sys
 from importlib import import_module
 
 
+def startup_error(message):
+    if sys.platform == "win32" and getattr(sys, "frozen", False) and sys.stderr is None:
+        import ctypes
+        ctypes.WinDLL("user32").MessageBoxW(None, message, "PaperAssist", 0x10)
+    else:
+        print(message, file=sys.stderr)
+
+
 def main():
     multiprocessing.freeze_support()  # a frozen app starts its render process through the same executable
     try:
         import_module("PySide6.QtWidgets")
         import_module("pypdfium2")
     except (ImportError, OSError) as error:
-        print(f"Cannot start the native reader: {error}", file=sys.stderr)
+        message = f"Cannot start the native reader: {error}\n"
         if getattr(sys, "frozen", False):
-            print("Reinstall a complete PaperAssist build for your operating system.", file=sys.stderr)
+            message += "Reinstall a complete PaperAssist build for your operating system."
         else:
-            print('Install native support from the PaperAssist source folder:\n'
-                  '  python -m pip install -e ".[native]"\n'
-                  'Browser mode: paperassist serve --open', file=sys.stderr)
+            message += ('Install native support from the PaperAssist source folder:\n'
+                        '  python -m pip install -e ".[native]"\n'
+                        'Browser mode: paperassist serve --open')
+        startup_error(message)
         raise SystemExit(1) from None
     # Application errors must not be mistaken for an incomplete installation.
     from .app import run

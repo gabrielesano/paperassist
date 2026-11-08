@@ -26,6 +26,16 @@ except ImportError:
 
 @needs_qt
 class WaylandWarningFilterTests(unittest.TestCase):
+    def test_windowed_app_without_stderr_does_not_fail_while_logging(self):
+        previous = qInstallMessageHandler(None)
+        try:
+            handler = install_wayland_warning_filter()
+            context = QMessageLogContext("test.cpp", 1, "test", "qt.test")
+            with patch("sys.stderr", None):
+                handler(QtMsgType.QtWarningMsg, context, "Ordinary diagnostic")
+        finally:
+            qInstallMessageHandler(previous)
+
     def test_spurious_warning_matching(self):
         ctx = QMessageLogContext(
             "qwaylandtextinputv3.cpp",

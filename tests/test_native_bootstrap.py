@@ -22,6 +22,14 @@ sys.meta_path.insert(0, BlockNative())
 
 
 class NativeBootstrapTests(unittest.TestCase):
+    def test_windowed_windows_build_shows_startup_errors_without_a_console(self):
+        with patch.object(sys, "platform", "win32"), patch.object(sys, "frozen", True, create=True), \
+                patch.object(sys, "stderr", None), patch("ctypes.WinDLL", create=True) as library:
+            entry.startup_error("Reinstall the complete application")
+        library.return_value.MessageBoxW.assert_called_once_with(
+            None, "Reinstall the complete application", "PaperAssist", 0x10,
+        )
+
     def test_missing_dependencies_name_the_component_and_explain_source_installation(self):
         for missing in ("PySide6.QtWidgets", "pypdfium2"):
             with self.subTest(missing=missing):

@@ -46,7 +46,7 @@ def install_wayland_warning_filter():
             return
         if previous is not None:
             previous(msg_type, context, message)
-        else:
+        elif sys.stderr is not None:
             formatted = qFormatLogMessage(msg_type, context, message)
             sys.stderr.write(f"{formatted}\n")
             sys.stderr.flush()

@@ -240,6 +240,8 @@ class DesktopEntryTestCase(unittest.TestCase):
             str(GENERATE_SCRIPT),
             "--output-dir",
             str(out_dir),
+            "--ico",
+            str(out_dir / "PaperAssist.ico"),
         ]
         res = subprocess.run(cmd, env=self.env, capture_output=True, text=True)
         self.assertEqual(
@@ -261,6 +263,15 @@ class DesktopEntryTestCase(unittest.TestCase):
         self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
         w, h = struct.unpack(">II", data[16:24])
         self.assertEqual((w, h), (256, 256))
+
+        ico = (out_dir / "PaperAssist.ico").read_bytes()
+        self.assertEqual(struct.unpack_from("<HHH", ico), (0, 1, 6))
+        for index, size in enumerate((16, 32, 48, 64, 128, 256)):
+            width, height, _, _, planes, depth, length, offset = struct.unpack_from("<BBBBHHII", ico, 6 + index * 16)
+            self.assertEqual((width or 256, height or 256, planes, depth), (size, size, 1, 32))
+            image = ico[offset:offset + length]
+            self.assertEqual(image[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(struct.unpack_from(">II", image, 16), (size, size))
 
     def _get_target_binary(self) -> tuple[list[str], dict[str, str]]:
         """Return ([executable, ...], env) targeting the frozen binary or native module."""

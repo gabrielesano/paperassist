@@ -22,6 +22,7 @@ from .source import FileSource
 from .theme import brand_icon
 from .wayland import install_wayland_warning_filter
 from .window import MainWindow
+from .windows import hold_installation_mutex
 
 SELF_TEST_SECONDS = 60  # a cold start of a frozen app on a busy CI runner can be slow
 
@@ -137,6 +138,7 @@ def run(argv=None):
                                            "or the per-user data directory)")
     parser.add_argument("--self-test", metavar="FILE.pdf", help="render page 1 of FILE.pdf without a window and exit 0 or 1")
     args = parser.parse_args(argv)
+    hold_installation_mutex()
     if args.self_test:
         return 0 if self_test(args.self_test) else 1
     install_wayland_warning_filter()

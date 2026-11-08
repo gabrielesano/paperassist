@@ -29,6 +29,9 @@ jobs:
       - name: Create the macOS application icon
         if: runner.os == 'macOS'
         run: python packaging/desktop/generate_icons.py --output-dir build/icons --icns build/icons/PaperAssist.icns
+      - name: Create the Windows application icon
+        if: runner.os == 'Windows'
+        run: python packaging/desktop/generate_icons.py --output-dir build/icons --ico build/icons/PaperAssist.ico
       - run: pyinstaller packaging/paperassist.spec --noconfirm --distpath dist --workpath build
       - name: Self-test the bundle
         shell: bash
@@ -79,6 +82,14 @@ jobs:
         if: runner.os == 'macOS'
         run: python -m unittest tests.test_macos_bundle -v
 
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        run: python packaging/windows/build_installer.py
+
+      - name: Verify Windows installation, upgrade, GUI, and uninstallation
+        if: runner.os == 'Windows'
+        run: python -m unittest tests.test_windows_installer -v
+
       # Artifact uploads
       - if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
@@ -96,7 +107,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PaperAssist-Windows
-          path: dist/PaperAssist
+          path: |
+            dist/PaperAssist-*-windows-x86_64-setup.exe
+            dist/PaperAssist-*-windows-x86_64-setup.exe.sha256
+            dist/PaperAssist/THIRD-PARTY-NOTICES.txt
+            dist/PaperAssist/BUILD-PROVENANCE.json
 
       - if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4

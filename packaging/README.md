@@ -1,5 +1,8 @@
 # Packaging the native reader
 
+For the single-file per-user Windows setup executable, see
+[Windows packaging](windows/README.md).
+
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
