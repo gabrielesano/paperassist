@@ -34,7 +34,7 @@ def user_folder(number):
     return Path(buffer.value)
 
 
-def visible_reader_window(pid):
+def reader_windows(pid):
     user = ctypes.WinDLL("user32", use_last_error=True)
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
@@ -51,11 +51,17 @@ def visible_reader_window(pid):
             title = ctypes.create_unicode_buffer(1024)
             user.GetWindowTextW(window, title, len(title))
             if "PaperAssist" in title.value:
-                found.append(window)
+                found.append((window, title.value))
         return True
 
     user.EnumWindows(visit, 0)
-    return found[0] if found else None
+    return found
+
+
+def visible_reader_window(pid):
+    windows = reader_windows(pid)
+    return next((window for window, title in windows if title.endswith(" — PaperAssist")),
+                windows[0][0] if windows else None)
 
 
 def tree_hashes(root):
@@ -180,10 +186,16 @@ class WindowsInstallerTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, "Maintenance must refuse a running GUI")
                 self.assertIsNone(proc.poll(), "Maintenance terminated the reader")
                 self.assertEqual(hashlib.sha256(self.binary.read_bytes()).hexdigest(), executable_before)
-            user = ctypes.WinDLL("user32")
+            window = visible_reader_window(proc.pid)
+            self.assertIsNotNone(window, f"Reader window disappeared: {reader_windows(proc.pid)}")
+            print(f"Reader windows before close: {reader_windows(proc.pid)}", flush=True)
+            user = ctypes.WinDLL("user32", use_last_error=True)
             user.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-            user.PostMessageW(window, 0x0010, 0, 0)
-            self.assertEqual(proc.wait(timeout=15), 0)
+            self.assertTrue(user.PostMessageW(window, 0x0010, 0, 0), f"WM_CLOSE failed: {ctypes.get_last_error()}")
+            try:
+                self.assertEqual(proc.wait(timeout=15), 0)
+            except subprocess.TimeoutExpired:
+                self.fail(f"Reader did not close; remaining windows: {reader_windows(proc.pid)}")
         finally:
             if proc.poll() is None:
                 proc.terminate()
