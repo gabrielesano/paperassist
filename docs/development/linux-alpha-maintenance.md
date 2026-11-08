@@ -81,15 +81,45 @@ were not overwritten. Package `--verify` and all entries in `SHA256SUMS` pass.
 The integrated run is recorded in `/tmp/paperassist-a3-acceptance.log`; real-package
 maintenance checks are in `/tmp/paperassist-a3-real-package.log`.
 
+## GitHub CI verification
+
+After the cross-platform and logging fixes, the full local Python suite ran
+719 tests successfully (four skipped); all 61 Node tests also passed.
+
+The source was committed and pushed. On commit `2a4b1bc`, all five jobs in
+[CI run 42465633457](https://github.com/gabrielesano/paperassist/actions/runs/42465633457)
+passed: Python 3.11 and 3.13 on Ubuntu and Windows, plus Node tests. All three
+jobs in [Build run 42465654356](https://github.com/gabrielesano/paperassist/actions/runs/42465654356)
+also passed: Ubuntu 22.04, Windows, and macOS bundles and self-tests.
+
+The Ubuntu job inspected **148 ELF files**, with maximum **GLIBC_2.35**, and
+passed installation, installed-executable self-test, uninstallation, and 42
+frozen-bundle/installer/desktop tests. Its provenance records a clean checkout,
+Ubuntu 22.04.5, Python 3.13.18, GLIBCXX_3.4.30, and CXXABI_1.3.13.
+
+The downloaded Ubuntu installer is distinct from the earlier Fedora-built a3:
+70,252,883 bytes, SHA-256
+`fc2957c4dc9653e7f143294d6ce9b18e79ba55f9753a03bb0ac03fb507eee94e`.
+Its detached checksum and embedded payload verification passed locally. These
+values identify that particular CI run, not subsequent rebuilds.
+
+CI verification also corrected Linux build prerequisites for three XCB libraries
+and restricted POSIX launcher tests to Linux. The Wayland subprocess test emits
+a diagnostic through Qt logging and explicitly enables its category, so it tests
+filtering and raw-log opt-out without depending on a naturally occurring Qt race
+or on logging rules inherited from legacy desktop tests. The Linux artifact upload
+keeps the archive beside the installer and checksum manifest.
+
 ## Remaining release limits
 
 This local bundle still requires **glibc >= 2.42**. The corrected GLIBC_2.35
-gate rejects it, as expected. The Ubuntu 22.04 CI build and clean Ubuntu/Debian
-installation remain unexecuted; no portable Linux compatibility is claimed.
+gate rejects it, as expected. The separate Ubuntu CI build meets the GLIBC_2.35
+gate. A clean Ubuntu/Debian desktop installation and GUI acceptance remain
+unverified; runner self-tests do not establish that broader compatibility.
 
 Older installer/uninstaller scripts cannot be retrofitted with the new locking
 protocol. Do not run historical a1/a2 maintenance concurrently with a3. Normal
 sequential upgrade from a2 is verified.
 
-No personal library was used, and no commit, push, or release publication was
-performed.
+No personal library was used. Source commits were pushed to `main`; no release
+tag or release publication was created.

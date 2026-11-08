@@ -47,8 +47,8 @@ Key design principles:
   - Local Host Environment: Fedora Linux 43 `x86_64` (`Linux-7.2.8-100.fc43.x86_64-x86_64-with-glibc2.42`, Python `3.14.7`, PyInstaller `6.22.3`).
   - Empirical ELF `GLIBC_*` Floor: PyInstaller bootloader requires `GLIBC_2.14`, while bundled system shared objects (`_internal/libtinfo.so.6`, `_internal/libpython3.14.so.1.0`) require `GLIBC_2.42`. Consequently, this local build strictly requires **`glibc >= 2.42`** and runs on Fedora 43+ or equivalent rolling distributions.
 - **CI Build Configuration (`.github/workflows/build.yml`)**:
-  - Configured for `ubuntu-22.04` (`glibc >= 2.35`) in the `build-linux` job with an ELF `GLIBC <= 2.35` verification gate.
-  - Notice: This CI job is configured in repository workflow YAML, but has not yet been executed in GitHub Actions or a local Ubuntu 22.04 / Debian 12 container/VM in this offline development environment. Compatibility with older distributions cannot be assumed until an Ubuntu 22.04 build is executed and verified on a clean target OS.
+  - The Linux `bundle` matrix job runs on `ubuntu-22.04`, with an ELF `GLIBC <= 2.35` gate.
+  - The a3 build passed that gate and installation/self-test/uninstallation checks in [Build run 42465654356](https://github.com/gabrielesano/paperassist/actions/runs/42465654356). See the current maintenance report for provenance and artifact hashes. A clean Ubuntu/Debian desktop remains unverified.
 *(Historical Review Evidence: `dist/PaperAssist-0.1.0a1-linux-x86_64.sh` [56,238,650 bytes, SHA-256: `8fbdf9e3bf42199cc19dc24858be6b13722fdf1d4952e2267d96087d4d4aa868`] is retained in `dist/` alongside `tmp/qa/release-review/recovery-findings.json`).*
 
 ## CLI Usage

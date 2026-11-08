@@ -352,6 +352,7 @@ class WaylandCompositorEndToEndTests(unittest.TestCase):
             "NO_AT_BRIDGE": "1",
             "QT_NO_PORTAL": "1",
             "QT_QPA_PLATFORM": "wayland",
+            "QT_LOGGING_RULES": "qt.qpa.wayland.textinput.warning=true",
         }
         if not install_filter:
             env["PAPERASSIST_RAW_QT_LOGS"] = "1"

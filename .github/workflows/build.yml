@@ -37,7 +37,6 @@ jobs:
         run: |
           python packaging/installer/build_installer.py --bundle-dir dist/PaperAssist --desktop-dir packaging/desktop --output-dir dist
           tar -czf dist/PaperAssist-Linux.tar.gz -C dist PaperAssist
-          cp dist/PaperAssist-Linux.tar.gz PaperAssist-Linux.tar.gz
           (cd dist && sha256sum PaperAssist-*-linux-x86_64.sh PaperAssist-Linux.tar.gz > SHA256SUMS)
 
       - name: Verify installer checksums and integrity
@@ -84,7 +83,7 @@ jobs:
             dist/SHA256SUMS
             dist/PaperAssist/THIRD-PARTY-NOTICES.txt
             dist/PaperAssist/BUILD-PROVENANCE.json
-            PaperAssist-Linux.tar.gz
+            dist/PaperAssist-Linux.tar.gz
 
       - if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
