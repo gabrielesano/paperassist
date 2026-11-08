@@ -17,6 +17,7 @@ if pdf_available and PySide6:
     from paperassist import references
     from paperassist.native.engine import Pdf, Rect
     from paperassist.native.renderer import RenderClient
+    from paperassist.native.references_panel import ReferencesPanel
     from paperassist.native.window import MainWindow
     from paperassist.workspace import Workspace
     from test_library_window import cited_pdf
@@ -41,6 +42,26 @@ class CitationRevealTests(unittest.TestCase):
                 return True
             time.sleep(.002)
         return condition()
+
+    def test_click_history_is_per_source_and_reference(self):
+        panel = ReferencesPanel(None)
+        first = {"id": 1, "local_document_id": 10}
+        second = {"id": 2, "local_document_id": 20}
+        missing = {"id": 3}
+        with patch.object(panel, "_reference_open") as opened, patch.object(panel, "_reveal_reference") as revealed:
+            panel.document_id = 100
+            for ref in (first, first, first, second, second, missing, missing):
+                panel._follow_citation(ref)
+            self.assertEqual([call.args[0] for call in opened.call_args_list], [first, second])
+            self.assertEqual([call.args[0] for call in revealed.call_args_list],
+                             [first, first, second, missing, missing])
+            panel.document_id = 200
+            panel._follow_citation(first)
+            self.assertEqual(opened.call_count, 3)
+            panel.document_id = 100
+            panel._follow_citation(first)
+            self.assertEqual(revealed.call_count, 6)
+        panel.deleteLater()
 
     def test_mouse_click_opens_local_reference_and_reveals_missing_reference(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -102,6 +123,36 @@ class CitationRevealTests(unittest.TestCase):
                     quick = tab.quick
                     self.assertEqual((view.zoom, view.verticalScrollBar().value(), view.horizontalScrollBar().value(),
                                       list(view.history), view.doc.pdf.data), before)
+                    metadata_before = references.get(workspace.library, main["id"])
+                    quick.view.goto(2)
+                    self.pump()
+                    quick_before = (quick.view.zoom, quick.view.verticalScrollBar().value(),
+                                    quick.view.horizontalScrollBar().value(), list(quick.view.history),
+                                    quick.view.doc.pdf.data)
+                    for click in range(2):
+                        panel.filter.setText("no match")
+                        if click == 0:
+                            window.comments.show_mode("comments")
+                            window.set_columns(details=False)
+                            self.pump()
+                        else:
+                            quick_before = (quick.view.zoom, quick.view.verticalScrollBar().value(),
+                                            quick.view.horizontalScrollBar().value(), list(quick.view.history),
+                                            quick.view.doc.pdf.data)
+                        position = view._band(0, Rect(*view.doc.links(0)[0].rect)).center().toPoint()
+                        QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, position)
+                        self.pump()
+                        self.assertTrue(window.details_column.isVisible())
+                        self.assertEqual(window.detail_switch.mode, "references")
+                        self.assertEqual(panel.expanded, first["id"])
+                        self.assertEqual(panel.filter.text(), "")
+                        self.assertEqual(panel.list.currentItem().data(Qt.UserRole + 1), first["id"])
+                        self.assertIs(tab.quick, quick)
+                        if click == 1:
+                            self.assertEqual((quick.view.zoom, quick.view.verticalScrollBar().value(),
+                                              quick.view.horizontalScrollBar().value(), list(quick.view.history),
+                                              quick.view.doc.pdf.data), quick_before)
+                    self.assertEqual(references.get(workspace.library, main["id"]), metadata_before)
                     second = next(ref for ref in panel.refs if ref["label"] == "2")
                     link = view.doc.links(0)[1]
                     position = view._band(0, Rect(*link.rect)).center().toPoint()

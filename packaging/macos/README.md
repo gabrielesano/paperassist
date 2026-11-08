@@ -43,9 +43,11 @@ through the copied executable in an isolated home outside the checkout.
 
 The copied app is also launched through LaunchServices with a native Cocoa
 window. The test checks window ownership and dimensions through CoreGraphics,
-and confirms that the renderer runs from the copied frozen executable. SIGTERM
-must close the app, persist the reading position, and leave the source PDF and
-unsaved-revision directory unchanged. These checks do not automate every editing
+and confirms that the renderer runs from the copied frozen executable. Both a
+normal app launch and a launch with a PDF argument are exercised. SIGTERM must
+close the app and leave the source PDF, stored original, and unsaved-revision
+directory unchanged. Standalone file mode must leave the library catalog
+untouched. These checks do not automate every editing
 workflow or establish compatibility with older macOS versions.
 
 Updating means quitting PaperAssist and replacing its app in Applications.

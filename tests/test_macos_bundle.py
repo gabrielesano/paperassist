@@ -1,12 +1,12 @@
 """Acceptance of the mounted Apple Silicon disk image and copied application."""
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import plistlib
 import signal
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -14,6 +14,7 @@ import time
 import unittest
 
 from paperassist import __version__
+from paperassist.workspace import Workspace
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "dist/PaperAssist.app"
@@ -116,45 +117,58 @@ class MacOSBundleTests(unittest.TestCase):
             swift.write_text(LAUNCHER)
             launcher = root / "launch"
             command("swiftc", str(swift), "-o", str(launcher))
-            library = root / "library"
-            launched = command(str(launcher), str(copied), "--data-dir", str(library), str(pdf), env=env, cwd=root)
-            pid = int(launched.stdout.strip().splitlines()[-1])
+            library = home / "Library/Application Support/PaperAssist"
+            workspace = Workspace(library)
             try:
-                deadline = time.monotonic() + 20
-                while time.monotonic() < deadline:
-                    probe = subprocess.run([str(launcher), "window", str(pid)], capture_output=True, timeout=5)
-                    processes = command("ps", "-axo", "pid=,ppid=,command=").stdout.splitlines()
-                    worker = any(
-                        len(parts := line.split(None, 2)) == 3 and parts[1] == str(pid)
-                        and str(binary) in parts[2] and "multiprocessing-fork" in parts[2]
-                        for line in processes
-                    )
-                    if probe.returncode == 0 and worker:
-                        break
-                    time.sleep(0.2)
-                else:
-                    matching = [line for line in processes if str(binary) in line]
-                    self.fail(f"Missing PDF window or frozen worker: window={probe.returncode == 0}, worker={worker}; {matching}")
-                os.kill(pid, signal.SIGTERM)
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline:
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        pid = None
-                        break
-                    time.sleep(0.1)
-                self.assertIsNone(pid, "Application did not close cleanly")
-                with sqlite3.connect(library / "library.sqlite3") as db:
-                    self.assertGreater(db.execute("SELECT count(*) FROM document_views").fetchone()[0], 0)
-                self.assertEqual(pdf.read_bytes(), original)
-                self.assertEqual(list((library / "working").glob("*.pdf")), [])
+                stored = workspace.library.import_stream(io.BytesIO(original), "sample.pdf")
+                stored_pdf = workspace.library.get_path(stored["id"], annotated=False)
             finally:
-                if pid is not None:
+                workspace.close()
+            catalog = library / "library.sqlite3"
+            catalog_before = catalog.read_bytes()
+            # File arguments use standalone mode; a normal Finder launch opens
+            # the default library. Exercise both without conflating their state.
+            for arguments in ((str(pdf),), ()):
+                with self.subTest(arguments=arguments):
+                    launched = command(str(launcher), str(copied), *arguments, env=env, cwd=root)
+                    pid = int(launched.stdout.strip().splitlines()[-1])
                     try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                        deadline = time.monotonic() + 20
+                        while time.monotonic() < deadline:
+                            probe = subprocess.run([str(launcher), "window", str(pid)], capture_output=True, timeout=5)
+                            processes = command("ps", "-axo", "pid=,ppid=,command=").stdout.splitlines()
+                            worker = any(
+                                len(parts := line.split(None, 2)) == 3 and parts[1] == str(pid)
+                                and str(binary) in parts[2] and "multiprocessing-fork" in parts[2]
+                                for line in processes
+                            )
+                            if probe.returncode == 0 and worker:
+                                break
+                            time.sleep(0.2)
+                        else:
+                            matching = [line for line in processes if str(binary) in line]
+                            self.fail(f"Missing window or frozen worker: window={probe.returncode == 0}, worker={worker}; {matching}")
+                        os.kill(pid, signal.SIGTERM)
+                        deadline = time.monotonic() + 10
+                        while time.monotonic() < deadline:
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                pid = None
+                                break
+                            time.sleep(0.1)
+                        self.assertIsNone(pid, "Application did not close cleanly")
+                        if arguments:
+                            self.assertEqual(catalog.read_bytes(), catalog_before)
+                        self.assertEqual(pdf.read_bytes(), original)
+                        self.assertEqual(stored_pdf.read_bytes(), original)
+                        self.assertEqual(list((library / "working").glob("*.pdf")), [])
+                    finally:
+                        if pid is not None:
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
 
 
 if __name__ == "__main__":

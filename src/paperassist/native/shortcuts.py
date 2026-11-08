@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel, Q
 
 from paperassist.library import MAX_LABEL
 
-from .library_source import display_title
 from .positions import current_page
 from .theme import DIALOG_BG, INK, LINE, MUTED, icon, serif_heading_font
 from .toolbar import reserve_zoom_width
@@ -375,7 +374,7 @@ class Shortcuts(QObject):
         if tab is None or self.editor:
             return
         bar = self.window.tabs.tabBar()
-        self.editor = RenameEdit(bar, tab.main.title)
+        self.editor = RenameEdit(bar, tab.title)
         self.editor.setGeometry(bar.tabRect(index))
         self.editor.done.connect(lambda keep, editor=self.editor: self._renamed(editor, tab, keep))
         self.editor.show()
@@ -392,26 +391,12 @@ class Shortcuts(QObject):
         if had_focus:
             self.window.tabs.tabBar().setFocus()
         if keep and self.window.tabs.indexOf(tab) >= 0:
-            self.set_label(tab.main, text)
+            self.set_label(tab, text)
 
-    def set_label(self, pane, text):
-        """Name a paper's tab. Library papers share the label with the web reader; loose files keep it for the session."""
-        window, source, text = self.window, pane.view.doc.source, " ".join(text.split())
-        try:
-            if window.workspace and hasattr(source, "document_id"):
-                library = window.workspace.library
-                default = display_title({**library.get_document(source.document_id), "label": ""})
-                title = display_title(library.set_label(source.document_id, "" if text == default else text))
-            else:
-                title = text or source.path.name
-        except Exception as error:  # a failed rename must not interrupt reading
-            window.statusBar().showMessage(f"Could not rename the tab: {error}", 8000)
-            return
-        for each in window.all_panes():
-            if each.key == pane.key:
-                each.view.doc.source.title = title
-                each.refresh_bar()
-        window.refresh()
+    def set_label(self, tab, text):
+        """Set a session-only name for this tab without changing its paper."""
+        tab.label = " ".join(text.split())
+        self.window.refresh()
 
     # ---- fields ----------------------------------------------------------------------------
     def eventFilter(self, watched, event):

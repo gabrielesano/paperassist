@@ -46,6 +46,10 @@ The outline belongs to the main paper
 of the current tab; when no outline exists, page navigation remains available.
 References belong to that main paper; comments identify the active document.
 
+Renaming a tab sets a session-only name for that tab. It must not change the
+library title or label, the filename, PDF bytes, or other views of the same paper.
+Clearing the name restores the paper's current display title.
+
 Opening a paper from a sidebar reference shows it in the lower preview. Clicking
 a citation link in the main PDF opens the cited paper in that preview when a
 valid copy is available in the library. Otherwise it reveals and selects the
@@ -55,7 +59,11 @@ position and does not jump to the bibliography. A missing paper leaves an existi
 quick view untouched. Ambiguous or grouped citations offer a choice in the sidebar;
 the chosen reference follows the same local-or-missing rule. Papers not yet
 available offer retrieval and prefilled search. Ordinary section, figure and
-table links keep their normal PDF navigation.
+table links keep their normal PDF navigation. Within a window session, the second
+and all subsequent clicks on the same reference reveal its card in the right
+column, including when the cited paper is already open. They must not reopen or
+navigate the cited PDF. Click history is independent for each source paper and
+reference.
 
 Existing ink, highlights and comments can be selected, recolored and deleted using
 contextual controls in the top toolbar. Tool menus must not float over the PDF.

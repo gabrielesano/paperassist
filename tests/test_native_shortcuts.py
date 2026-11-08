@@ -1,5 +1,7 @@
 """Keyboard shortcuts of the native window: navigation, tabs, columns, rename, help and key conflicts."""
 import io
+from contextlib import closing
+import sqlite3
 import tempfile
 import unittest
 from collections import Counter
@@ -237,16 +239,50 @@ class ShortcutTests(unittest.TestCase):
         QTest.keyClicks(editor, text) if text else QTest.keyClick(editor, Qt.Key_Delete)
         finish(editor)
 
-    def test_double_click_renames_a_library_paper_and_the_label_is_shared(self):
+    def test_double_click_renames_only_the_tab(self):
         document = self.workspace.library.import_stream(io.BytesIO(self.paths[0].read_bytes()), "alpha.pdf")
         self.window.open_library_document(document["id"])
+        quick = self.window.open_library_document_in_quick_view(document["id"])
+        with closing(sqlite3.connect(self.workspace.library.db_path)) as db:
+            before = list(db.iterdump())
+        original_document = self.workspace.library.get_document(document["id"])
+        pdf_path = self.workspace.library.get_path(document["id"])
+        pdf_before = pdf_path.read_bytes()
+        title = self.window.tab().main.title
         bar = self.window.tabs.tabBar()
         QTest.mouseDClick(bar, Qt.LeftButton, Qt.NoModifier, bar.tabRect(0).center())
         self.edit_tab_name("Loops review", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
-        self.assertEqual(self.workspace.library.get_document(document["id"])["label"], "Loops review")
+        with closing(sqlite3.connect(self.workspace.library.db_path)) as db:
+            self.assertEqual(list(db.iterdump()), before)
+        self.assertEqual(pdf_path.read_bytes(), pdf_before)
+        self.assertEqual(self.workspace.library.get_document(document["id"]), original_document)
+        self.assertEqual(self.window.tab().main.title, title)
+        self.assertEqual(quick.title, title)
         self.assertTrue(self.window.tabs.tabText(0).startswith("Loops review"))
-        self.assertEqual(self.workspace.library.get_document(document["id"])["filename"], "alpha.pdf")
+        self.assertIn("Loops review", self.window.tabs.tabToolTip(0))
+        self.assertIn("Loops review", bar.accessibleTabName(0))
         self.assertTrue(bar.hasFocus())
+
+        # A metadata refresh changes the underlying paper title, not this alias.
+        self.window.tab().main.view.doc.source.title = "Corrected title"
+        self.window.refresh()
+        self.assertTrue(self.window.tabs.tabText(0).startswith("Loops review"))
+        self.window.shortcuts.rename_tab(0)
+        self.edit_tab_name("", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
+        self.assertTrue(self.window.tabs.tabText(0).startswith("Corrected title"))
+
+    def test_alias_is_independent_for_two_tabs_of_the_same_paper(self):
+        document = self.workspace.library.import_stream(io.BytesIO(self.paths[0].read_bytes()), "alpha.pdf")
+        first = self.window.open_library_document(document["id"])
+        second = self.window._add_tab(self.window._wrap(self.window._open_pane(self.window.library_source(document["id"]))))
+        self.window.shortcuts.set_label(first, "First tab")
+        self.assertEqual(first.title, "First tab")
+        self.assertNotEqual(second.title, "First tab")
+        self.assertIn("First tab", self.window.tabs.tabToolTip(0))
+        self.assertNotIn("First tab", self.window.tabs.tabToolTip(1))
+        self.window.close_tab(0)
+        self.assertNotEqual(self.window.tab().title, "First tab")
+        self.assertEqual(self.workspace.library.get_document(document["id"])["label"], "")
 
     def test_ampersand_in_tab_title_escapes_mnemonic_in_tab_text(self):
         document = self.workspace.library.import_stream(io.BytesIO(self.paths[0].read_bytes()), "alpha.pdf")
@@ -278,7 +314,8 @@ class ShortcutTests(unittest.TestCase):
         self.assertEqual(self.window.tabs.tabText(0), original)
         self.window.shortcuts.rename_tab(0)
         self.edit_tab_name("Kept", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
-        self.assertEqual(self.workspace.library.get_document(document["id"])["label"], "Kept")
+        self.assertEqual(self.workspace.library.get_document(document["id"])["label"], "")
+        self.assertTrue(self.window.tabs.tabText(0).startswith("Kept"))
         self.window.shortcuts.rename_tab(0)
         self.edit_tab_name("", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
         self.assertEqual(self.workspace.library.get_document(document["id"])["label"], "")
@@ -294,7 +331,8 @@ class ShortcutTests(unittest.TestCase):
         self.window.pane().view.setFocus()
         self.app.processEvents()
         self.assertTrue(self.window.tabs.tabText(0).startswith("Session name"))
-        self.assertEqual(self.window.pane().title, "Session name")
+        self.assertEqual(self.window.tab().title, "Session name")
+        self.assertEqual(self.window.pane().title, "paper0.pdf")
         self.assertEqual(self.paths[0].name, "paper0.pdf")  # a loose file keeps its name on disk
         self.window.shortcuts.rename_tab(0)
         self.edit_tab_name("", lambda editor: QTest.keyClick(editor, Qt.Key_Return))

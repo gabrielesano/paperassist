@@ -144,6 +144,7 @@ class ReferencesPanel(QWidget):
         self.loaded = {}
         self.series, self.located = weakref.WeakKeyDictionary(), weakref.WeakKeyDictionary()
         self.stepping, self.pending_reload = set(), set()
+        self.followed_citations = set()
         self.payload_status = "not_analyzed"
         self.pending_citation = None
         self.filters, self.analyzing = {}, {}  # filter text and running jobs, by document id
@@ -548,7 +549,10 @@ class ReferencesPanel(QWidget):
         return True
 
     def _follow_citation(self, ref):
-        if ref.get("local_document_id") and not ref.get("local_invalid"):
+        key = (self.document_id, ref["id"])
+        first = key not in self.followed_citations
+        self.followed_citations.add(key)
+        if first and ref.get("local_document_id") and not ref.get("local_invalid"):
             self._reference_open(ref)
         else:
             self._reveal_reference(ref)

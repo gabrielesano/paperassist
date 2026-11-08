@@ -56,6 +56,7 @@ class DocTab(QSplitter):
     def __init__(self, main, side_by_side=False):
         super().__init__(Qt.Vertical)
         self.main, self.quick, self.active = main, None, main
+        self.label = ""
         self.side_by_side, self._narrow = side_by_side, False
         self.shares = {Qt.Vertical: 0.4, Qt.Horizontal: 0.5}
         self.setChildrenCollapsible(False)
@@ -63,6 +64,10 @@ class DocTab(QSplitter):
         self.addWidget(main)
         main.view.activated.connect(lambda: self.activate(main))
         self.splitterMoved.connect(self._remember_share)
+
+    @property
+    def title(self):
+        return self.label or self.main.title
 
     def createHandle(self):
         return Handle(self.orientation(), self)

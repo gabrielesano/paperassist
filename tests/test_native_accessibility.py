@@ -28,11 +28,11 @@ class AccessibilityTests(LibraryWindowCase):
 
     def test_tab_close_buttons_identify_their_papers_after_rename_and_reorder(self):
         self.open_document(self.window, self.docs[1])
-        self.window.shortcuts.set_label(self.window.tab().main, "My reference")
+        self.window.shortcuts.set_label(self.window.tab(), "My reference")
         bar = self.window.tabs.tabBar()
         bar.moveTab(1, 0)
         for index in range(self.window.tabs.count()):
-            title = self.window.tabs.widget(index).main.title
+            title = self.window.tabs.widget(index).title
             buttons = [bar.tabButton(index, side) for side in (QTabBar.LeftSide, QTabBar.RightSide)]
             (button,) = [button for button in buttons if button is not None]
             self.assertEqual(QAccessible.queryAccessibleInterface(button).text(QAccessible.Name), f"Close {title}")
