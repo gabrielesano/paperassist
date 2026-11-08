@@ -67,6 +67,17 @@ sh ./PaperAssist-0.1.0a3-linux-x86_64.sh
 - **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` or `sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --uninstall`. Uninstallation removes only application-owned files, preserving your library, PDFs, notes, and preferences.
 - **Requirements & Compatibility:** Linux `x86_64`, `flock` from util-linux for installation and maintenance, X11 or Wayland, and system OpenGL/EGL libraries. The Fedora-built local candidate requires **glibc >= 2.42**. The Ubuntu 22.04 CI build passed its **GLIBC <= 2.35** audit, installation, self-test, and uninstallation checks; a clean Ubuntu/Debian desktop remains unverified. Obtain CI packages from the [Build workflow](https://github.com/gabrielesano/paperassist/actions/workflows/build.yml). Prior installers `0.1.0a1` and `0.1.0a2` are retained in `dist/` as historical review evidence. See the [maintenance follow-up](docs/development/linux-alpha-maintenance.md).
 
+#### macOS Apple Silicon
+
+The `PaperAssist-macOS` artifact in the [Build workflow](https://github.com/gabrielesano/paperassist/actions/workflows/build.yml)
+provides a `.dmg` for Apple Silicon Macs. Open it, drag **PaperAssist.app** to
+**Applications**, eject the disk image, and launch the app from Applications.
+Python and a Terminal command are not required.
+
+The alpha app is ad-hoc signed; Developer ID signing and notarization are still
+pending, so Gatekeeper may block the downloaded test app. See
+[macOS packaging](packaging/macos/README.md) for verification and current limits.
+
 #### Running from Source Checkout
 
 To run the native reader directly from a local development checkout:

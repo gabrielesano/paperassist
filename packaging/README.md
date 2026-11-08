@@ -1,5 +1,8 @@
 # Packaging the native reader
 
+For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
+[macOS packaging](macos/README.md). The Linux installer workflow is documented below.
+
 The current local candidate is **0.1.0a3**. It fixes maintenance locking,
 interrupted first-install recovery, and the CI ELF inspection gate. Build commands
 below produce the current source version. See the [maintenance verification](../docs/development/linux-alpha-maintenance.md)

@@ -2,10 +2,13 @@
 #   pyinstaller packaging/paperassist.spec --noconfirm --distpath dist --workpath build
 # See packaging/README.md.
 import importlib.util
+import os
+import re
 import shutil
 import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
+from paperassist import __version__
 
 root = Path(SPECPATH).parent
 
@@ -98,7 +101,11 @@ a.binaries = [entry for entry in a.binaries if not unwanted(entry)]
 a.datas = [entry for entry in a.datas if not unwanted(entry)]
 
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="PaperAssist", console=True)
+exe = EXE(
+    pyz, a.scripts, [], exclude_binaries=True, name="PaperAssist",
+    console=sys.platform != "darwin",
+    target_arch="arm64" if sys.platform == "darwin" else None,
+)
 coll = COLLECT(exe, a.binaries, a.datas, name="PaperAssist")
 
 # Ensure top-level license, notice, and build provenance files exist at root of the bundle (dist/PaperAssist/)
@@ -108,3 +115,19 @@ if bundle_dir.is_dir():
     shutil.copy2(notices_path, bundle_dir / "THIRD-PARTY-NOTICES.txt")
     if generate_provenance:
         generate_provenance(bundle_dir, root)
+
+if sys.platform == "darwin":
+    # Include provenance before BUNDLE seals its resources with an ad-hoc signature.
+    app = BUNDLE(
+        coll,
+        [("BUILD-PROVENANCE.json", str(bundle_dir / "BUILD-PROVENANCE.json"), "DATA")],
+        name="PaperAssist.app",
+        icon=str(root / "build" / "icons" / "PaperAssist.icns"),
+        bundle_identifier="org.paperassist.PaperAssist",
+        version=re.match(r"\d+\.\d+\.\d+", __version__).group(),
+        info_plist={
+            "CFBundleVersion": os.environ.get("GITHUB_RUN_NUMBER", "1"),
+            "CFBundleGetInfoString": f"PaperAssist {__version__}",
+            "LSApplicationCategoryType": "public.app-category.productivity",
+        },
+    )

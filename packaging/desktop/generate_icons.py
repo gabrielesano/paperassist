@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Ensure offscreen Qt platform before importing QtGui/QtWidgets
@@ -113,14 +115,26 @@ def main() -> int:
         default=Path(__file__).resolve().parent,
         help="Target directory for generated icons (default: script directory)",
     )
+    parser.add_argument("--icns", type=Path, help="Also generate a macOS ICNS icon (requires iconutil)")
     args = parser.parse_args()
 
     out_dir = args.output_dir
+    app = QApplication.instance() or QApplication(["generate_icons", "-platform", "offscreen"])
     svg_file = out_dir / "paperassist.svg"
     png_file = out_dir / "paperassist.png"
 
     generate_svg(svg_file)
     generate_png(png_file)
+    if args.icns:
+        args.icns.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="paperassist-icon-") as temporary:
+            iconset = Path(temporary) / "PaperAssist.iconset"
+            iconset.mkdir()
+            for size in (16, 32, 128, 256, 512):
+                for scale in (1, 2):
+                    suffix = "@2x" if scale == 2 else ""
+                    generate_png(iconset / f"icon_{size}x{size}{suffix}.png", size * scale)
+            subprocess.run(["iconutil", "-c", "icns", "-o", str(args.icns), str(iconset)], check=True)
     print(f"Generated {svg_file} ({svg_file.stat().st_size} bytes)")
     print(f"Generated {png_file} ({png_file.stat().st_size} bytes)")
     return 0
