@@ -2,106 +2,85 @@
 
 Reading a research paper is rarely linear. Half the time you are scrolling to the back to check who *Vance & Lindström (2022)* is, hunting through a `Downloads` folder full of cryptic publisher filenames to see if you already have that PDF, and losing your place in the paragraph you were actually trying to understand.
 
-**PaperAssist** is a calm, local reading desk and shared library for scientific PDFs. It runs a tiny server on your computer and opens in your web browser—no account, no cloud sync, no telemetry, and no language models guessing at your bibliography. Your PDFs, highlights, drawings, and notes stay on your machine, and nothing touches the network unless you explicitly search for a reference.
+**PaperAssist** is a calm, local reading desk and shared library for scientific PDFs. It runs as a self-contained native desktop application built with Qt Widgets and PDFium, with no PaperAssist account, cloud sync, background web server, telemetry, or language models. Reading and local import work offline; optional online reference actions use external services only when requested. A library can reuse the same PDF across multiple source papers; it is not a cloud collaboration service.
 
-> **Project status:** Alpha. Reading, highlighting, drawing, phrase-linked comments, and local library management are ready for daily use; bibliography extraction and open-access retrieval work well on standard journal layouts and are actively improving.
+> **Project status:** Alpha (`0.1.0a3`). Reading, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
+
+The screenshots below show the current native `0.1.0a3` reader on Linux with synthetic papers and a disposable library. System fonts and window appearance vary by platform.
 
 ![PaperAssist workspace showing the document outline on the left, a main paper with a cited paper open in Quick view below it, and ranked references on the right](docs/screenshots/workspace-split-view.png)
 
 ---
 
-## Quick start
+## Installation & Quick Start
 
-Requires **Python 3.11** or newer.
+PaperAssist can be installed as a standalone desktop application (with Python, Qt, and PDFium bundled inside—no Python setup required) or run directly from a source checkout.
+
+Download installers and their matching `.sha256` files from the [0.1.0a3 alpha release](https://github.com/gabrielesano/paperassist/releases/tag/v0.1.0a3). Platform provenance, third-party notices, and a combined checksum manifest are attached there too. These files require repository access while the repository is private.
+
+### Linux (`x86_64`) — Standalone Installer
+
+For 64-bit Linux, PaperAssist provides a self-extracting per-user installer script (`PaperAssist-0.1.0a3-linux-x86_64.sh`) that requires **no `sudo` or root permissions**:
 
 ```bash
-pipx install git+https://github.com/gabrielesano/paperassist
-paperassist
+# 1. Verify package integrity (optional but recommended)
+sha256sum -c PaperAssist-0.1.0a3-linux-x86_64.sh.sha256
+sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --verify
+
+# 2. Install for your user account
+sh ./PaperAssist-0.1.0a3-linux-x86_64.sh
 ```
 
-Running `paperassist` starts the local server and opens your reading desk in the default browser. Press `Ctrl+C` in the terminal when you are done.
+- **Launch:** Open **PaperAssist** from your desktop application menu, or run `paperassist` from a terminal (`~/.local/bin/paperassist`). You can also pass PDF files directly (`paperassist paper.pdf`) to read them immediately without importing them into your library first.
+- **What gets installed where:** By default, application files live in `~/.local/share/paperassist-app`, the launcher in `~/.local/bin/paperassist`, and the desktop entry and icons under `~/.local/share/applications` and `~/.local/share/icons`. The installer respects XDG data directories. Your research library (`~/.local/share/paperassist`) and preferences (`~/.config/paperassist/config.json`) are kept separate and are not changed by the installer.
+- **Upgrade:** Close PaperAssist and run the newer installer script (`sh ./PaperAssist-<new-version>-linux-x86_64.sh`). Upgrades verify a staged bundle before swapping application directories. Detected failures roll back; a process interruption may require `--repair`.
+- **Repair:** After an interrupted upgrade, run `sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --repair` to recover the previous committed installation. After an interrupted first install, repair clears incomplete owned state; rerun the installer to install the app.
+- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` (or `sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --uninstall`). Only application-owned files are removed; your library, PDFs, annotations, and settings remain untouched.
+- **System requirements:** Linux `x86_64`, `glibc >= 2.35`, `flock` (`util-linux`), X11 or Wayland, and Qt's system OpenGL/EGL and display libraries. The published installer was built on Ubuntu 22.04 and passed its ELF compatibility gate and install/self-test/uninstall checks. A clean Ubuntu/Debian desktop trial remains outstanding; see [packaging details](packaging/README.md).
 
-If you prefer a regular virtual environment instead of `pipx`, `pip install git+https://github.com/gabrielesano/paperassist` works the same way. To run directly from a source checkout:
+### Windows (`x86_64`)
+
+Download `PaperAssist-0.1.0a3-windows-x86_64-setup.exe` from the release and run the setup wizard. It installs for the current user in `%LOCALAPPDATA%\Programs\PaperAssist`, without administrator privileges, and creates a Start menu shortcut; a desktop shortcut is optional. Launch the installed app without a console window.
+
+Close PaperAssist before upgrading or uninstalling. Run the newer setup EXE to update, or remove PaperAssist through Windows Settings. The library and preferences remain separate from the application and are preserved. The alpha installer is not Authenticode-signed, so Windows may show an unknown-publisher or SmartScreen prompt. Windows CI tests installation, the native window, the render worker, upgrade, and uninstall; see [Windows packaging](packaging/windows/README.md).
+
+### macOS (Apple Silicon)
+
+Download `PaperAssist-0.1.0a3-macos-arm64.dmg` from the release. This package supports Apple Silicon only:
+
+1. Open the `.dmg` disk image and drag **PaperAssist.app** into **Applications**.
+2. Eject the disk image and launch **PaperAssist** from Applications (no Python or Terminal required).
+
+*Note on macOS Gatekeeper:* Alpha builds are ad-hoc signed but are not Developer ID signed or notarized. Gatekeeper may block a downloaded app; creating a DMG does not establish publisher trust. To update, quit PaperAssist and replace `PaperAssist.app` in Applications; moving the app to Trash leaves your library and preferences intact. CI verifies the copied app, signature, rendering, and native Cocoa window on its Apple Silicon runner; older macOS versions are not verified. See [macOS packaging](packaging/macos/README.md).
+
+### Run from a Source Checkout (Linux, macOS, Windows)
+
+If you prefer running from source with **Python 3.11+**:
 
 ```bash
 git clone https://github.com/gabrielesano/paperassist
 cd paperassist
 python -m venv .venv
-.venv/bin/python -m pip install -e .      # Windows: .venv\Scripts\python
-.venv/bin/paperassist
-```
-
-### Desktop development preview
-
-From a checkout, install and launch the desktop window:
-
-```bash
-.venv/bin/python -m pip install -e '.[desktop]'
-.venv/bin/paperassist desktop
-```
-
-`paperassist-desktop` also launches it. If the library already has a running
-server, the window attaches to it and leaves it running on close. Otherwise it
-starts and stops its own server. Modified PDFs and comment drafts offer **Save**,
-**Discard**, or **Cancel**. Windows/macOS are unverified. See the
-[plan](docs/development/desktop-plan.md) and [verification](docs/development/desktop-verification.md).
-
-### Native reader
-
-#### Standalone Linux Installer (No Python Required)
-
-For Linux `x86_64`, PaperAssist provides a self-extracting standalone installer that includes the complete Python runtime, Qt Widgets/PySide6, and PDFium rendering stack:
-
-```bash
-# 1. Verify package integrity
-sha256sum -c PaperAssist-0.1.0a3-linux-x86_64.sh.sha256
-sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --verify
-
-# 2. Install per-user (no root / sudo required)
-sh ./PaperAssist-0.1.0a3-linux-x86_64.sh
-```
-
-- **Launch:** Start **PaperAssist** from your application menu, or run `paperassist` from a terminal (`~/.local/bin/paperassist`).
-- **Upgrade:** Re-run the installer script for a newer version (`sh ./PaperAssist-<new-version>-linux-x86_64.sh`). Upgrades stage in isolation and swap atomically, rolling back automatically if validation fails.
-- **Repair:** Recover an interrupted installation with `sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --repair`. After an interrupted first installation, repair removes unchanged integration files so installation can be retried; it reports that no prior installation exists to restore.
-- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` or `sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --uninstall`. Uninstallation removes only application-owned files, preserving your library, PDFs, notes, and preferences.
-- **Requirements & Compatibility:** Linux `x86_64`, `flock` from util-linux for installation and maintenance, X11 or Wayland, and system OpenGL/EGL libraries. The Fedora-built local candidate requires **glibc >= 2.42**. The Ubuntu 22.04 CI build passed its **GLIBC <= 2.35** audit, installation, self-test, and uninstallation checks; a clean Ubuntu/Debian desktop remains unverified. Obtain CI packages from the [Build workflow](https://github.com/gabrielesano/paperassist/actions/workflows/build.yml). Prior installers `0.1.0a1` and `0.1.0a2` are retained in `dist/` as historical review evidence. See the [maintenance follow-up](docs/development/linux-alpha-maintenance.md).
-
-#### macOS Apple Silicon
-
-The `PaperAssist-macOS` artifact in the [Build workflow](https://github.com/gabrielesano/paperassist/actions/workflows/build.yml)
-provides a `.dmg` for Apple Silicon Macs. Open it, drag **PaperAssist.app** to
-**Applications**, eject the disk image, and launch the app from Applications.
-Python and a Terminal command are not required.
-
-The alpha app is ad-hoc signed; Developer ID signing and notarization are still
-pending, so Gatekeeper may block the downloaded test app. See
-[macOS packaging](packaging/macos/README.md) for verification and current limits.
-
-#### Running from Source Checkout
-
-To run the native reader directly from a local development checkout:
-
-```bash
 .venv/bin/python -m pip install -e '.[native]'
 .venv/bin/python -m paperassist.native
 ```
 
-Missing native dependencies produce an installation message. The browser command
-`paperassist serve --open` remains available without the native extra. Standalone
-builds report missing components as an installation problem and recommend
-reinstalling the complete application.
+On Windows PowerShell, replace `.venv/bin/python` in both commands with `.venv\Scripts\python.exe`.
 
-### Command-line options
+### Command-line usage
+
+When installed via the standalone Linux installer, `paperassist` launches the native reader directly. When running from a Python environment, `python -m paperassist.native` launches the native reader, while the `paperassist` console script provides the CLI import tool and the transitional web fallback:
 
 | Command | What it does |
 | --- | --- |
-| `paperassist` | Start the local server and open the reader in your browser |
-| `paperassist serve [--open] [--host H] [--port N] [--data-dir DIR]` | Start the server without opening a browser (defaults to `127.0.0.1:8765`) |
-| `paperassist desktop [--port N] [--data-dir DIR]` | Open a dedicated desktop window (requires the desktop extra) |
-| `paperassist import PATH... [--data-dir DIR]` | Import PDF files or folders recursively from the terminal |
+| `paperassist [FILE.pdf ...] [--data-dir DIR]` *(standalone install)*<br>`.venv/bin/python -m paperassist.native [FILE.pdf ...] [--data-dir DIR]` *(from source)* | Open the native desktop reader (opens the Library window, or opens the given PDF files directly in tabs) |
+| `paperassist --self-test FILE.pdf` *(Linux standalone)*<br>`.venv/bin/python -m paperassist.native --self-test FILE.pdf` *(from source)* | Headlessly render page 1 of `FILE.pdf` via the frozen/native render worker to verify the runtime (exits `0` on success) |
+| `paperassist import PATH... [--data-dir DIR]` *(source CLI)* | Import PDF files or folders recursively into the library from the terminal |
+| `paperassist serve [--open] [--host H] [--port N] [--data-dir DIR]` *(source CLI)* | Run the transitional local web interface (`127.0.0.1:8765`) in your browser |
 
-Only one server runs per library at a time. If your library is already open, running `paperassist` simply opens a browser tab to the running instance. While the app is running, add new papers from **Library** inside the browser rather than running `paperassist import` in parallel.
+Only one instance accesses a library at a time (protected by a lock file inside the library folder). While the app is open, import new papers from the **Library** window (`L`) rather than running CLI imports against the same library in parallel.
+
+**Standalone-file mode:** Starting with PDF arguments opens those files without a library session. Library references and sidecar comments are available for imported papers in library mode. Saving a standalone PDF replaces that selected file; import it first if you want to preserve its original and store revisions separately. PDF file associations and delivery to an already-running instance are not implemented by the Windows/macOS packages.
 
 ---
 
@@ -109,24 +88,25 @@ Only one server runs per library at a time. If your library is already open, run
 
 ### Follow citations without losing your place
 
-PaperAssist extracts a paper's bibliography and ranks references in the right-hand **References** panel by how often they are cited in the paper you are currently reading.
+For imported papers, PaperAssist extracts the bibliography locally and ranks references in the right-hand **References** panel by detected citation frequency in the current paper. Extraction and counts may be incomplete.
 
-- **Stacked or side-by-side split view:** Clicking a reference that is already in your library opens it in **Quick view** right below your main paper, or **Side by side** with a single toggle—ideal when you hide the side panels (`B`) to compare two papers across the full width of your screen. Drag the divider to resize either split, or click **Open in tab** to promote the cited paper to its own tab with page and zoom intact.
-- **Independent controls for both panes:** Whenever Quick view is open, the top toolbar shows a dedicated **Second paper** bar with its own page jumper, search box, and zoom controls—so navigating the cited paper never disturbs the main paper.
-- **Step through every in-text mention:** Click a reference card (or its citation count badge) to jump from one in-text citation to the next. Each click centers the passage and briefly outlines the citation, wrapping around after the last one.
-- **Filter and nickname tabs:** Use **Filter references** (`/` key) to narrow long bibliographies by author, year, title, label, or DOI (ignoring case and accents; each tab remembers its own filter). Double-click any open tab—or focus it and press `F2`—to give it a short nickname like *"Vance 2022"* without altering its bibliographic title or filename on disk.
+- **Follow a citation:** The first click on a recognized in-text citation opens its available local PDF in Quick view; if it is missing, the click reveals its reference card without jumping to the bibliography. The second and later clicks on that reference reveal its card in the right column, even if its PDF is already open, without navigating or reopening the cited paper. This history is separate for each source paper and reference within the window session. Grouped or ambiguous citations offer a choice.
+- **Stacked or side-by-side split view:** Expand a reference card and click its title or local-PDF action to open Quick view below the main paper. Toggle **Side by side** to compare papers horizontally; narrow reader areas stack automatically. Drag the divider to resize either pane. **Open in tab** preserves page, zoom, and edits when creating a new tab; when returning to an existing view, it transfers the page and uses Fit width while preserving that view's unsaved edits.
+- **Independent controls for both panes:** Quick view has its own page, find, and zoom controls. Toolbar navigation controls target the main paper; navigation shortcuts target the active pane.
+- **Step through detected in-text mentions:** Expand a reference card, then click its citation count button to move between located mentions, wrapping after the last one. When exact text coordinates are unavailable, navigation falls back to the detected page.
+- **Filter and nickname tabs:** Use **Filter references** (`/` key) to narrow long bibliographies by author, year, title, label, or DOI (ignoring case and accents; each tab remembers its own filter). Double-click any open tab—or focus it and press `F2`—to give it a short session nickname like *"Vance 2022"* without altering its bibliographic title or filename on disk.
 
 ![Side-by-side Quick view with side panels hidden, showing the main paper on the left and the cited paper beside it on the right](docs/screenshots/workspace-side-by-side.png)
 
 ### Find missing references—via open access or your own downloads
 
-When you open a paper for the first time, PaperAssist shows which cited works are already in your local library and lets you search for missing ones in a batch—or skip straight to **Continue reading** and look them up later.
+Opening an imported paper in a new main tab offers the **Acquire references** dialog: consult available local copies, explicitly search for selected missing papers, or choose **Continue reading**. Switching existing tabs and opening Quick view do not trigger another acquisition prompt.
 
-![Reference PDFs dialog showing papers already in the local library alongside missing references selected for open-access lookup](docs/screenshots/reference-pdfs.png)
+![Native Acquire references dialog showing local PDFs and selected missing references in the synthetic library](docs/screenshots/reference-pdfs.png)
 
-- **Open-access lookup:** Tick multiple entries in **Reference PDFs**—or click **Find open access** on a single reference card—to check legal open-access sources (Crossref, arXiv, OpenAlex, Semantic Scholar, Unpaywall, NASA ADS, and CORE). Every provider reports its own outcome clearly: a timeout or unindexed reference is reported honestly, never disguised as proof of a paywall.
+- **Open-access lookup:** Tick entries in **Acquire references**—or click **Find open access** on a reference card—to check the enabled, configured bibliographic and open-access providers (Crossref, arXiv, OpenAlex, Semantic Scholar, Unpaywall, NASA ADS, and CORE). Results distinguish provider failures and missing copies; a timeout is not proof of a paywall.
 - **Web search & library proxy links:** Unresolved references offer prefilled web and PDF searches, plus one-click links through your institution's **Library proxy** if you configure one.
-- **Manual downloads without filename chaos:** Point **Folder for manual downloads** (in **Preferences**) at the folder where you save publisher PDFs from your browser. Clicking **Check folder** on a reference identifies the citation, finds the matching file in that folder, and copies it into your library under a clean name like `Antolin_2012_ApJ_745_152.pdf`—leaving your downloads folder completely untouched. If PaperAssist picks the wrong match, **Change PDF** fixes the link in two clicks.
+- **Manual downloads without filename chaos:** Set **Folder for manual downloads** in **Preferences**. **Check folder** may identify the reference online, then checks PDFs in that folder and copies a verified match into the library without changing the downloaded file. Uncertain candidates require review. Identified papers can receive names such as `Author_Year_Journal_Volume_Page.pdf`; **Change PDF** lets you correct a link.
 
 ### Highlight, draw, and attach notes to exact phrases
 
@@ -134,89 +114,92 @@ Annotation controls live in a calm contextual strip inside the top toolbar—nev
 
 ![PaperAssist reader with continuous line highlights, a margin ink bracket next to an equation, and phrase-linked notes in the Comments sidebar](docs/screenshots/annotations-and-comments.png)
 
-- **Clean PDF annotations:** Use **Highlight** for continuous per-line bands (including spaces between words, without bleeding across columns), **Draw** for freehand ink notes in the margins, and **Select** to recolor or delete existing marks.
+- **Clean PDF annotations:** Use **Highlight** (`H`) for text-aligned bands, **Draw** (`D`) for freehand ink, and **Select** (`V`) to select, recolor, or delete supported marks. Ink and freehand highlights can also move and resize proportionally using corner handles; text-aligned highlights keep their text geometry. On pages without a text layer, Highlight draws a freehand stroke.
 - **Phrase-linked comments:** Select a passage and click **Comment** (or press `C`) to attach a note directly to those words. Saved phrase comments leave a subtle red dashed outline on the page even when the sidebars are hidden; clicking the outlined text jumps straight to its note in the **Comments** panel, and clicking a note brings you back to that exact phrase. Creating a comment without selecting text attaches a general note to the current page.
-- **Explicit saving—never behind your back:** PDF annotations are written **only when you click Save** (or press `Ctrl+S` / `Cmd+S`). PaperAssist never autosaves on timers, tab switches, or previews. Switching tabs keeps unsaved edits in memory, and closing a modified tab always asks whether to **Save**, **Discard**, or **Cancel**. Your imported original PDFs are never modified; annotated revisions are stored separately, and annotations stay tied to the exact PDF file you marked up.
+- **Explicit saving—never behind your back:** PDF annotations are written **only when you click Save** (or press `Ctrl+S` / `Cmd+S`). PaperAssist never autosaves on timers, tab switches, or previews. Switching tabs keeps unsaved edits in memory, and closing a modified tab or quitting the app always asks whether to **Save**, **Discard**, or **Cancel**. Your imported original PDFs are never modified; annotated revisions are stored separately, and annotations stay tied to the exact PDF file you marked up.
+- **Comments are separate from PDF annotations:** **Save comment** writes a note to the library catalog, without creating a PDF revision. Deleting or recoloring a saved comment updates the catalog immediately. Sidecar comments are not embedded in saved PDF revisions. Unsaved comment drafts remain in memory across tab switches and participate in close confirmation.
 
 ### Build a clean, private local library
 
-Open **Library** (`L` key) to search your collection by title, author, year, or DOI, or to add new papers via **Import PDFs** and **Import folder**.
+Open **Library** (`L` key) to search your collection by title, author, year, DOI, filename, or metadata status, or to add papers via **Import PDFs** and **Import folder**. **Open** (`Ctrl+O`) reads a standalone PDF without importing it; its explicit Save writes back to that file. Start without PDF arguments to use the library.
 
 ![Library catalog dialog showing imported papers with confirmed authors and years alongside a working draft flagged for metadata review](docs/screenshots/library-catalog.png)
 
 - **Originals stay untouched:** Importing copies PDFs into PaperAssist's managed library and deduplicates them by file content (`SHA-256`). Re-importing a folder safely skips files you already have and preserves any manual metadata edits you have made.
-- **Deterministic metadata—no LLMs:** Titles, authors, years, and candidate DOIs are read deterministically from PDF properties, XMP metadata, and first-page text. Because a DOI printed on page 1 can belong to a cited paper rather than the paper itself, PaperAssist never trusts unverified guesses blindly: uncertain entries remain clearly marked **Metadata needs review** until you confirm them with **Edit**.
+- **Deterministic metadata—no LLMs:** Titles, authors, years, and candidate DOIs are read from PDF properties, XMP metadata, and first-page text. A DOI on page 1 can belong to a cited work, so uncertain results are kept for review. The Library marks these rows **Needs review**; select one and use **Edit details…** to confirm its metadata.
 
 ---
 
 ## Keyboard shortcuts
 
-Press `?` anywhere in the reader (or click the keyboard icon in the top bar) to view all shortcuts. Click **PaperAssist** at the top left for the application menu: **Preferences** (`Ctrl+,`), **Sources**, **Keyboard shortcuts** and **About**. On macOS, use `Cmd` in place of `Ctrl`. Letter shortcuts pause automatically whenever you are typing in an input field or have a dialog open.
+Press `?` while the reader has focus, or choose **Keyboard shortcuts** from the **PaperAssist** menu at the top left. That menu also provides **Preferences** (`Ctrl+,`), **Sources**, and **About**. On macOS, use `Cmd` in place of `Ctrl`. Single-letter shortcuts pause while typing in a text field or using a modal dialog.
 
 | Keys | Action |
 | --- | --- |
 | `N` / `J`, `P` / `K` | Next page, previous page |
 | `Home`, `End`, `G` | First page, last page, or jump to a specific page number |
+| `Alt+Left` | Return to previous reading position after jumping |
 | `Esc` | Close an open dialog, or return focus from a toolbar field back to the PDF so arrows, `Space`, and `Page Up`/`Down` scroll naturally |
 | `Ctrl+F` | Find text in the paper pane you clicked last |
 | `Ctrl++`, `Ctrl+-`, `Ctrl+0` | Zoom in, zoom out, or fit page width |
 | `V`, `D`, `H`, `C` | Switch to **Select**, **Draw**, **Highlight**, or **Comment** |
+| `Delete` / `Backspace` | Delete the currently selected highlight or ink drawing |
 | `Ctrl+Z`, `Ctrl+Shift+Z` (`Ctrl+Y`) | Undo or redo annotation changes |
 | `Ctrl+S` | Save PDF annotations |
-| `L` | Open **Library** |
+| `L` (`Ctrl+L`), `Ctrl+O` | Open **Library** catalog, or open a standalone PDF file from disk |
 | `Ctrl+,` | Open **Preferences** |
-| `,` and `.`, `X`, `F2` | Switch tabs, close the current tab, or rename the focused tab |
-| `B` | Hide or restore both side panels for distraction-free reading |
-| `O`, `1`, `2` | Jump to **Outline**, **References**, or **Comments** |
+| `,` and `.`, `X` (`Ctrl+W`), `F2` | Switch tabs, close the current tab, or rename the focused tab |
+| `B` (`Ctrl+B`), `Ctrl+E` | Hide or restore both side panels; toggle **Quick view** |
+| `O`, `1`, `2` | Toggle **Outline**, or show **References** or **Comments** |
 | `/` | Focus **Filter references** (`Esc` clears the filter; a second `Esc` returns to the paper) |
 
 When **Quick view** is open, page navigation, `G`, `Ctrl+F`, and zoom shortcuts act on whichever paper pane you clicked last.
 
 ### Interface size
 
-**Preferences → Interface size** scales the toolbar, tabs, side panels, dialogs and menu from 80% to 150% and remembers the choice in this browser. Papers keep their own zoom controls.
+**Preferences → Interface size** scales the toolbar, tabs, side panels, dialogs, and menus from `80%` to `150%` and saves your preference in your user configuration across sessions. Papers keep their own independent zoom controls.
 
 ---
 
 ## Where your library lives & backups
 
-Everything PaperAssist manages—your copied PDFs, saved annotated revisions, comments, settings, and SQLite catalog—lives inside a single folder on disk. PaperAssist prints this path on startup and displays it in **Preferences → Library location**.
+The library folder contains managed PDFs, saved annotated revisions, comments, source settings, and the SQLite catalog (`library.sqlite3`). **Preferences → Library location** shows its path. Your selected library location and interface preferences are stored separately in the user config file.
 
-| Operating system | Default library folder |
-| --- | --- |
-| Linux | `$XDG_DATA_HOME/paperassist` (or `~/.local/share/paperassist`) |
-| macOS | `~/Library/Application Support/PaperAssist` |
-| Windows | `%APPDATA%\PaperAssist` |
+| Operating system | Default library folder | User config file |
+| --- | --- | --- |
+| Linux | `$XDG_DATA_HOME/paperassist` (or `~/.local/share/paperassist`) | `$XDG_CONFIG_HOME/paperassist/config.json` (or `~/.config/paperassist/config.json`) |
+| macOS | `~/Library/Application Support/PaperAssist` | `~/Library/Preferences/PaperAssist/config.json` |
+| Windows | `%APPDATA%\PaperAssist` | `%LOCALAPPDATA%\PaperAssist\config.json` |
 
 Inside the library folder:
-- **`originals/`** holds your unmodified PDFs under human-readable names—`Author_Year_Journal_Volume_Page.pdf` once a paper is identified, or its imported filename otherwise (with a numeric suffix if two papers would collide). Feel free to browse or read files from here, but rename or move them only through PaperAssist so the SQLite catalog stays in sync.
+- **`originals/`** holds unmodified imported PDFs, using a bibliographic filename when enough metadata is available, or the imported filename otherwise (with a suffix for collisions). Read these files freely, but do not manually edit, rename, or move them: the catalog tracks their exact content and path.
 - **`working/`** holds saved annotated revisions under internal IDs.
 
 ### Moving or switching libraries
 
-Open **Preferences**, pick a folder under **Library location**, and click **Use this folder**:
+Open **Preferences**, pick a folder under **Library location**, click **Use this folder**, and confirm **Open library** or **Move library**:
 
 - **Existing PaperAssist library:** PaperAssist switches to it and leaves your previous library untouched.
 - **Empty or new folder:** PaperAssist copies your entire current library there, verifies every file, and switches over. Your old folder is left intact until you choose to delete it yourself.
 - **Non-empty unrelated folder:** Refused, so PaperAssist never mixes its files with unrelated documents.
 
-Your chosen library path is saved in your user config (`~/.config/paperassist/config.json` on Linux, `~/Library/Preferences/PaperAssist/config.json` on macOS, `%LOCALAPPDATA%\PaperAssist\config.json` on Windows). If that folder is unavailable at startup—for instance, on an unplugged external drive—PaperAssist stops with a clear message instead of silently creating a blank library. Passing `--data-dir` overrides `PAPERASSIST_DATA_DIR`, which in turn overrides the folder chosen in the app.
+If your configured library folder is unavailable at startup—for instance, on an unplugged external drive—PaperAssist stops with a clear message instead of silently creating a blank library. Passing `--data-dir` overrides `PAPERASSIST_DATA_DIR`, which in turn overrides the folder chosen in **Preferences**.
 
 ### Backing up
 
-Stop PaperAssist (`Ctrl+C`) and copy the library directory. Keep backups private: `settings.json` inside the library stores your contact email and any API keys you configured.
+Close PaperAssist and copy the library directory. Back up the separate user config too if you want to preserve interface preferences and the selected library path. Keep backups private: `settings.json` contains configured contact details and API keys in plaintext. The writer requests `0600` permissions on POSIX systems; Windows access depends on filesystem permissions.
 
 ---
 
 ## Open-access sources & institutional access
 
-Open **Sources** to toggle lookup providers and add optional API keys or contact details. Credentials are saved locally in `settings.json` (readable only by your user account) and are never displayed again after saving.
+Open **Sources** to toggle lookup providers and add optional API keys or contact details. API keys are stored locally in `settings.json`; the UI does not redisplay full saved keys. Contact email and proxy settings remain visible. **Check access** explicitly contacts the enabled, configured services.
 
 | Service | Optional / required setting | What it enables |
 | --- | --- | --- |
 | **Crossref** | Contact email *(optional)* | Identifies DOIs and bibliographic records; an email uses Crossref's polite rate-limit pool |
 | **arXiv** | None | Official preprint metadata and open-access PDFs |
-| **OpenAlex** | API key *(optional)* | Open-access discovery with higher rate limits when a key is set |
+| **OpenAlex** | API key *(recommended; optional in the app)* | Open-access discovery; a key increases the service's usage budget |
 | **Semantic Scholar** | API key *(optional)* | Metadata and open-access links with higher rate limits when a key is set |
 | **Unpaywall** | Contact email *(required)* | Finds legal open-access copies for papers with a DOI |
 | **NASA ADS** | API token *(required)* | Astrophysics & physics bibliography identification and lookups |
@@ -224,38 +207,58 @@ Open **Sources** to toggle lookup providers and add optional API keys or contact
 
 If the corresponding field in **Sources** is left blank, PaperAssist also checks the `PAPERASSIST_EMAIL` and `OPENALEX_API_KEY` environment variables.
 
+Source availability, authentication rules, and quotas are controlled by each provider; configuring a source does not guarantee a download. See [OpenAlex authentication](https://help.openalex.org/api/authentication/) for its current anonymous-access and key limits. Crossref supplies bibliographic metadata and links, rather than hosting the PDF itself.
+
 - **Library proxy:** Optional `https://...` prefix (or template containing `{url}`) for your university's proxy. PaperAssist uses it strictly to build links that *you* click in your browser—it never runs automated downloads through your institutional session.
-- **Folder for manual downloads (in Preferences):** A read-only watch folder (pickable with **Browse…** via `zenity`, `kdialog`, or `Tk`) where you drop PDFs downloaded by hand so **Check folder** can verify and copy them into your library.
+- **Folder for manual downloads (in Preferences):** A folder you select with the native dialog. PaperAssist reads it when you choose **Check folder**; it does not continuously monitor or change its contents.
 
 ---
 
 ## Privacy & current limitations
 
-- **Strictly local by default:** The server binds to loopback (`127.0.0.1`) and enforces origin and token checks so external websites cannot talk to it. No network request leaves your computer unless you trigger a reference lookup or click an external link.
+- **Local reading:** The native reader accesses PDFs and the catalog without a web server or listening network port. Requested online actions include open-access searches, source access checks, download repair, and reference identification during **Check folder**. They send reference metadata or identifiers, plus any relevant configured credentials, to providers; external links open in your browser.
+- **Separate rendering process:** PDFium renders whole-page bitmaps in a worker process with a bounded page cache; it does not use tile rendering. Memory and latency vary with documents, zoom, open panes, and platform. See the scoped measurements in [native stack notes](docs/development/native-stack.md), rather than treating them as a fixed memory guarantee or a security sandbox.
 - **No AI guesswork:** Importing, metadata extraction, and citation matching are 100% deterministic.
-- **Citation detection is partial:** PaperAssist counts `"Author year"` and numbered `[n]` citations, leaving counts blank when two bibliography entries are ambiguous. On a hand-audited benchmark of six diverse papers, it recovered roughly 96% of in-text citations with near-zero false positives—see [`docs/development/citation-accuracy.md`](docs/development/citation-accuracy.md) for the full breakdown. Scanned PDFs with poor text layers, superscript citation numbers, and unusual citation styles are not yet detected.
-- **Scans & large files:** Scanned papers open and annotate normally, though built-in OCR is not included yet. Very large or malformed PDFs do not yet enforce hard time or memory caps during import.
+- **Citation detection is partial:** PaperAssist recognizes author-year and bracketed numeric citations, abstaining when entries cannot be disambiguated. A six-paper tuning benchmark reported about 96% recall at the reference/page level, not exact sentence-level accuracy or a guarantee on new papers. The private benchmark is not reproducible from this repository; see [accuracy notes](docs/development/citation-accuracy.md). OCR errors, superscripts, and unusual styles can cause missed citations.
+- **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer; built-in OCR is not included. Very large or malformed PDFs do not yet enforce hard time or memory caps during import.
 
 ---
 
-## Development
+## Development & Packaging
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e .
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m pip install -e '.[native]'
+
+# Run the Python & native Qt test suite (headless offscreen mode supported)
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v
+
+# Run a headless native rendering self-test on a fixture PDF
+.venv/bin/python -m paperassist.native --self-test tests/fixtures/pdfjs-annotations.pdf
+
+# Run the transitional web frontend unit tests
 npm ci && node --test tests/*.test.mjs
 ```
 
-The Python test suite runs completely offline without a browser or private PDF corpus. The Node test suite exercises frontend modules against the pinned `pdfjs-dist` version in `package-lock.json` (matching the vendored viewer build in `src/paperassist/web/vendor/pdfjs`). The reader uses the official legacy build for embedded-WebView compatibility; [vendoring details](src/paperassist/web/vendor/pdfjs/README.md) record its provenance. See [desktop verification](docs/development/desktop-verification.md) for the opt-in real-WebView smoke test and remaining platform checks.
+To build the standalone application bundle and Linux installer locally:
 
-For architecture details and design decisions, see:
-- [Product specification](docs/specification.md)
-- [Implementation roadmap](docs/roadmap.md)
-- [Verification & citation accuracy notes](docs/development/)
+```bash
+.venv/bin/python -m pip install '.[native]' 'pyinstaller>=6.15,<7'
+.venv/bin/pyinstaller packaging/paperassist.spec --noconfirm --distpath dist --workpath build
+.venv/bin/python packaging/installer/build_installer.py
+```
+
+For architecture, packaging, and verification details, see:
+
+- [Product specification](docs/specification.md) & [Implementation roadmap](docs/roadmap.md)
+- [Native migration parity matrix](docs/development/native-migration.md)
+- [Linux & bundle packaging guide](packaging/README.md), [Windows packaging guide](packaging/windows/README.md), and [macOS packaging guide](packaging/macos/README.md)
+- [Citation accuracy & verification notes](docs/development/)
 
 ---
 
 ## License
 
-PaperAssist is free software licensed under the **GNU General Public License v3.0 or later** (see [`LICENSE`](LICENSE)). It bundles [Mozilla PDF.js](https://github.com/mozilla/pdf.js) under the Apache License 2.0 (see [`src/paperassist/web/vendor/pdfjs/LICENSE`](src/paperassist/web/vendor/pdfjs/LICENSE)) for PDF rendering and annotation layers.
+PaperAssist is free software licensed under the **GNU General Public License v3.0 or later** (see [`LICENSE`](LICENSE)).
+
+The native reader uses [Qt / PySide6](https://wiki.qt.io/Qt_for_Python), [PDFium](https://pdfium.googlesource.com/pdfium/) through [pypdfium2](https://github.com/pypdfium2-team/pypdfium2), and [pypdf](https://github.com/py-pdf/pypdf). These components retain their own licenses; standalone builds include `THIRD-PARTY-NOTICES.txt` and bundled dependency license files. The transitional web interface bundles [Mozilla PDF.js](https://github.com/mozilla/pdf.js) under the Apache License 2.0 (see [`src/paperassist/web/vendor/pdfjs/LICENSE`](src/paperassist/web/vendor/pdfjs/LICENSE)).
