@@ -103,7 +103,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QLoggingCategory, Qt, QTimer, qCWarning
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit
@@ -139,11 +139,11 @@ def simulate_key(widget, key, text=""):
     QApplication.processEvents()
 
 def main():
-    install_filter = os.environ.get("TEST_INSTALL_FILTER", "1") == "1"
-    if install_filter:
-        install_wayland_warning_filter()
+    install_wayland_warning_filter()
 
     app = QApplication(sys.argv)
+    category = QLoggingCategory("qt.qpa.wayland.textinput")
+    qCWarning(category, "PAPERASSIST_TEST disableSurface 0x0 is focused")
     app.setApplicationName("PaperAssist")
     app.setDesktopFileName("paperassist")
 
@@ -352,10 +352,11 @@ class WaylandCompositorEndToEndTests(unittest.TestCase):
             "NO_AT_BRIDGE": "1",
             "QT_NO_PORTAL": "1",
             "QT_QPA_PLATFORM": "wayland",
-            "TEST_INSTALL_FILTER": "1" if install_filter else "0",
         }
         if not install_filter:
             env["PAPERASSIST_RAW_QT_LOGS"] = "1"
+        else:
+            env.pop("PAPERASSIST_RAW_QT_LOGS", None)
 
         out_file = tempfile.NamedTemporaryFile(delete=False)
         err_file = tempfile.NamedTemporaryFile(delete=False)
@@ -405,17 +406,11 @@ class WaylandCompositorEndToEndTests(unittest.TestCase):
             f"Wayland E2E test failed with code {proc.returncode}.\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
         )
         self.assertIn("E2E_WAYLAND_PASS", proc.stdout)
-        # Assert zero QWaylandTextInputv3::disableSurface stderr warning spam
+        self.assertNotIn("PAPERASSIST_TEST disableSurface", proc.stderr)
         self.assertNotIn("QWaylandTextInputv3::disableSurface", proc.stderr)
-        self.assertNotIn("is focused", proc.stderr)
 
-    def test_e2e_wayland_raw_logs_opt_out_reproduces_upstream_warning(self):
-        # Under Mutter compositor, deactivating surfaces with zwp_text_input_v3 emits the warning
-        if self.compositor != "mutter":
-            self.skipTest("Raw warning verification specifically uses mutter with zwp_text_input_v3")
+    def test_e2e_wayland_raw_logs_opt_out_preserves_warning(self):
         proc = self._run_under_wayland(install_filter=False)
         self.assertEqual(proc.returncode, 0, f"Raw run failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
         self.assertIn("E2E_WAYLAND_PASS", proc.stdout)
-        # In raw mode without filter, the upstream Qt warning is present
-        self.assertIn("disableSurface", proc.stderr)
-        self.assertIn("is focused", proc.stderr)
+        self.assertIn("PAPERASSIST_TEST disableSurface 0x0 is focused", proc.stderr)

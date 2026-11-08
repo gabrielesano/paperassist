@@ -271,6 +271,7 @@ class DesktopEntryTestCase(unittest.TestCase):
         env["PYTHONPATH"] = str(REPO_ROOT / "src")
         return [sys.executable, "-m", "paperassist.native"], env
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux launcher uses a POSIX shell")
     def test_launch_wrapper_in_spaced_path_from_unrelated_cwd(self) -> None:
         """Verify launching via a POSIX wrapper script in a spaced path from an unrelated CWD."""
         self.assertTrue(SAMPLE_PDF.is_file(), f"Sample PDF missing: {SAMPLE_PDF}")
@@ -308,6 +309,7 @@ exec {escaped_target} "$@"
         )
         self.assertIn("self-test ok", res.stdout)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Freedesktop launcher requires Linux")
     def test_desktop_exec_command_execution_from_unrelated_cwd(self) -> None:
         """Verify launching via desktop Exec= line quoting paths with spaces from an unrelated CWD."""
         target_cmd, base_env = self._get_target_binary()
