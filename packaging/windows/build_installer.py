@@ -18,22 +18,21 @@ def build_installer(bundle: Path, output_dir: Path) -> Path:
     bundle, output_dir = bundle.resolve(), output_dir.resolve()
     if not (bundle / "PaperAssist.exe").is_file():
         raise FileNotFoundError(f"Missing PaperAssist.exe in {bundle}")
-    compiler = shutil.which("ISCC")
-    if not compiler:
-        for variable in ("ProgramFiles(x86)", "ProgramFiles"):
-            candidate = Path(os.environ.get(variable, "C:/Program Files (x86)")) / "Inno Setup 6/ISCC.exe"
-            if candidate.is_file():
-                compiler = str(candidate)
-                break
-    if not compiler:
-        raise RuntimeError("Install Inno Setup 6.3+ or add ISCC.exe to PATH")
+    candidates = [
+        Path(os.environ.get(variable, "C:/Program Files (x86)")) / "Inno Setup 6/ISCC.exe"
+        for variable in ("ProgramFiles(x86)", "ProgramFiles")
+    ]
+    if discovered := shutil.which("ISCC"):
+        candidates.append(Path(discovered))
+    # Chocolatey's PATH entry is a launcher, without the compiler's license files.
+    compiler = next((path for path in candidates if path.is_file() and (path.parent / "license.txt").is_file()), None)
+    if compiler is None:
+        raise RuntimeError("Install Inno Setup 6.3+ with its license.txt next to ISCC.exe")
     root = Path(__file__).resolve().parents[2]
     manifest = root / "build/windows/install-manifest.txt"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(f"Managed-By: PaperAssist-Windows-Installer\nAppId=PaperAssist.Native\nVersion={__version__}\n")
-    compiler_license = Path(compiler).parent / "license.txt"
-    if not compiler_license.is_file():
-        raise FileNotFoundError(f"Missing Inno Setup license: {compiler_license}")
+    compiler_license = compiler.parent / "license.txt"
     output_dir.mkdir(parents=True, exist_ok=True)
     definitions = {
         "AppVersion": __version__,
