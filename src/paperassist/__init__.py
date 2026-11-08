@@ -1,7 +1,7 @@
 """PaperAssist: a local research paper reader."""
 import logging
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0a3"
 
 
 def _allow_pypdf_warning(record):

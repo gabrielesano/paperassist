@@ -1,26 +1,40 @@
-"""A pane is one PDF view with its own find bar, and a title bar when it is a quick view or read-only."""
+"""A pane is one PDF view with its own top find bar, and a title bar when it is a quick view or read-only."""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QToolBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
+                               QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .document import PdfDocument
-from .view import PdfView
+from .theme import INK, icon
 from .toolbar import install_overflow
+from .view import PdfView
 
 
 class FindBar(QWidget):
     def __init__(self, view):
         super().__init__()
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.view, self._last = view, None
-        self.field, self.status = QLineEdit(placeholderText="Find in document"), QLabel()
-        previous, following = QPushButton("Previous"), QPushButton("Next")
+        self.field = QLineEdit(placeholderText="Find in document", clearButtonEnabled=True)
+        self.field.setAccessibleName("Find in document")
+        self.status = QLabel(objectName="muted-note")
+        previous = QToolButton(toolTip="Previous match (Shift+Enter)", accessibleName="Previous match")
+        previous.setIcon(icon("up", INK, 15))
+        following = QToolButton(toolTip="Next match (Enter)", accessibleName="Next match")
+        following.setIcon(icon("down", INK, 15))
+        close = QToolButton(toolTip="Close find bar (Esc)", accessibleName="Close find bar")
+        close.setIcon(icon("close", INK, 14))
         row = QHBoxLayout(self)
-        row.setContentsMargins(6, 2, 6, 2)
-        for widget in (self.field, previous, following, self.status):
+        row.setContentsMargins(8, 4, 8, 4)
+        row.setSpacing(4)
+        row.addWidget(self.field, 1)
+        row.addWidget(self.status)
+        for widget in (previous, following, close):
             row.addWidget(widget)
         self.field.returnPressed.connect(self._enter)
         following.clicked.connect(lambda: self._run(1))
         previous.clicked.connect(lambda: self._run(-1))
+        close.clicked.connect(self.close_bar)
         self.hide()
 
     def _enter(self):
@@ -62,6 +76,7 @@ class Pane(QFrame):
         self.find_bar = FindBar(self.view)
         self.quick, self.vertical = False, True  # vertical: the other pane sits above or below
         self.title_label = QLabel()
+        self.title_label.setStyleSheet("font-weight: 600;")
         self.head, self.note = "", ""  # the label elides the head, never the note: a toolbar widget needs an exact width or it overlaps the buttons
         self.bar = QToolBar("Quick view", objectName="pane-bar")
         self.bar.setMovable(False)
@@ -78,10 +93,11 @@ class Pane(QFrame):
             self.quick_buttons.append(self.bar.widgetForAction(action))
         self.layout_button = self.quick_buttons[0]
         install_overflow(self.bar)
+        self.navigation_bar = self.bar
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
-        for widget in (self.bar, self.view, self.find_bar):
+        for widget in (self.bar, self.find_bar, self.view):
             column.addWidget(widget)
         self.view.edited.connect(self.refresh_bar)
         self.set_quick(False)
@@ -114,21 +130,26 @@ class Pane(QFrame):
         self.quick = quick
         for button in self.quick_buttons:
             button.defaultAction().setVisible(quick)
+        for action in getattr(self, 'navigation_actions', []):
+            action.setVisible(quick)
         self.refresh_bar()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.title_action.setVisible(self.width() >= 500)
         self._fit_title()
         self.bar.setToolTip(self.title_label.toolTip())
 
     def _fit_title(self):
         label = self.title_label
         tail = (" · " if self.head and self.note else "") + self.note
-        room = self.width() - sum(button.sizeHint().width() for button in self.quick_buttons) - 60 - label.fontMetrics().horizontalAdvance(tail)
+        buttons_w = sum(button.sizeHint().width() for button in self.quick_buttons if button.defaultAction().isVisible())
+        navigation_w = sum(max(widget.sizeHint().width(), widget.minimumWidth()) for action in getattr(self, 'navigation_actions', [])
+                           if action.isVisible() and (widget := self.bar.widgetForAction(action)))
+        room = min(160, self.width() - buttons_w - navigation_w - 44 - label.fontMetrics().horizontalAdvance(tail))
+        self.title_action.setVisible(bool(self.note) or room >= 60)
         text = label.fontMetrics().elidedText(self.head, Qt.ElideRight, max(room, 60)) + tail
         label.setText(text)
-        label.setFixedWidth(label.fontMetrics().horizontalAdvance(text) + 12)
+        label.setFixedWidth(max(room + label.fontMetrics().horizontalAdvance(tail), label.fontMetrics().horizontalAdvance(text) + 12))
 
     def set_vertical_split(self, vertical, narrow=False):
         """narrow: the reader is too small for two columns, so the saved preference waits."""

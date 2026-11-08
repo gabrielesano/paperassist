@@ -8,13 +8,14 @@ from urllib.parse import quote, urlencode, urlsplit
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QScrollArea, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 from paperassist import references
 
 from .jobs import JobWatcher
+from .theme import APP_STYLE, ERROR_INK, FlowLayout, LINE, TONE_LOCAL, reference_palette, serif_heading_font
 
 PROVIDERS = {"crossref": "Crossref", "ads": "ADS", "arxiv": "arXiv", "openalex": "OpenAlex",
              "semantic_scholar": "Semantic Scholar", "core": "CORE", "unpaywall": "Unpaywall", "local": "Local library"}
@@ -42,9 +43,7 @@ def reference_status(ref):
 
 
 def status_tone(ref):
-    if ref.get("local_conflict") or ref.get("local_invalid"):
-        return "#9a4b2e"
-    return "#267368" if ref.get("local_document_id") else "#6b675f"
+    return reference_palette(ref)[2]
 
 
 def retrieval_details(ref):
@@ -88,6 +87,12 @@ def provider_summary(settings):
                      for name, state in settings.providers().items())
 
 
+def _row_style(ref):
+    border_hex, fill_hex, _ = TONE_LOCAL if ref.get("local_document_id") and not ref.get("local_conflict") else reference_palette(ref)
+    return (f"QFrame#acquire-row {{ background: {fill_hex}; border: 0; "
+            f"border-left: 3px solid {border_hex}; border-bottom: 1px solid {LINE}; }}")
+
+
 class SelectionStore:
     """A library-local UI sidecar keeps exact-source selections without a database migration."""
 
@@ -122,26 +127,47 @@ class SelectionStore:
 class AcquisitionDialog(QDialog):
     def __init__(self, controller, document_id, refs):
         super().__init__(controller.window)
+        if not controller.window.styleSheet():
+            self.setStyleSheet(APP_STYLE)
         self.setAttribute(Qt.WA_DeleteOnClose)  # a closed offer would otherwise keep a checkbox per reference alive
-        self.controller, self.document_id, self.boxes, self.rows = controller, document_id, [], {}
+        self.controller, self.document_id, self.boxes, self.rows, self._frames = controller, document_id, [], {}, {}
         self.setWindowTitle("Acquire references")
-        self.resize(650, 540)
+        self.resize(680, 560)
         column = QVBoxLayout(self)
-        column.addWidget(QLabel("Find open-access PDFs for this paper's references.", wordWrap=True))
-        column.addWidget(QLabel(provider_summary(controller.workspace.get_settings()), wordWrap=True))
+        column.setContentsMargins(22, 20, 22, 18)
+        column.setSpacing(10)
+
+        heading = QLabel("Acquire references")
+        heading.setProperty("headingScale", "dialog")
+        heading.setFont(serif_heading_font(self.font()))
+        column.addWidget(heading)
+        column.addWidget(QLabel("Find open-access PDFs for this paper's references.", objectName="muted-note", wordWrap=True))
+        column.addWidget(QLabel(provider_summary(controller.workspace.get_settings()), objectName="muted-note", wordWrap=True))
+
         row = QHBoxLayout()
-        self.count = QLabel()
+        row.setSpacing(8)
+        self.count = QLabel(objectName="muted-note")
         for label, selected in (("Select all", True), ("Clear all", False)):
             button = QPushButton(label)
             button.clicked.connect(lambda checked=False, value=selected: self.select_all(value))
             row.addWidget(button)
         row.addWidget(self.count, 1)
         column.addLayout(row)
-        content, scroll = QWidget(), QScrollArea(widgetResizable=True)
+
+        content = QWidget()
+        scroll = QScrollArea(objectName="dialog-scroll", widgetResizable=True)
+        scroll.setAccessibleName("References to acquire")
         entries = QVBoxLayout(content)
+        entries.setContentsMargins(0, 0, 0, 0)
+        entries.setSpacing(0)
         saved = controller.selections.load(document_id)
         for ref in refs:
             local = bool(ref.get("local_document_id"))
+            frame = QFrame(objectName="acquire-row")
+            frame.setStyleSheet(_row_style(ref))
+            item_layout = QVBoxLayout(frame)
+            item_layout.setContentsMargins(10, 8, 10, 8)
+            item_layout.setSpacing(3)
             text = f"{ref.get('label') or ''} {ref.get('title') or ref.get('raw') or 'Unidentified reference'}"
             box = QCheckBox(text.strip().replace("&", "&&"))
             box.setToolTip(text)
@@ -149,23 +175,36 @@ class AcquisitionDialog(QDialog):
             box.setChecked(box.isEnabled() and str(ref["id"]) in saved)
             box.setProperty("reference_id", str(ref["id"]))
             box.toggled.connect(self.selection_changed)
-            entries.addWidget(box)
+            item_layout.addWidget(box)
             status = QLabel("In library — no download needed" if local else reference_status(ref), wordWrap=True)
-            entries.addWidget(status)
+            status.setStyleSheet(f"color: {status_tone(ref)};")
+            item_layout.addWidget(status)
+            entries.addWidget(frame)
             self.boxes.append(box)
             self.rows[str(ref["id"])] = (box, status)
+            self._frames[str(ref["id"])] = frame
         if not refs:
-            entries.addWidget(QLabel("No references were found in this paper.", wordWrap=True))
+            empty = QLabel("No references were found in this paper.", objectName="muted-note", wordWrap=True)
+            empty.setContentsMargins(12, 12, 12, 12)
+            entries.addWidget(empty)
         entries.addStretch()
         scroll.setWidget(content)
         column.addWidget(scroll, 1)
+
         self.message = QLabel(wordWrap=True)
+        self.message.setStyleSheet(f"color: {ERROR_INK};")
         column.addWidget(self.message)
+
         buttons = QHBoxLayout()
-        self.all_button, self.selected_button = QPushButton("Acquire all missing"), QPushButton("Acquire selected")
+        buttons.setSpacing(8)
+        self.all_button = QPushButton("Acquire all missing")
+        self.all_button.setProperty("primary", True)
+        self.selected_button = QPushButton("Acquire selected")
         continue_button = QPushButton("Continue reading")
-        for button in (self.all_button, self.selected_button, continue_button):
+        for button in (self.all_button, self.selected_button):
             buttons.addWidget(button)
+        buttons.addStretch(1)
+        buttons.addWidget(continue_button)
         self.all_button.clicked.connect(lambda: self.start(True))
         self.selected_button.clicked.connect(lambda: self.start(False))
         continue_button.clicked.connect(self.close)
@@ -208,6 +247,9 @@ class AcquisitionDialog(QDialog):
                 box.blockSignals(False)
             if ref:
                 status.setText("In library — no download needed" if ref.get("local_document_id") else reference_status(ref))
+                status.setStyleSheet(f"color: {status_tone(ref)};")
+                if frame := self._frames.get(reference_id):
+                    frame.setStyleSheet(_row_style(ref))
         self.selection_changed()
 
     def start(self, all_missing):
@@ -290,6 +332,7 @@ class AcquisitionController(QObject):
         self.jobs[job["id"]] = watcher
         self.cancel_button.show()
         watcher.progress.connect(lambda value: self._progress(document_id, value))
+
         def done(value):
             self.jobs.pop(job["id"], None)
             watcher.deleteLater()
@@ -328,6 +371,7 @@ class AcquisitionController(QObject):
             self._say(document_id, f"Could not start acquisition: {error}")
             return False
         self._say(document_id, "Searching local library first…")
+
         def finished(value):
             results = (value.get("result") or {}).get("references", [])
             counts = Counter(item.get("status", "failed") for item in results)
@@ -365,22 +409,32 @@ class AcquisitionController(QObject):
             self.preferences_requested.emit("inbox")
         elif result.get("candidates"):
             dialog = QDialog(self.window)
+            if not self.window.styleSheet():
+                dialog.setStyleSheet(APP_STYLE)
             dialog.setWindowTitle("Choose a downloaded PDF")
-            dialog.resize(620, 330)
+            dialog.resize(640, 360)
             column = QVBoxLayout(dialog)
-            column.addWidget(QLabel(result.get("summary", "Choose the correct PDF."), wordWrap=True))
-            table = QTreeWidget(headerLabels=["File", "Size", "Modified"], rootIsDecorated=False)
+            column.setContentsMargins(22, 20, 22, 18)
+            column.setSpacing(10)
+            heading = QLabel("Choose a downloaded PDF")
+            heading.setProperty("headingScale", "dialog")
+            heading.setFont(serif_heading_font(dialog.font()))
+            column.addWidget(heading)
+            column.addWidget(QLabel(result.get("summary", "Choose the correct PDF."), objectName="muted-note", wordWrap=True))
+            table = QTreeWidget(objectName="dialog-tree", headerLabels=["File", "Size", "Modified"], rootIsDecorated=False)
             table.setAccessibleName("Downloaded PDFs")
             for candidate in result["candidates"]:
                 item = QTreeWidgetItem([candidate["name"], f"{candidate.get('size', 0) / 1024:.0f} KB", str(candidate.get("modified", ""))[:10]])
                 item.setData(0, Qt.UserRole, candidate["name"])
                 table.addTopLevelItem(item)
             table.setColumnWidth(0, 340)
-            column.addWidget(table)
+            column.addWidget(table, 1)
             buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-            buttons.button(QDialogButtonBox.Ok).setText("Link selected PDF")
-            buttons.button(QDialogButtonBox.Ok).setEnabled(False)
-            table.itemSelectionChanged.connect(lambda: buttons.button(QDialogButtonBox.Ok).setEnabled(table.currentItem() is not None))
+            ok = buttons.button(QDialogButtonBox.Ok)
+            ok.setText("Link selected PDF")
+            ok.setProperty("primary", True)
+            ok.setEnabled(False)
+            table.itemSelectionChanged.connect(lambda: ok.setEnabled(table.currentItem() is not None))
             buttons.accepted.connect(lambda: (self.link_folder_file(document_id, ref, table.currentItem().data(0, Qt.UserRole)), dialog.accept()))
             buttons.rejected.connect(dialog.reject)
             column.addWidget(buttons)
@@ -401,20 +455,32 @@ class AcquisitionController(QObject):
 
     def choose_link(self, document_id, ref):
         dialog = QDialog(self.window)
+        if not self.window.styleSheet():
+            dialog.setStyleSheet(APP_STYLE)
         dialog.setWindowTitle("Link local PDF — verify the paper")
-        dialog.resize(760, 420)
+        dialog.resize(760, 440)
         column = QVBoxLayout(dialog)
-        column.addWidget(QLabel(ref.get("raw") or ref.get("title") or "Choose the cited paper.", wordWrap=True))
-        search = QLineEdit(placeholderText="Search title, author, year or DOI")
+        column.setContentsMargins(22, 20, 22, 18)
+        column.setSpacing(10)
+        heading = QLabel("Link local PDF")
+        heading.setProperty("headingScale", "dialog")
+        heading.setFont(serif_heading_font(dialog.font()))
+        column.addWidget(heading)
+        column.addWidget(QLabel(ref.get("raw") or ref.get("title") or "Choose the cited paper.",
+                                objectName="muted-note", wordWrap=True))
+        search = QLineEdit(placeholderText="Search title, author, year or DOI", clearButtonEnabled=True)
         search.setAccessibleName("Search local PDFs")
-        table = QTreeWidget(headerLabels=["Title", "Authors", "Year", "Match"], rootIsDecorated=False)
+        table = QTreeWidget(objectName="dialog-tree", headerLabels=["Title", "Authors", "Year", "Match"], rootIsDecorated=False)
         table.setAccessibleName("Local PDFs")
         table.setColumnWidth(0, 370)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Link selected PDF")
-        buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+        ok = buttons.button(QDialogButtonBox.Ok)
+        ok.setText("Link selected PDF")
+        ok.setProperty("primary", True)
+        ok.setEnabled(False)
         candidates = ref.get("local_candidates") or []
         suggestions = {candidate["id"]: rank for rank, candidate in enumerate(candidates)}
+
         def fill():
             table.clear()
             documents = self.workspace.library.list_documents(search.text())
@@ -427,11 +493,12 @@ class AcquisitionController(QObject):
                 table.addTopLevelItem(item)
         typing = QTimer(dialog, singleShot=True, interval=150, timeout=fill)
         search.textChanged.connect(typing.start)
-        table.itemSelectionChanged.connect(lambda: buttons.button(QDialogButtonBox.Ok).setEnabled(table.currentItem() is not None))
+        table.itemSelectionChanged.connect(lambda: ok.setEnabled(table.currentItem() is not None))
         buttons.accepted.connect(lambda: (self.link(document_id, ref, table.currentItem().data(0, Qt.UserRole)), dialog.accept()))
         buttons.rejected.connect(dialog.reject)
-        for widget in (search, table, buttons):
-            column.addWidget(widget)
+        column.addWidget(search)
+        column.addWidget(table, 1)
+        column.addWidget(buttons)
         fill()
         dialog.setAttribute(Qt.WA_DeleteOnClose)
         dialog.show()
@@ -453,18 +520,21 @@ class AcquisitionController(QObject):
     def card_actions(self, document_id, ref, parent=None):
         widget = CardActions(parent)
         column = QVBoxLayout(widget)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(4)
+        column.setContentsMargins(0, 2, 0, 0)
+        column.setSpacing(5)
         status = QLabel(reference_status(ref), wordWrap=True)
-        status.setStyleSheet(f"color: {status_tone(ref)}")
+        status.setStyleSheet(f"color: {status_tone(ref)}; font-weight: 600;")
         column.addWidget(status)
         if ref.get("local_conflict"):
-            column.addWidget(QLabel(ref["local_conflict"], wordWrap=True))
+            conflict = QLabel(ref["local_conflict"], wordWrap=True)
+            conflict.setStyleSheet(f"color: {ERROR_INK};")
+            column.addWidget(conflict)
         details = retrieval_details(ref)
         if details:
-            label = QLabel(details, wordWrap=True)
+            label = QLabel(details, objectName="muted-note", wordWrap=True)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             column.addWidget(label)
+
         actions = []
         local = ref.get("local_document_id")
         if local and not ref.get("local_invalid"):
@@ -477,16 +547,19 @@ class AcquisitionController(QObject):
             actions.append(("Reset PDF link", lambda: self.link(document_id, ref, None)))
         if not local:
             actions.append(("Check folder", lambda: self.check_folder(document_id, ref)))
+
+        primary_flow = FlowLayout(margin=0, h_spacing=12, v_spacing=4)
         for text, callback in actions:
             button = QPushButton(text)
+            button.setProperty("link", True)
             button.clicked.connect(callback)
             button.setEnabled(not (ref.get("legacy") and text == "Find open access"))
-            column.addWidget(button)
+            primary_flow.addWidget(button)
+        column.addLayout(primary_flow)
+
         if not local:
             extra = QWidget()
-            more = QVBoxLayout(extra)
-            more.setContentsMargins(0, 0, 0, 0)
-            more.setSpacing(4)
+            more = FlowLayout(extra, margin=0, h_spacing=12, v_spacing=4)
             links = search_links(ref)
             doi = ref.get("doi")
             if doi:
@@ -501,23 +574,30 @@ class AcquisitionController(QObject):
                     links.append((label + " via library", url))
             for text, url in links:
                 button = QPushButton(text)
+                button.setProperty("link", True)
                 button.setToolTip(url)
                 button.clicked.connect(lambda checked=False, target=url: QDesktopServices.openUrl(QUrl(target)))
                 more.addWidget(button)
             if doi:
                 button = QPushButton("Resolve DOI metadata")
+                button.setProperty("link", True)
                 button.clicked.connect(lambda: self.resolve(document_id, ref))
                 more.addWidget(button)
+
+            toggle_row = FlowLayout(margin=0, h_spacing=8, v_spacing=2)
             toggle = QPushButton("Browser searches and links", checkable=True)
+            toggle.setProperty("link", True)
             key = (document_id, str(ref["id"]))
             toggle.setChecked(key in self.expanded)
             extra.setVisible(toggle.isChecked())
+
             def expand(checked):
                 self.expanded.add(key) if checked else self.expanded.discard(key)
                 extra.setVisible(checked)
                 widget.layout_changed.emit()
             toggle.toggled.connect(expand)
-            column.addWidget(toggle)
+            toggle_row.addWidget(toggle)
+            column.addLayout(toggle_row)
             column.addWidget(extra)
         return widget
 

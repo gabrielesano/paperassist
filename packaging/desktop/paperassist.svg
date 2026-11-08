@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="256" height="256" viewBox="0 0 256 256">
+  <title>PaperAssist</title>
+  <desc>PaperAssist application icon: deep-teal badge with a white serif P</desc>
+  <rect x="12" y="12" width="232" height="232" rx="44" ry="44" fill="#276c65"/>
+  <text x="128" y="185" font-family="Georgia, 'Liberation Serif', 'DejaVu Serif', serif" font-size="160" font-weight="bold" fill="#ffffff" text-anchor="middle">P</text>
+</svg>

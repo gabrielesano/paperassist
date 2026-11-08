@@ -15,7 +15,7 @@ if pdf_available:
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QToolButton
 
     from paperassist.native.annotation_bar import install
     from paperassist.native.document import PdfDocument, SaveState
@@ -400,6 +400,30 @@ class WindowEditingTests(unittest.TestCase):
         self.assertIs(view.doc.state, SaveState.SAVED)
 
     # ---- hiding highlights ------------------------------------------------------------------
+    def test_highlight_visibility_is_reachable_in_clean_select_mode(self):
+        view = self.open('visibility-control')
+        self.highlight(view)
+        path = view.doc.source.path
+        self.window.save()
+        self.assertTrue(self.window.close_tab(0))
+        view = self.window.open_source(FileSource(path)).main.view
+        self.pump(lambda: view.has_page(0))
+        self.window.resize(800, 800)
+        self.pump()
+        self.assertFalse(self.bar.isVisible())
+        self.assertIn(self.bar.visibility, self.window.main_bar.actions())
+        self.assertTrue(self.bar.visibility.isEnabled())
+        extension = self.window.main_bar.findChild(QToolButton, 'qt_toolbar_ext_button')
+        QTest.mouseClick(extension, Qt.LeftButton)
+        menu = self.app.activePopupWidget()
+        self.assertIn(self.bar.visibility, menu.actions())
+        QTest.mouseClick(menu, Qt.LeftButton, pos=menu.actionGeometry(self.bar.visibility).center())
+        self.assertFalse(view.highlights_visible)
+        self.assertFalse(view.doc.modified)
+        self.bar.visibility.trigger()
+        self.assertTrue(view.highlights_visible)
+        self.assertFalse(view.doc.modified)
+
     def highlight(self, view):
         self.window.highlight_action.setChecked(True)
         self.select_words(view)
@@ -478,9 +502,10 @@ class WindowEditingTests(unittest.TestCase):
 
     def test_the_toolbars_offer_no_tool_beyond_select_draw_highlight_and_comment(self):
         view = self.open("tools-only")
-        names = {a.text() for a in self.bar.actions() if a.text()}
-        self.assertEqual(names, {'Select', 'Draw', 'Comment', 'Delete', 'Undo', 'Redo', 'Show highlights'})
-        self.assertEqual(self.window.highlight_action.text(), 'Highlight')
+        strip_names = {a.text() for a in self.bar.actions() if a.text()}
+        self.assertEqual(strip_names, {'Delete', 'Undo', 'Redo'})
+        checkable_tools = {a.text() for a in self.window.main_bar.actions() if a.isCheckable() and a.text() not in ('Panels', 'Show highlights')}
+        self.assertEqual(checkable_tools, {'Select', 'Draw', 'Highlight', 'Comment'})
         self.assertIsNotNone(view)
 
     def test_controls_follow_the_selection_and_go_quiet_when_read_only(self):

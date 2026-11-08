@@ -3,8 +3,8 @@ import unicodedata
 import weakref
 from html import escape
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QVBoxLayout, QWidget)
@@ -12,12 +12,14 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QLi
 from paperassist import references
 
 from .acquisition import reference_status, status_tone
-from .jobs import JobWatcher
-from .citations import (citation_matches, citation_position, next_citation_index,
+from .citations import (bibliography_destination, citation_matches, citation_position, next_citation_index,
                         reading_position, reveal_citation)
+from .jobs import JobWatcher
+from .theme import FlowLayout, INK, LINE, TEAL, TONE_NEUTRAL, reference_palette
 
 SHOWN_CHARS = 240  # one bibliography entry can run to a page; the tooltip keeps the whole text
-PAD = 6
+PAD_X = 11
+PAD_Y = 8
 
 
 def _load_or_analyze(library, document_id):
@@ -41,7 +43,7 @@ def reference_matcher(query):
 
 
 class CardDelegate(QStyledItemDelegate):
-    """Paints the collapsed cards from their three text lines, so a long bibliography owns no widget trees."""
+    """Paints collapsed cards with warm status tints and a 3px left bar, keeping zero widget trees."""
 
     def __init__(self, view):
         super().__init__(view)
@@ -51,45 +53,76 @@ class CardDelegate(QStyledItemDelegate):
         title, count, status = index.data().split("\n")
         return title, count, status
 
-    def _heights(self, font, width, title):
-        metrics = QFontMetrics(font)
-        wrapped = metrics.boundingRect(QRect(0, 0, width, 10000), Qt.TextWordWrap, title).height()
-        return wrapped, metrics.lineSpacing()
+    def _fonts(self, base):
+        meta = QFont(base)
+        meta.setBold(True)
+        title = QFont(base)
+        title.setWeight(QFont.DemiBold)
+        return meta, title
+
+    def _heights(self, base_font, width, title):
+        meta_font, title_font = self._fonts(base_font)
+        title_metrics = QFontMetrics(title_font)
+        meta_metrics = QFontMetrics(meta_font)
+        body_metrics = QFontMetrics(base_font)
+        wrapped = title_metrics.boundingRect(QRect(0, 0, width, 10000), Qt.TextWordWrap, title).height()
+        return wrapped, meta_metrics.lineSpacing(), body_metrics.lineSpacing()
 
     def sizeHint(self, option, index):
         if (expanded := index.data(Qt.SizeHintRole)) is not None:  # set while the card holds its widgets
             return expanded
-        width = max(self.view.viewport().width() - 2 * PAD, 40)
+        width = max(self.view.viewport().width() - PAD_X - 8, 40)
         title, _, _ = self._lines(index)
-        wrapped, line = self._heights(option.font, width, title)
-        return QSize(width + 2 * PAD, wrapped + 2 * line + 2 * PAD + 4)
+        wrapped, meta_line, status_line = self._heights(option.font, width, title)
+        return QSize(width + PAD_X + 8, wrapped + meta_line + status_line + 2 * PAD_Y + 6)
 
     def paint(self, painter, option, index):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
-        opt.text = ""
-        style = opt.widget.style() if opt.widget else QApplication.style()
-        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)  # background, selection and focus frame
+        border_hex, fill_hex, status_hex = index.data(Qt.UserRole + 3) or TONE_NEUTRAL
+        hovered = bool(opt.state & QStyle.State_MouseOver)
         selected = bool(opt.state & QStyle.State_Selected)
-        palette = option.palette
-        title, count, status = self._lines(index)
-        area = option.rect.adjusted(PAD, PAD, -PAD, -PAD)
-        wrapped, line = self._heights(option.font, area.width(), title)
+
         painter.save()
-        painter.setFont(option.font)
-        rows = ((title, palette.link().color(), wrapped), (count, palette.text().color(), line),
-                (status, QColor(index.data(Qt.UserRole + 2)), line))
+        bg = QColor(fill_hex)
+        if selected or hovered:
+            bg = bg.darker(104 if hovered and not selected else 107)
+        painter.fillRect(option.rect, bg)
+        painter.fillRect(QRect(option.rect.left(), option.rect.top(), 3, option.rect.height()), QColor(border_hex))
+        painter.fillRect(QRect(option.rect.left(), option.rect.bottom(), option.rect.width(), 1), QColor(LINE))
+
+        title, count, status = self._lines(index)
+        area = option.rect.adjusted(PAD_X, PAD_Y, -8, -PAD_Y)
+        meta_font, title_font = self._fonts(option.font)
+        wrapped, meta_line, status_line = self._heights(option.font, area.width(), title)
+
         top = area.top()
-        for text, color, height in rows:
-            painter.setPen(palette.highlightedText().color() if selected else color)
-            painter.drawText(QRect(area.left(), top, area.width(), height), Qt.TextWordWrap, text)
-            top += height + 2
+        painter.setFont(meta_font)
+        painter.setPen(QColor(TEAL))
+        painter.drawText(QRect(area.left(), top, area.width(), meta_line), Qt.AlignLeft | Qt.AlignVCenter, count)
+        top += meta_line + 3
+
+        painter.setFont(title_font)
+        painter.setPen(QColor(INK))
+        painter.drawText(QRect(area.left(), top, area.width(), wrapped), Qt.TextWordWrap, title)
+        top += wrapped + 3
+
+        painter.setFont(option.font)
+        painter.setPen(QColor(status_hex))
+        painter.drawText(QRect(area.left(), top, area.width(), status_line), Qt.AlignLeft | Qt.AlignVCenter, status)
+        if opt.state & QStyle.State_HasFocus:
+            painter.setPen(QPen(QColor(TEAL), 2, Qt.DashLine))
+            painter.drawRect(option.rect.adjusted(3, 2, -3, -3))
         painter.restore()
 
 
 class Card(QWidget):
-    """The one expanded card: title link, citation count and the acquisition actions."""
+    """The one expanded card: citation step button, title link, and inline acquisition actions."""
     collapse_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, objectName="expanded-card")
+        self.setAttribute(Qt.WA_StyledBackground, True)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -112,48 +145,69 @@ class ReferencesPanel(QWidget):
         self.series, self.located = weakref.WeakKeyDictionary(), weakref.WeakKeyDictionary()
         self.stepping, self.pending_reload = set(), set()
         self.payload_status = "not_analyzed"
+        self.pending_citation = None
         self.filters, self.analyzing = {}, {}  # filter text and running jobs, by document id
-        self.filter = QLineEdit(placeholderText="Filter references", clearButtonEnabled=True)
+        self.filter = QLineEdit(placeholderText="Filter references…", clearButtonEnabled=True)
         self.filter.setAccessibleName("Filter references")
-        self.status = QLabel(wordWrap=True)
-        self.analysis_note = QLabel("Detected citations only; bibliography and counts may be incomplete.", wordWrap=True)
+        self.status = QLabel(objectName="muted-note", wordWrap=True)
+        self.analysis_note = QLabel("Detected citations only; bibliography and counts may be incomplete.",
+                                    objectName="muted-note", wordWrap=True)
         self.analysis_note.hide()
-        self.progress = QProgressBar(maximum=0, textVisible=False, maximumHeight=6)  # no progress figures: busy only
+        self.progress = QProgressBar(maximum=0, textVisible=False, maximumHeight=4)  # no progress figures: busy only
         self.retry = QPushButton("Analyze again")
+        self.retry.setProperty("link", True)
         self.acquire = QPushButton("Acquire references")
+        self.acquire.setProperty("link", True)
         self.repair = QPushButton("Repair downloads")
+        self.repair.setProperty("link", True)
         self.acquire.clicked.connect(lambda: self.acquisition and self.acquisition.offer(self.document_id, self.refs))
         self.repair.clicked.connect(lambda: self.acquisition and self.acquisition.repair(self.document_id))
+
+        self.actions_bar = QWidget()
+        actions_flow = FlowLayout(self.actions_bar, margin=0, h_spacing=14, v_spacing=4)
+        actions_flow.addWidget(self.acquire)
+        actions_flow.addWidget(self.repair)
+
         self.choices = QWidget()
         self.choice_layout = QVBoxLayout(self.choices)
-        self.choice_layout.setContentsMargins(0, 0, 0, 0)
+        self.choice_layout.setContentsMargins(0, 4, 0, 4)
+        self.choice_layout.setSpacing(4)
         self.choices.hide()
+
         self.list = QListWidget(horizontalScrollBarPolicy=Qt.ScrollBarAlwaysOff, resizeMode=QListView.Adjust,
                                 verticalScrollMode=QListWidget.ScrollPerPixel)
+        self.list.setMouseTracking(True)
         self.list.setAccessibleName("References")
         self.list.setItemDelegate(CardDelegate(self.list))
         self.expanded = None  # id of the single card that owns widgets
+
         column = QVBoxLayout(self)
-        column.setContentsMargins(6, 0, 6, 6)
+        column.setContentsMargins(10, 8, 10, 8)
+        column.setSpacing(6)
         row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(self.status, 1)
         row.addWidget(self.retry)
         column.addWidget(self.filter)
         column.addLayout(row)
         column.addWidget(self.analysis_note)
-        column.addWidget(self.acquire)
-        column.addWidget(self.repair)
+        column.addWidget(self.actions_bar)
         column.addWidget(self.progress)
         column.addWidget(self.choices)
         column.addWidget(self.list, 1)
+
         self.filter.textChanged.connect(self._filtered)
         self.retry.clicked.connect(lambda: self.analyze(self.document_id))
         self.list.itemClicked.connect(self._expand)
         self.list.itemActivated.connect(lambda item: self._expand(item, focus=True))  # Enter, from the keyboard
         self.list.itemDoubleClicked.connect(self._open)
         self._set_busy(False)
-        self.acquire.hide()
-        self.repair.hide()
+        self._set_actions_visible(False)
+
+    def _set_actions_visible(self, visible):
+        self.acquire.setVisible(visible)
+        self.repair.setVisible(visible)
+        self.actions_bar.setVisible(visible)
 
     def minimumSizeHint(self):
         # An expanded card cannot shrink, so the panel must be wide enough for it. Only stable quantities
@@ -170,13 +224,18 @@ class ReferencesPanel(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.expanded is not None and (item := self._item(self.expanded)):
-            self._fit_item(item)  # a wrapped title makes the card's height depend on its width
+            self._fit_item(item)  # a wrapped title or FlowLayout makes the card's height depend on its width
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            if self.expanded is not None and (item := self._item(self.expanded)):
+                self._fit(item)
 
     def set_acquisition(self, acquisition):
         self.acquisition = acquisition
         acquisition.changed.connect(self.reload)
-        self.acquire.setVisible(self.document_id is not None)
-        self.repair.setVisible(self.document_id is not None)
+        self._set_actions_visible(self.document_id is not None and self.workspace is not None)
 
     def bind_view(self, view):
         self.view = view
@@ -205,10 +264,10 @@ class ReferencesPanel(QWidget):
         self.filters[self.document_id] = self.filter.text()
         if not same:
             self.expanded = None
+            self.pending_citation = None
         self.document_id = document_id
         available = document_id is not None and self.workspace is not None
-        self.acquire.setVisible(available)
-        self.repair.setVisible(available)
+        self._set_actions_visible(available)
         self.acquire.setEnabled(available)
         self.repair.setEnabled(available)
         self.choices.hide()
@@ -268,6 +327,7 @@ class ReferencesPanel(QWidget):
             item.setData(Qt.UserRole, ref.get("local_document_id"))
             item.setData(Qt.UserRole + 1, ref["id"])
             item.setData(Qt.UserRole + 2, status_tone(ref))
+            item.setData(Qt.UserRole + 3, reference_palette(ref))
             self.list.addItem(item)
         if self.expanded is not None:
             item = self._item(self.expanded)
@@ -303,20 +363,37 @@ class ReferencesPanel(QWidget):
         self.expanded = ref["id"]
         self.list.setCurrentItem(item)
         if self.list.itemWidget(item) is None:
+            border_hex, fill_hex, _ = reference_palette(ref)
             card = Card()
-            card.setAutoFillBackground(True)
+            card.setStyleSheet(
+                f"QWidget#expanded-card {{ background: {fill_hex}; border: 1px solid #7e968d; "
+                f"border-left: 3px solid {border_hex}; }}"
+            )
             card.collapse_requested.connect(self._collapse_current)
             layout = QVBoxLayout(card)
-            layout.setContentsMargins(PAD, 5, PAD, 8)
-            card.title = QLabel(f'<a href="open">{escape(item.text().split(chr(10))[0])}</a>', wordWrap=True)
+            layout.setContentsMargins(PAD_X, PAD_Y, 8, PAD_Y)
+            layout.setSpacing(5)
+
+            top_row = QHBoxLayout()
+            top_row.setContentsMargins(0, 0, 0, 0)
+            card.count = QPushButton(self._count(ref))
+            card.count.setProperty("link", True)
+            card.count.setAccessibleName("Go to the next citation in the text")
+            card.count.clicked.connect(lambda _=False, target=ref: self.step(target))
+            top_row.addWidget(card.count)
+            top_row.addStretch(1)
+            layout.addLayout(top_row)
+
+            title_text = escape(item.text().split("\n")[0])
+            card.title = QLabel(
+                f'<a href="open" style="color:{INK}; font-weight:600; text-decoration:none;">{title_text}</a>',
+                wordWrap=True,
+            )
             card.title.setToolTip(item.toolTip())
             card.title.setTextInteractionFlags(Qt.LinksAccessibleByMouse | Qt.LinksAccessibleByKeyboard)
             card.title.linkActivated.connect(lambda _=False, target=ref: self._reference_open(target))
             layout.addWidget(card.title)
-            card.count = QPushButton(self._count(ref))
-            card.count.setAccessibleName("Go to the next citation in the text")
-            card.count.clicked.connect(lambda _=False, target=ref: self.step(target))
-            layout.addWidget(card.count)
+
             if self.acquisition:
                 actions = self.acquisition.card_actions(self.document_id, ref, card)
                 layout.addWidget(actions)
@@ -336,12 +413,15 @@ class ReferencesPanel(QWidget):
             return
         width = max(self.list.viewport().width(), 40)
         card.ensurePolished()  # unpolished buttons report smaller hints and the card would be clipped
-        size = QSize(width, max(card.layout().totalHeightForWidth(width), card.sizeHint().height()))
+        height = card.layout().totalHeightForWidth(width) if card.layout().hasHeightForWidth() else card.sizeHint().height()
+        size = QSize(width, height)
         if size != item.sizeHint():
             item.setSizeHint(size)
             self.list.doItemsLayout()
 
     def _collapse(self, item):
+        if card := self.list.itemWidget(item):
+            card.hide()  # removeItemWidget schedules deletion; do not leave it visible until then
         self.list.removeItemWidget(item)
         item.setSizeHint(QSize())  # back to the delegate's size
         self.list.doItemsLayout()
@@ -426,7 +506,17 @@ class ReferencesPanel(QWidget):
             self._message(f"Exact text was not located; showing page {citations[number]['page']}")
 
     def _citation_link(self, view, link):
-        if view is None or view is not self.view or not self.refs:
+        if view is None or view is not self.view:
+            return False
+        if not self.refs:
+            if bibliography_destination(link.destination):
+                self.reveal_requested.emit()
+                if self.document_id in self.analyzing:
+                    self.pending_citation = (self.document_id, weakref.ref(view), link)
+                    self._message("Loading references to reveal this citation…", busy=True)
+                else:
+                    self._message("This citation was not found among the extracted references.", retry=True)
+                return True
             return False
         page = next((page for page, links in view.doc._links.items() if any(item is link for item in links)), None)
         if page is None:
@@ -437,21 +527,41 @@ class ReferencesPanel(QWidget):
                         and min(word[3], link.rect.y1) > max(word[1], link.rect.y0))
         matches = citation_matches(self.refs, text, destination)
         if not matches:
+            if bibliography_destination(destination):
+                self.reveal_requested.emit()
+                self._message("This citation was not found among the extracted references.", retry=True)
+                return True
             return False
+        self.reveal_requested.emit()
         if len(matches) == 1:
-            self._reference_open(matches[0])
+            self._follow_citation(matches[0])
         else:
             while self.choice_layout.count():
                 self.choice_layout.takeAt(0).widget().deleteLater()
-            self.choice_layout.addWidget(QLabel(f"Citation {text}: choose a reference", wordWrap=True))
+            self.choice_layout.addWidget(QLabel(f"Citation {text}: choose a reference", objectName="muted-note", wordWrap=True))
             for ref in matches:
                 label = f"{ref.get('label', '')} {ref.get('title') or ref.get('raw') or 'Reference'}"
                 button = QPushButton(label.replace("&", "&&"))
-                button.clicked.connect(lambda _=False, target=ref: self._reference_open(target))
+                button.clicked.connect(lambda _=False, target=ref: self._follow_citation(target))
                 self.choice_layout.addWidget(button)
             self.choices.show()
-        self.reveal_requested.emit()
         return True
+
+    def _follow_citation(self, ref):
+        if ref.get("local_document_id") and not ref.get("local_invalid"):
+            self._reference_open(ref)
+        else:
+            self._reveal_reference(ref)
+
+    def _reveal_reference(self, ref):
+        self.choices.hide()
+        item = self._item(ref["id"])
+        if item is None and self.filter.text():
+            self.filter.clear()
+            item = self._item(ref["id"])
+        if item is not None:
+            self._expand(item)
+            self.list.scrollToItem(item, QListView.PositionAtCenter)
 
     # ---- analysis job ---------------------------------------------------------------------
     def analyze(self, document_id):
@@ -486,6 +596,11 @@ class ReferencesPanel(QWidget):
         if document_id == self.document_id:
             self.refs, self.payload_status = payload["references"], payload["status"]
             self._fill()
+            if self.pending_citation:
+                _, target, link = self.pending_citation
+                self.pending_citation = None
+                if (view := target()) is not None and view is self.view and not self._citation_link(view, link):
+                    self._message("This citation was not found among the extracted references.")
         self.references_loaded.emit(document_id, payload["references"])
         self.refs_changed.emit(document_id, payload["references"])
 

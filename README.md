@@ -48,7 +48,28 @@ starts and stops its own server. Modified PDFs and comment drafts offer **Save**
 
 ### Native reader
 
-From a source checkout, install and launch the Qt Widgets/PDFium reader:
+#### Standalone Linux Installer (No Python Required)
+
+For Linux `x86_64`, PaperAssist provides a self-extracting standalone installer that includes the complete Python runtime, Qt Widgets/PySide6, and PDFium rendering stack:
+
+```bash
+# 1. Verify package integrity
+sha256sum -c PaperAssist-0.1.0a3-linux-x86_64.sh.sha256
+sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --verify
+
+# 2. Install per-user (no root / sudo required)
+sh ./PaperAssist-0.1.0a3-linux-x86_64.sh
+```
+
+- **Launch:** Start **PaperAssist** from your application menu, or run `paperassist` from a terminal (`~/.local/bin/paperassist`).
+- **Upgrade:** Re-run the installer script for a newer version (`sh ./PaperAssist-<new-version>-linux-x86_64.sh`). Upgrades stage in isolation and swap atomically, rolling back automatically if validation fails.
+- **Repair:** Recover an interrupted installation with `sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --repair`. After an interrupted first installation, repair removes unchanged integration files so installation can be retried; it reports that no prior installation exists to restore.
+- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` or `sh ./PaperAssist-0.1.0a3-linux-x86_64.sh --uninstall`. Uninstallation removes only application-owned files, preserving your library, PDFs, notes, and preferences.
+- **Requirements & Compatibility:** Linux `x86_64`, `flock` from util-linux for installation and maintenance, X11 or Wayland, and system OpenGL/EGL libraries. The local `0.1.0a3` candidate requires **glibc >= 2.42**. CI targets `ubuntu-22.04` with an ELF gate requiring GLIBC <= 2.35; that build and clean Ubuntu/Debian validation remain unexecuted. Prior installers `0.1.0a1` and `0.1.0a2` are retained in `dist/` as historical review evidence. See the [maintenance follow-up](docs/development/linux-alpha-maintenance.md).
+
+#### Running from Source Checkout
+
+To run the native reader directly from a local development checkout:
 
 ```bash
 .venv/bin/python -m pip install -e '.[native]'

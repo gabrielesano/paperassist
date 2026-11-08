@@ -1,6 +1,9 @@
 """One tab: the main paper and, optionally, one quick-view paper in a resizable split."""
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QSplitter, QSplitterHandle
+
+from .theme import TEAL
 
 NARROW = 720  # below this width the quick view always goes underneath
 KEY_STEP = 40
@@ -12,6 +15,24 @@ class Handle(QSplitterHandle):
     def __init__(self, orientation, splitter):
         super().__init__(orientation, splitter)
         self.setFocusPolicy(Qt.TabFocus)
+        self.setAccessibleName("Resize quick view")
+        self.setAttribute(Qt.WA_Hover, True)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        active = self.underMouse() or self.hasFocus()
+        painter.fillRect(self.rect(), QColor("#b7c6bd" if active else "#cbd5ce"))
+        w, h = self.width(), self.height()
+        pill = (QRectF((w - 36) / 2, (h - 3) / 2, 36, 3) if self.orientation() == Qt.Vertical
+                else QRectF((w - 3) / 2, (h - 36) / 2, 3, 36))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#6d8578"))
+        painter.drawRoundedRect(pill, 1.5, 1.5)
+        if self.hasFocus():
+            painter.setPen(QPen(QColor(TEAL), 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(self.rect().adjusted(1, 1, -1, -1))
 
     def event(self, event):
         if event.type() == QEvent.ShortcutOverride and event.key() in (Qt.Key_Home, Qt.Key_End):
@@ -38,6 +59,7 @@ class DocTab(QSplitter):
         self.side_by_side, self._narrow = side_by_side, False
         self.shares = {Qt.Vertical: 0.4, Qt.Horizontal: 0.5}
         self.setChildrenCollapsible(False)
+        self.setHandleWidth(8)
         self.addWidget(main)
         main.view.activated.connect(lambda: self.activate(main))
         self.splitterMoved.connect(self._remember_share)

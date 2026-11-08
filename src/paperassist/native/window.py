@@ -1,12 +1,14 @@
 """Main window: one paper per tab, save state everywhere, and the Save/Discard/Cancel rules."""
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QStackedWidget, QTabBar, QTabWidget, QToolBar
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
+                               QMainWindow, QMessageBox, QPushButton, QSplitter,
+                               QStackedWidget, QTabBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from paperassist import settings
 
-from .annotation_bar import install as install_annotation_bar
 from .acquisition import AcquisitionController
+from .annotation_bar import install as install_annotation_bar
 from .app_menu import install as install_app_menu
 from .comments import install as install_comments
 from .document import SaveState
@@ -21,20 +23,72 @@ from .shortcuts import install as install_shortcuts
 from .sidebar import DetailsPanel, SideColumn
 from .source import FileSource
 from .tab import DocTab
-from .toolbar import install_overflow
+from .theme import APP_STYLE, INK, MUTED, icon, serif_heading_font
+from .toolbar import install_overflow, reserve_zoom_width
 
 MARKERS = {SaveState.UNSAVED: " ●", SaveState.SAVING: " …", SaveState.FAILED: " !"}
 WORST_FIRST = [SaveState.FAILED, SaveState.SAVING, SaveState.UNSAVED, SaveState.SAVED]
-STYLE = """
-QToolBar { background: #ece9e3; border: 0; border-bottom: 1px solid #cfcac1; spacing: 2px; }
-QToolButton { padding: 3px 8px; border: 1px solid transparent; border-radius: 4px; }
-QToolButton#qt_toolbar_ext_button { padding: 0px; border: 0px; }
-QToolButton:hover { background: #dfdbd3; }
-QToolButton:checked { background: #cfe3e0; border-color: #2f8f86; }
-QTabBar::tab { padding: 5px 12px; }
-#pane { border-top: 2px solid transparent; }
-#pane[active="true"] { border-top-color: #2f8f86; }
-"""
+STYLE = APP_STYLE
+
+
+class WelcomeView(QWidget):
+    """Editorial empty-reader surface matching the warm-paper welcome screen."""
+
+    def __init__(self, window):
+        super().__init__(window, objectName="welcome-screen")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAccessibleName("Welcome to PaperAssist")
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(72, 48, 72, 48)
+        card = QWidget()
+        card.setMaximumWidth(520)
+        column = QVBoxLayout(card)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(10)
+
+        rule = QFrame(objectName="welcome-rule")
+        rule.setFixedSize(44, 3)
+        eyebrow = QLabel("LOCAL RESEARCH LIBRARY", objectName="welcome-eyebrow")
+        self.heading = QLabel("Read with your references in reach.", wordWrap=True)
+        self.heading.setProperty("headingScale", "welcome")
+        self.heading.setFont(serif_heading_font(self.font(), 2.05))
+        body = QLabel(
+            "Open a paper from your library to inspect its outline, follow citations, "
+            "and consult cited PDFs in a split view or separate tab.",
+            objectName="muted-note",
+            wordWrap=True,
+        )
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.library_button = None
+        if window.workspace is not None:
+            self.library_button = QPushButton("Open library", accessibleName="Open library")
+            self.library_button.setProperty("primary", True)
+            self.library_button.clicked.connect(window.show_library)
+            actions.addWidget(self.library_button)
+        self.open_file_button = QPushButton("Open PDF…", accessibleName="Open a PDF file")
+        if window.workspace is None:
+            self.open_file_button.setProperty("primary", True)
+        self.open_file_button.clicked.connect(window.open_dialog)
+        actions.addWidget(self.open_file_button)
+        actions.addStretch(1)
+
+        column.addStretch(1)
+        column.addWidget(rule)
+        column.addSpacing(12)
+        column.addWidget(eyebrow)
+        column.addWidget(self.heading)
+        column.addWidget(body)
+        column.addSpacing(6)
+        column.addLayout(actions)
+        column.addStretch(1)
+        outer.addWidget(card, 1)
+        outer.addStretch(1)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange) and hasattr(self, "heading"):
+            self.heading.setFont(serif_heading_font(self.font(), 2.05))
 
 
 class MainWindow(QMainWindow):
@@ -44,16 +98,17 @@ class MainWindow(QMainWindow):
         """workspace is the opened library, or None for loose files."""
         super().__init__()
         self.client, self.workspace, self.library_dialog, self.switch_target = client, workspace, None, None
+        self.annotation_bar = None
         saved = settings.preferences()  # shared with the web reader
         self.side_by_side = saved.get("quick_view_layout") == "side"
         self.resize(1400, 900)
         self.setMinimumSize(800, 600)
         self.setStyleSheet(STYLE)
-        self.tabs = QTabWidget(tabsClosable=True, movable=True, documentMode=True)
-        self.tabs.tabCloseRequested.connect(lambda index: self.close_tab(index))
+        self.tabs = QTabWidget(tabsClosable=False, movable=True, documentMode=True)
         self.tabs.currentChanged.connect(lambda _: self.refresh())
         self._build_columns(saved)
         self.state_label = QLabel()
+        self.statusBar().setSizeGripEnabled(False)
         self.statusBar().addWidget(self.state_label)
         self._build_actions()
         self.annotation_bar = install_annotation_bar(self)
@@ -66,20 +121,39 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _build_actions(self):
-        bar = self.addToolBar("Main")
+        self.main_bar = bar = self.addToolBar("Main")
         bar.setMovable(False)
+        bar.setIconSize(QSize(16, 16))
+
+        self._action(bar, "Library", ["Ctrl+L"], self.show_library)
+        self._action(bar, "Open", ["Ctrl+O"], self.open_dialog)
+        self.save_action = self._action(bar, "Save", ["Ctrl+S"], self.save)
+        if save_btn := bar.widgetForAction(self.save_action):
+            save_btn.setObjectName("save-button")
+        self._action(bar, "Panels", ["Ctrl+B"], self.toggle_columns, glyph="panels")
+        self._action(bar, "Find", ["Ctrl+F"], lambda: self._on_pane(lambda p: p.find_bar.open()), glyph="find")
+        bar.addSeparator()
+
+        zoom_out = self._action(bar, "Zoom out", [], lambda: self._on_main(lambda p: p.view.zoom_by(0.8)), glyph="minus")
+        self.page_anchor_action = zoom_out
+        self.fit_action = self._action(bar, "Fit width", [], lambda: self._on_main(lambda p: p.view.fit_width()))
+        self._action(bar, "Zoom in", [], lambda: self._on_main(lambda p: p.view.zoom_by(1.25)), glyph="plus")
+        for text, keys, operation in (("Zoom out", ["Ctrl+-"], lambda p: p.view.zoom_by(0.8)),
+                                      ("Fit width", ["Ctrl+0"], lambda p: p.view.fit_width()),
+                                      ("Zoom in", ["Ctrl+=", "Ctrl++"], lambda p: p.view.zoom_by(1.25))):
+            self._window_action(text, keys, lambda operation=operation: self._on_pane(operation))
+        bar.addSeparator()
+
         self.highlight_action = self._action(bar, "Highlight", ["H"], self._set_highlighting, checkable=True)
-        for text, keys, slot in [
-            ("Open", ["Ctrl+O"], self.open_dialog), ("Library", ["Ctrl+L"], self.show_library),
-            ("Panels", ["Ctrl+B"], self.toggle_columns), ("Save", ["Ctrl+S"], self.save),
-            ("Find", ["Ctrl+F"], lambda: self._on_pane(lambda p: p.find_bar.open())),
-            ("Zoom out", ["Ctrl+-"], lambda: self._on_pane(lambda p: p.view.zoom_by(0.8))),
-            ("Zoom in", ["Ctrl+=", "Ctrl++"], lambda: self._on_pane(lambda p: p.view.zoom_by(1.25))),
-            ("Fit width", ["Ctrl+0"], lambda: self._on_pane(lambda p: p.view.fit_width())),
+        self.after_tools_action = bar.addSeparator()
+
+        # Keep secondary navigation shortcuts active and listed in Help without cluttering the bar.
+        for text, keys, slot in (
             ("Back", ["Alt+Left"], lambda: self._on_pane(lambda p: p.view.go_back())),
-            ("Quick view", ["Ctrl+E"], self.quick_dialog), ("Close tab", ["Ctrl+W"], lambda: self.close_tab(self.tabs.currentIndex())),
-        ]:
-            self._action(bar, text, keys, slot)
+            ("Quick view", ["Ctrl+E"], self.quick_dialog),
+            ("Close tab", ["Ctrl+W"], lambda: self.close_tab(self.tabs.currentIndex())),
+        ):
+            self._window_action(text, keys, slot)
 
     # ---- side columns ----------------------------------------------------------------------
     def _build_columns(self, saved):
@@ -95,17 +169,17 @@ class MainWindow(QMainWindow):
         self.acquisition.open_requested.connect(self.open_library_document_in_quick_view)
         self.acquisition.preferences_requested.connect(self._acquisition_preferences)
         self.details.reveal_requested.connect(lambda: self.comments.show_mode("references"))
-        self.outline_column, self.details_column = SideColumn("Outline", self.outline), SideColumn("References / Comments", self.detail_switch)
+        self.outline_column = SideColumn("Outline", self.outline)
+        self.details_column = SideColumn("References / Comments", self.detail_switch, header_widget=self.detail_switch.tab_bar)
         self.outline_column.hide_requested.connect(lambda: self.set_columns(outline=False))
         self.details_column.hide_requested.connect(lambda: self.set_columns(details=False))
         self.outline_column.setVisible(saved.get("outline_expanded") is not False)
         self.details_column.setVisible(saved.get("details_expanded") is not False)
         self._shown_for, self.outlines = {}, {}  # column -> key of the paper it shows; bookmarks by paper key
         splitter = QSplitter(Qt.Horizontal, childrenCollapsible=False)
+        splitter.setHandleWidth(1)
         self.reader_stack = QStackedWidget()
-        self.welcome = QLabel("Open a PDF or choose a paper from Library to start reading.",
-                              alignment=Qt.AlignCenter, wordWrap=True)
-        self.welcome.setAccessibleName("Welcome to PaperAssist")
+        self.welcome = WelcomeView(self)
         self.reader_stack.addWidget(self.welcome)
         self.reader_stack.addWidget(self.tabs)
         for widget in (self.outline_column, self.reader_stack, self.details_column):
@@ -198,12 +272,27 @@ class MainWindow(QMainWindow):
         if self.pane():
             action(self.pane())
 
-    def _action(self, bar, text, keys, slot, checkable=False):
-        action = QAction(text, self, checkable=checkable)
+    def _on_main(self, action):
+        if self.tab():
+            action(self.tab().main)
+
+    def _window_action(self, text, keys, slot):
+        action = QAction(text, self)
         action.setShortcuts([QKeySequence(key) for key in keys])
-        action.setToolTip(f"{text} ({keys[0]})")
+        action.setToolTip(f"{text} ({keys[0]})" if keys else text)
+        action.triggered.connect(lambda _=False: slot())
+        self.addAction(action)
+        return action
+
+    def _action(self, bar, text, keys, slot, checkable=False, glyph=None):
+        action = QAction(icon(glyph, INK, 16), text, self, checkable=checkable) if glyph else QAction(text, self, checkable=checkable)
+        action.setShortcuts([QKeySequence(key) for key in keys])
+        action.setToolTip(f"{text} ({keys[0]})" if keys else text)
         action.toggled.connect(slot) if checkable else action.triggered.connect(lambda _=False: slot())
         bar.addAction(action)
+        if glyph and (btn := bar.widgetForAction(action)):
+            btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            btn.setAccessibleName(text)
         return action
 
     # ---- what is open --------------------------------------------------------------------
@@ -215,7 +304,7 @@ class MainWindow(QMainWindow):
         return self.tab().active if self.tab() else None
 
     def all_panes(self):
-        return [pane for i in range(self.tabs.count()) for pane in self.tabs.widget(i).panes()]
+        return [pane for i in range(self.tabs.count()) if (tab := self.tabs.widget(i)) for pane in tab.panes()]
 
     def _new_pane(self, source):
         pane = Pane(source, self.client)
@@ -227,7 +316,14 @@ class MainWindow(QMainWindow):
         return pane
 
     def _add_tab(self, tab):
-        self.tabs.setCurrentIndex(self.tabs.addTab(tab, ""))
+        index = self.tabs.addTab(tab, "")
+        close_btn = QToolButton(objectName="tab-close-button", autoRaise=True, focusPolicy=Qt.NoFocus)
+        close_btn.setIcon(icon("close", MUTED, 12))
+        close_btn.setIconSize(QSize(12, 12))
+        close_btn.setFixedSize(18, 18)
+        close_btn.clicked.connect(lambda _=False, target=tab: self.close_tab(self.tabs.indexOf(target)))
+        self.tabs.tabBar().setTabButton(index, QTabBar.RightSide, close_btn)
+        self.tabs.setCurrentIndex(index)
         self.refresh()
         document_id = getattr(tab.main.view.doc.source, "document_id", None)
         if document_id is not None:
@@ -323,6 +419,14 @@ class MainWindow(QMainWindow):
         else:
             self._add_tab(self._wrap(self.tab().take_quick()))
 
+    def sync_zoom_label(self):
+        pane = self.tab().main if self.tab() else None
+        if hasattr(self, "fit_action"):
+            text = "Fit width" if not pane or pane.view.fit else f"{round(pane.view.zoom * 100)}%"
+            if btn := self.main_bar.widgetForAction(self.fit_action):
+                btn.setAccessibleName("Main paper: fit width")
+                reserve_zoom_width(self.fit_action, btn, text)
+
     # ---- save state -----------------------------------------------------------------------
     def refresh(self, *_):
         """Recompute locks, tab labels, window title and status line from the documents."""
@@ -343,12 +447,21 @@ class MainWindow(QMainWindow):
             for side in (QTabBar.LeftSide, QTabBar.RightSide):
                 if button := self.tabs.tabBar().tabButton(i, side):
                     button.setAccessibleName(f"Close {tab.main.title}")
-        if hasattr(self, "annotation_bar"):  # refresh can run while the window is being built
+        if self.annotation_bar is not None:  # refresh can run while the window is being built
             self.annotation_bar.refresh()
         self._update_columns()
         self.refreshed.emit()
+        self.sync_zoom_label()
         pane = self.pane()
         self.reader_stack.setCurrentWidget(self.tabs if pane else self.welcome)
+        dirty = bool(pane and pane.modified and not pane.view.locked)
+        if hasattr(self, "save_action"):
+            self.save_action.setEnabled(dirty)
+            if save_btn := self.main_bar.widgetForAction(self.save_action):
+                if save_btn.property("dirty") != dirty:
+                    save_btn.setProperty("dirty", dirty)
+                    save_btn.style().unpolish(save_btn)
+                    save_btn.style().polish(save_btn)
         if pane is None:
             self.setWindowTitle("PaperAssist")
             self.state_label.clear()

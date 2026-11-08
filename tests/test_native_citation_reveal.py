@@ -1,0 +1,124 @@
+"""PDF citation clicks open local papers or reveal missing references."""
+import io
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from test_native_support import PySide6, needs_qt, pdf_available
+
+if pdf_available and PySide6:
+    from pypdf import PdfWriter
+    from pypdf.generic import ArrayObject, DictionaryObject, FloatObject, NameObject, TextStringObject
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QPushButton
+    from paperassist import references
+    from paperassist.native.engine import Pdf, Rect
+    from paperassist.native.renderer import RenderClient
+    from paperassist.native.window import MainWindow
+    from paperassist.workspace import Workspace
+    from test_library_window import cited_pdf
+
+
+@needs_qt
+class CitationRevealTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.client = RenderClient()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.shutdown()
+
+    def pump(self, condition=lambda: False, timeout=.2):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.app.processEvents()
+            if condition():
+                return True
+            time.sleep(.002)
+        return condition()
+
+    def test_mouse_click_opens_local_reference_and_reveals_missing_reference(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = cited_pdf(root / "main.pdf", pages=3)
+            pdf = Pdf(path.read_bytes())
+            words = [word for word in pdf.words(0) if word[4].rstrip(".") in ("[1]", "[2]")]
+            self.assertEqual(len(words), 2)
+            pdf.close()
+            writer = PdfWriter()
+            writer.append(path)
+            writer.add_named_destination("unmapped-citation", 2)
+            for x0, y0, x1, y1, *_ in words:
+                writer.add_annotation(0, DictionaryObject({
+                    NameObject("/Subtype"): NameObject("/Link"),
+                    NameObject("/Rect"): ArrayObject(FloatObject(v) for v in (x0, 500-y1, x1, 500-y0)),
+                    NameObject("/Dest"): TextStringObject("unmapped-citation"),
+                }))
+            output = io.BytesIO()
+            writer.write(output)
+            with patch("paperassist.paths.config_file", return_value=root / "config.json"):
+                workspace = Workspace(root / "library")
+                window = None
+                try:
+                    main = workspace.library.import_stream(io.BytesIO(output.getvalue()), "main.pdf")
+                    other_path = cited_pdf(root / "other.pdf", pages=4)
+                    other = workspace.library.import_stream(io.BytesIO(other_path.read_bytes()), "other.pdf")
+                    existing_path = cited_pdf(root / "existing.pdf", pages=5)
+                    existing = workspace.library.import_stream(io.BytesIO(existing_path.read_bytes()), "existing.pdf")
+                    payload = references.analyze(workspace.library, main["id"])
+                    first = next(ref for ref in payload["references"] if ref["label"] == "1")
+                    references.link(workspace.library, main["id"], first["id"], other["id"])
+                    window = MainWindow(self.client, workspace)
+                    window.acquisition.main_opened = lambda *_: None
+                    window.resize(1400, 900)
+                    window.show()
+                    tab = window.open_library_document(main["id"])
+                    view, panel = tab.main.view, window.details
+                    self.assertTrue(self.pump(lambda: panel.list.count() == 2 and view.has_page(0), 10))
+                    quick = window.open_library_document_in_quick_view(existing["id"])
+                    self.assertTrue(self.pump(lambda: quick.view.has_page(0), 10))
+                    panel.filter.setText("no match")
+                    window.comments.show_mode("comments")
+                    window.set_columns(details=False)
+                    view._set_zoom(1.2)
+                    view.goto(0)
+                    self.pump()
+                    link = view.doc.links(0)[0]
+                    position = view._band(0, Rect(*link.rect)).center().toPoint()
+                    self.assertTrue(view.viewport().rect().contains(position))
+                    before = (view.zoom, view.verticalScrollBar().value(), view.horizontalScrollBar().value(),
+                              list(view.history), view.doc.pdf.data)
+                    QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, position)
+                    self.pump()
+                    self.assertTrue(window.details_column.isVisible())
+                    self.assertEqual(window.detail_switch.mode, "references")
+                    self.assertIsNot(tab.quick, quick)
+                    self.assertEqual(tab.quick.view.doc.source.document_id, other["id"])
+                    quick = tab.quick
+                    self.assertEqual((view.zoom, view.verticalScrollBar().value(), view.horizontalScrollBar().value(),
+                                      list(view.history), view.doc.pdf.data), before)
+                    second = next(ref for ref in panel.refs if ref["label"] == "2")
+                    link = view.doc.links(0)[1]
+                    position = view._band(0, Rect(*link.rect)).center().toPoint()
+                    QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, position)
+                    self.pump()
+                    self.assertEqual(panel.expanded, second["id"])
+                    self.assertEqual(panel.filter.text(), "")
+                    self.assertEqual(panel.list.currentItem().data(Qt.UserRole + 1), second["id"])
+                    self.assertTrue(panel.list.viewport().rect().intersects(panel.list.visualItemRect(panel.list.currentItem())))
+                    self.assertIs(tab.quick, quick)
+                    self.assertEqual((view.zoom, view.verticalScrollBar().value(), view.horizontalScrollBar().value(),
+                                      list(view.history), view.doc.pdf.data), before)
+                finally:
+                    if window:
+                        for pane in window.all_panes():
+                            pane.release()
+                        window.close()
+                        window.deleteLater()
+                        self.app.processEvents()
+                    workspace.close()

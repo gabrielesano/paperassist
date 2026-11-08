@@ -1,5 +1,5 @@
 """Brand button and application menu at the start of the Main toolbar."""
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QMenu, QToolBar, QToolButton
 
@@ -7,6 +7,7 @@ from .about import install as install_about
 from .preferences_dialog import install as install_preferences
 from .shortcuts import show_help
 from .sources_dialog import show_sources
+from .theme import brand_icon
 
 
 class AppMenu(QMenu):
@@ -35,7 +36,9 @@ class AppMenu(QMenu):
 class BrandButton(QToolButton):
     def __init__(self, host):
         super().__init__(host, objectName="brand-button", text="PaperAssist", focusPolicy=Qt.TabFocus)
-        self.setStyleSheet("#brand-button { font-weight: 600; }")
+        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.setIcon(brand_icon(20))
+        self.setIconSize(QSize(20, 20))
         self._menu = AppMenu(self, host)
         self.clicked.connect(self.open_menu)
 

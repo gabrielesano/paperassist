@@ -68,11 +68,14 @@ class PageCache:
     def get(self, page):
         return self.entries[page][0] if page in self.entries else None
 
-    def put(self, page, value, size):
+    def put(self, page, value, size, protected=()):
         self.entries.pop(page, None)
         self.entries[page] = (value, size)
         while len(self.entries) > 1 and self.total() > self.budget:
-            self.entries.popitem(last=False)
+            victim = next((key for key in self.entries if key not in protected and key != page), None)
+            if victim is None:
+                victim = next(key for key in self.entries if key != page)
+            self.entries.pop(victim)
 
     def total(self):
         return sum(size for _, size in self.entries.values())

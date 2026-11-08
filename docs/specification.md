@@ -36,14 +36,26 @@ brings back a single collapsed column. The states persist per viewer, and the
 toolbar button stays reachable when the columns are collapsed. Toolbar rows
 reflow above the workspace rather than overlapping PDF text.
 
-The toolbar provides zoom, drawing, text highlighting, and comments. Its target
-is the clearly indicated active document. The outline belongs to the main paper
+The toolbar provides zoom, drawing, text highlighting, and comments. Annotation
+and Save controls target the clearly indicated active document. Main page, find
+and zoom controls always target the main paper; the quick-view header has its own
+page, find and zoom controls. Navigation shortcuts operate on the active pane.
+Changing a zoom label must not shift neighboring controls, and page controls
+must remain compact rather than stretching to fill the toolbar.
+The outline belongs to the main paper
 of the current tab; when no outline exists, page navigation remains available.
 References belong to that main paper; comments identify the active document.
 
-Clicking a sidebar reference opens its paper in the lower preview. A confidently
-associated citation link in the text does the same. Ambiguous or grouped citations
-offer a choice. Papers not yet available offer retrieval and prefilled search.
+Opening a paper from a sidebar reference shows it in the lower preview. Clicking
+a citation link in the main PDF opens the cited paper in that preview when a
+valid copy is available in the library. Otherwise it reveals and selects the
+corresponding entry in the right References column, opening that column and
+clearing a filter that hides the entry when needed. It preserves the main reading
+position and does not jump to the bibliography. A missing paper leaves an existing
+quick view untouched. Ambiguous or grouped citations offer a choice in the sidebar;
+the chosen reference follows the same local-or-missing rule. Papers not yet
+available offer retrieval and prefilled search. Ordinary section, figure and
+table links keep their normal PDF navigation.
 
 Existing ink, highlights and comments can be selected, recolored and deleted using
 contextual controls in the top toolbar. Tool menus must not float over the PDF.

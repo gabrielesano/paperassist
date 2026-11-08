@@ -3,9 +3,11 @@
 Keys are write-only: the library settings return only whether a key is set and its last
 four characters. Changes apply on an explicit Save; an access check uses what was saved.
 """
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, Signal
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
+
+from .theme import APP_STYLE, ERROR_INK, TEAL, serif_heading_font
 
 # `key` names what a source cannot run without ("token", "key"), or "optional" when a key only raises limits.
 SOURCES = [
@@ -57,15 +59,17 @@ class SourceRow(QFrame):
     """One source: a switch, its state, an optional key field, help and the last check result."""
 
     def __init__(self, source, view, configured):
-        super().__init__()
+        super().__init__(objectName="source-row")
         self.source, self.view, self.configured = source, view, configured
         id_, name, need, help_text, link = source
         noun = need if need in ("token", "key") else "key"
         self.removing = False
         self.toggle = QCheckBox(name)
+        self.toggle.setStyleSheet("font-weight: 600;")
         self.toggle.setChecked(view["enabled"][id_])
         self.toggle.setAccessibleName(f"Use {name}")
         self.status = QLabel()
+        self.status.setStyleSheet("color: #315c54;")
         self.result = QLabel(wordWrap=True)
         self.result.setAccessibleName(f"{name} access check")
         self.key_field = self.remove = None
@@ -73,6 +77,8 @@ class SourceRow(QFrame):
         head.addWidget(self.toggle, 1)
         head.addWidget(self.status)
         column = QVBoxLayout(self)
+        column.setContentsMargins(10, 10, 10, 10)
+        column.setSpacing(6)
         column.addLayout(head)
         if need:
             stored = view["keys"][id_]["configured"]
@@ -80,6 +86,7 @@ class SourceRow(QFrame):
             self.key_field.setPlaceholderText(f"Paste a new {noun} to replace it" if stored else f"Paste your {noun}")
             self.key_field.setAccessibleName(f"{name} {noun}")
             keys = QHBoxLayout()
+            keys.setSpacing(8)
             keys.addWidget(self.key_field, 1)
             if stored:
                 # Removal is staged like every other change and applied by Save.
@@ -88,9 +95,9 @@ class SourceRow(QFrame):
                 self.remove.clicked.connect(self._toggle_removal)
                 keys.addWidget(self.remove)
             column.addLayout(keys)
-        text = help_text + (f' <a href="{link[0]}">{link[1]}</a>' if link else "")
-        help_label = QLabel(text, wordWrap=True, openExternalLinks=True, textInteractionFlags=Qt.TextBrowserInteraction)
-        help_label.setStyleSheet("color: #666")
+        text = help_text + (f' <a href="{link[0]}" style="color:{TEAL};">{link[1]}</a>' if link else "")
+        help_label = QLabel(text, objectName="muted-note", wordWrap=True, openExternalLinks=True,
+                            textInteractionFlags=Qt.TextBrowserInteraction)
         column.addWidget(help_label)
         column.addWidget(self.result)
         self.result.hide()
@@ -124,7 +131,8 @@ class SourceRow(QFrame):
         self.result.setVisible(bool(outcome))
         if outcome:
             self.result.setText(f"{'Accepted' if outcome['ok'] else 'Problem'}: {outcome['message']}")
-            self.result.setStyleSheet("" if outcome["ok"] else "color: #b3261e")
+            self.result.setStyleSheet("color: #315c54; font-weight: 600;" if outcome["ok"]
+                                      else f"color: {ERROR_INK}; font-weight: 600;")
 
 
 class SourcesDialog(QDialog):
@@ -132,32 +140,47 @@ class SourcesDialog(QDialog):
         super().__init__(parent)
         self.workspace, self.view, self.rows, self.check_thread = workspace, None, [], None
         self.setWindowTitle("Sources")
-        self.resize(640, 720)
+        self.resize(660, 720)
+        self.heading = QLabel("Sources")
+        self.heading.setProperty("headingScale", "dialog")
+        self.heading.setFont(serif_heading_font(self.font()))
+        intro = QLabel("Choose which open-access and bibliographic services PaperAssist queries.",
+                       objectName="muted-note", wordWrap=True)
         self.email = QLineEdit(placeholderText="name@example.org")
         self.email.setAccessibleName("Contact email")
         self.proxy = QLineEdit(placeholderText="https://login.proxy.example.edu/login?url=")
         self.proxy.setAccessibleName("Library proxy")
         form = QFormLayout()
+        form.setSpacing(8)
         form.addRow("Contact &email", self.email)
         form.addRow("Library &proxy", self.proxy)
         self.list = QVBoxLayout()
+        self.list.setContentsMargins(0, 0, 0, 0)
+        self.list.setSpacing(0)
         self.list.addStretch(1)
         host = QWidget()
         host.setLayout(self.list)
-        scroll = QScrollArea(widgetResizable=True)
+        scroll = QScrollArea(objectName="dialog-scroll", widgetResizable=True)
         scroll.setWidget(host)
         scroll.setAccessibleName("Sources")
         self.save_button = QPushButton("Save")
+        self.save_button.setProperty("primary", True)
         self.save_button.setDefault(True)
         self.check_button = QPushButton("Check access")
-        self.message = QLabel(wordWrap=True)
+        self.message = QLabel(objectName="muted-note", wordWrap=True)
         self.message.setAccessibleName("Status")
         close = QPushButton("Close")
         buttons = QHBoxLayout()
-        for widget in (self.save_button, self.check_button, close):
+        buttons.setSpacing(8)
+        for widget in (self.save_button, self.check_button):
             buttons.addWidget(widget)
         buttons.addWidget(self.message, 1)
+        buttons.addWidget(close)
         column = QVBoxLayout(self)
+        column.setContentsMargins(22, 20, 22, 18)
+        column.setSpacing(10)
+        column.addWidget(self.heading)
+        column.addWidget(intro)
         column.addLayout(form)
         column.addWidget(scroll, 1)
         column.addLayout(buttons)
@@ -165,11 +188,18 @@ class SourcesDialog(QDialog):
         self.check_button.clicked.connect(self.check)
         close.clicked.connect(self.close)
         self.load()
+        if parent is None:
+            self.setStyleSheet(APP_STYLE)
         self.email.setFocus()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange) and hasattr(self, "heading"):
+            self.heading.setFont(serif_heading_font(self.email.font()))
 
     def say(self, text, bad=False):
         self.message.setText(text)
-        self.message.setStyleSheet("color: #b3261e" if bad else "")
+        self.message.setStyleSheet(f"color: {ERROR_INK};" if bad else "")
 
     def load(self):
         """Show the saved settings; typed keys and staged removals are dropped."""

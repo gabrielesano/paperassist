@@ -1,58 +1,175 @@
-"""Top-toolbar annotation controls. The host calls install(window), then refresh()."""
+"""Annotation tool switchers in the Main bar and a contextual options strip below it."""
 from weakref import WeakSet
 
-from PySide6.QtCore import QSignalBlocker, Qt, Slot
-from PySide6.QtGui import QColor, QIcon, QPixmap
-from PySide6.QtWidgets import QComboBox, QLabel, QSpinBox, QToolBar
+from PySide6.QtCore import QRectF, QSignalBlocker, QSize, Qt, Signal, Slot
+from PySide6.QtGui import QAction, QColor, QPainter, QPen
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSpinBox, QToolBar, QToolButton, QWidget
+
+from .theme import INK, TEAL, icon
 
 COLORS = [('Yellow', '#F5D76E'), ('Green', '#8FD3AA'), ('Blue', '#79C5DF'),
           ('Pink', '#E9A9BC'), ('Dark green', '#243F3A'), ('Black', '#000000')]
 
 
+class ColorChip(QToolButton):
+    """Circular color swatch with a crisp outer ring when selected."""
+
+    def __init__(self, name, hex_color, parent=None):
+        super().__init__(parent)
+        self.hex_color = hex_color
+        self.setCheckable(True)
+        self.setFocusPolicy(Qt.TabFocus)
+        self.setToolTip(f"{name} color")
+        self.setAccessibleName(f"{name} annotation color")
+
+    def sizeHint(self):
+        side = max(22, round(self.fontMetrics().height() * 1.35))
+        return QSize(side, side)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        s = min(self.width(), self.height())
+        box = QRectF((self.width() - s) / 2, (self.height() - s) / 2, s, s)
+        if self.isChecked():
+            painter.setPen(QPen(QColor(TEAL), 2.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(box.adjusted(1.5, 1.5, -1.5, -1.5))
+        if self.hasFocus():
+            painter.setPen(QPen(QColor(TEAL), 1.0, Qt.DotLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5))
+        swatch = box.adjusted(4.0, 4.0, -4.0, -4.0)
+        fill = QColor(self.hex_color)
+        if not self.isEnabled():
+            fill.setAlpha(110)
+        painter.setPen(QPen(QColor(82, 100, 91, 110), 1.0))
+        painter.setBrush(fill)
+        painter.drawEllipse(swatch)
+
+
+class ColorSwatches(QWidget):
+    """Row of circular swatches replacing the old combo box while keeping index-based signals."""
+    activated = Signal(int)
+
+    def __init__(self, colors, parent=None):
+        super().__init__(parent, objectName='annotation-color')
+        self._index = -1
+        self.buttons = []
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(5)
+        for index, (name, hex_color) in enumerate(colors):
+            chip = ColorChip(name, hex_color, self)
+            chip.clicked.connect(lambda _=False, idx=index: self.pick(idx))
+            row.addWidget(chip)
+            self.buttons.append((hex_color, chip))
+
+    def currentIndex(self):
+        return self._index
+
+    def setCurrentIndex(self, index):
+        self._index = index
+        for idx, (_, chip) in enumerate(self.buttons):
+            chip.setChecked(idx == index)
+            chip.update()
+
+    def itemData(self, index):
+        return self.buttons[index][0] if 0 <= index < len(self.buttons) else COLORS[0][1]
+
+    def pick(self, index):
+        self.setCurrentIndex(index)
+        self.activated.emit(index)
+
+    def add_overflow_actions(self, menu):
+        colors = menu.addMenu('Annotation color')
+        colors.setEnabled(self.isEnabled())
+        for index, (name, _) in enumerate(COLORS):
+            action = colors.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(index == self._index)
+            action.triggered.connect(lambda _=False, idx=index: self.pick(idx))
+        return colors
+
+
 class AnnotationBar(QToolBar):
     def __init__(self, window):
         super().__init__('Annotations', window)
+        self.setObjectName('annotation-toolbar')
         self.window, self.bound = window, WeakSet()
         self.setMovable(False)
-        self.select = self.addAction('Select')
-        self.select.setCheckable(True)
+        self.setIconSize(QSize(16, 16))
+
+        # Mode switchers live together in the Main toolbar right next to Highlight.
+        self.select = QAction('Select', window, checkable=True)
         self.select.setShortcut('V')
+        self.select.setToolTip('Select text or annotations (V)')
         self.select.triggered.connect(lambda: self.tool('select'))
-        self.draw = self.addAction('Draw')
-        self.draw.setCheckable(True)
+
+        self.draw = QAction('Draw', window, checkable=True)
         self.draw.setShortcut('D')
+        self.draw.setToolTip('Draw freehand ink (D)')
         self.draw.triggered.connect(lambda: self.tool('ink'))
-        self.comment = self.addAction('Comment')
-        self.comment.setCheckable(True)
+
+        self.comment = QAction('Comment', window, checkable=True)
         self.comment.setShortcut('C')
         self.comment.setToolTip('Comment on selected text or the current page (C)')
         self.comment.triggered.connect(lambda: window.comments.compose())
-        self.label = QLabel()
-        self.addWidget(self.label)
-        self.colors = QComboBox(objectName='annotation-color')
-        self.colors.setAccessibleName('Annotation color')
-        for name, color in COLORS:
-            pixmap = QPixmap(16, 16)
-            pixmap.fill(QColor(color))
-            self.colors.addItem(QIcon(pixmap), name, color)
+
+        main_bar = getattr(window, 'main_bar', None)
+        anchor = getattr(window, 'highlight_action', None)
+        if main_bar is not None and anchor is not None:
+            main_bar.insertAction(anchor, self.select)
+            main_bar.insertAction(anchor, self.draw)
+            after = getattr(window, 'after_tools_action', None)
+            if after is not None:
+                main_bar.insertAction(after, self.comment)
+            else:
+                main_bar.addAction(self.comment)
+        else:
+            for action in (self.select, self.draw, self.comment):
+                self.addAction(action)
+
+        self.label = QLabel(objectName='column-title')
+        self.label_action = self.addWidget(self.label)
+        self.colors = ColorSwatches(COLORS, self)
         self.colors.activated.connect(self.color)
         self.addWidget(self.colors)
+
         self.thickness = QSpinBox(objectName='annotation-width')
         self.thickness.setRange(1, 20)
         self.thickness.setPrefix('Width ')
         self.thickness.setAccessibleName('Ink thickness')
         self.thickness.valueChanged.connect(lambda value: self.call('set_annotation_width', value))
         self.width_action = self.addWidget(self.thickness)
-        self.remove = self.addAction('Delete', lambda: self.call('delete_annotation'))
-        self.undo = self.addAction('Undo', lambda: self.call('undo'))
-        self.redo = self.addAction('Redo', lambda: self.call('redo'))
-        self.visibility = self.addAction('Show highlights')
+
+        self.addSeparator()
+        self.remove = self._icon_action('Delete', 'trash', 'Delete selected annotation (Del)', lambda: self.call('delete_annotation'))
+        self.undo = self._icon_action('Undo', 'undo', 'Undo (Ctrl+Z)', lambda: self.call('undo'))
+        self.redo = self._icon_action('Redo', 'redo', 'Redo (Ctrl+Shift+Z)', lambda: self.call('redo'))
+        self.visibility = QAction('Show highlights', window)
+        if main_bar is not None:
+            main_bar.addAction(self.visibility)
+        else:
+            self.addAction(self.visibility)
         self.visibility.setCheckable(True)
         self.visibility.setChecked(True)
         self.visibility.toggled.connect(lambda visible: self.call('set_highlights_visible', visible))
+
         window.highlight_action.toggled.connect(self.highlight)
         window.tabs.currentChanged.connect(self.refresh)
         self.refresh()
+
+    def _icon_action(self, title, glyph, tooltip, slot):
+        action = self.addAction(icon(glyph, INK, 16), title, slot)
+        action.setToolTip(tooltip)
+        if btn := self.widgetForAction(action):
+            btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            btn.setAccessibleName(title)
+        return action
 
     def view(self):
         pane = self.window.pane()
@@ -109,6 +226,7 @@ class AnnotationBar(QToolBar):
                 action.setChecked(checked)
         kind = item and ('highlight' if item['freehand'] else item['subtype'])
         self.label.setText('Selected comment' if comment is not None else f'Selected {kind}' if item else '')
+        self.label_action.setVisible(bool(self.label.text()))
         self.colors.setEnabled(notes if comment is not None else active and bool(item or view.drawing or view.highlighting))
         if comment is not None:
             from .comments import note_color
@@ -123,12 +241,24 @@ class AnnotationBar(QToolBar):
         with QSignalBlocker(self.thickness):
             self.thickness.setValue(round(item['width'] if item else (view.highlight_width if view.highlighting else view.ink_width) if view else 2))
         self.remove.setEnabled(notes if comment is not None else active and item is not None)
-        self.undo.setEnabled(bool(view and ((view.notes_model and view.notes_model.deleted is not None) or active and view.doc._undo)))
-        self.redo.setEnabled(active and bool(view.doc._redo))
+        has_undo = bool(view and ((view.notes_model and view.notes_model.deleted is not None) or active and view.doc._undo))
+        has_redo = active and bool(view.doc._redo)
+        self.undo.setEnabled(has_undo)
+        self.redo.setEnabled(has_redo)
+
+        contextual = bool(view and (
+            view.highlighting or view.drawing or view.commenting
+            or item is not None or comment is not None
+            or has_undo or has_redo or not view.highlights_visible
+        ))
+        self.setVisible(contextual)
 
 
 def install(window):
+    if existing := getattr(window, 'annotation_bar', None):
+        return existing
     bar = AnnotationBar(window)
     window.addToolBarBreak(Qt.TopToolBarArea)
     window.addToolBar(Qt.TopToolBarArea, bar)
+    window.annotation_bar = bar
     return bar

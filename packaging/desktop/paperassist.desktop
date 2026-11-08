@@ -1,0 +1,14 @@
+[Desktop Entry]
+# Managed-By: PaperAssist-Linux-Installer
+Version=1.0
+Type=Application
+Name=PaperAssist
+GenericName=Research Paper Reader
+Comment=Read research PDFs locally and consult cited references
+Exec=paperassist
+Icon=paperassist
+Terminal=false
+Categories=Office;Viewer;Science;Literature;
+Keywords=PDF;research;papers;citations;bibliography;academic;
+StartupNotify=true
+StartupWMClass=PaperAssist

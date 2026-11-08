@@ -1,4 +1,5 @@
 """Continuous vertical PDF view: lazy rendering, selection, links, highlights, search hits."""
+import math
 import time
 from urllib.parse import urlparse
 
@@ -15,7 +16,9 @@ from .trim import trim_heap
 CACHE_BYTES = 120 * 1024 * 1024  # about five fit-width pages at 1.5x HiDPI
 ZOOM_RANGE = (0.2, 4.0)
 LINK_SCHEMES = {"http", "https", "mailto"}  # a PDF must not be able to launch local files
-BACKGROUND = QColor("#dad7d1")
+BACKGROUND = QColor("#dce2dc")
+PAGE_SHADOW = QColor(39, 59, 57, 28)
+PAGE_BORDER = QColor("#c4cec4")
 SELECTION, HIT, CURRENT_HIT, MARKER = QColor(40, 110, 255, 80), QColor(255, 150, 0, 90), QColor(255, 90, 0, 160), QColor(255, 235, 0)
 
 
@@ -153,25 +156,46 @@ class PdfView(QAbstractScrollArea):
         self._want()
         self.moved.emit()
 
-    def _fresh(self, page):
+    def _render_plan(self):
+        """Keep all visible pages within the cache budget before considering prefetch."""
+        visible = self.visible_pages()
+        if not visible:
+            return {}
+        area = sum(self.doc.sizes[p][0] * self.doc.sizes[p][1] for p in visible)
+        # Leave room for PDFium's pixel rounding. Multiple visible pages share one scale.
+        scale = min(self._scale(), math.sqrt(self.cache.budget / (4 * area)) * 0.99)
+        scale = math.floor(scale * 1000) / 1000
+        plan = {page: scale for page in visible}
+        used = sum(math.ceil(self.doc.sizes[p][0] * scale) * math.ceil(self.doc.sizes[p][1] * scale) * 4
+                   for p in visible)
+        for page in self.visible_pages(self.viewport().height() // 2):
+            if page in plan:
+                continue
+            width, height = self.doc.sizes[page]
+            size = math.ceil(width * scale) * math.ceil(height * scale) * 4
+            if used + size <= self.cache.budget:
+                plan[page] = scale
+                used += size
+        return plan
+
+    def _fresh(self, page, scale=None):
         entry = self.cache.get(page)
-        return entry is not None and entry[0] == self._scale() and entry[1] == self.doc_id
+        scale = self._render_plan().get(page) if scale is None else scale
+        return entry is not None and entry[0] == scale and entry[1] == self.doc_id
 
     def _want(self):
         """Ask the render process for what is visible plus half a screen; hidden views ask for nothing."""
         jobs = []
         if self.isVisible():
-            on_screen = self.visible_pages()
-            near = self.visible_pages(self.viewport().height() // 2)
-            jobs = [(page, self._scale()) for page in sorted(near, key=lambda p: p not in on_screen) if not self._fresh(page)]
+            jobs = [(page, scale) for page, scale in self._render_plan().items() if not self._fresh(page, scale)]
         self.client.want(self.doc_id, jobs)
 
     def _page_ready(self, doc_id, page, scale, width, height, rgb, seconds):
-        if doc_id != self.doc_id or scale != self._scale() or not self.isVisible():
+        if doc_id != self.doc_id or not self.isVisible() or self._render_plan().get(page) != scale:
             return  # late pixels for a view that was hidden meanwhile must not refill its cache
         pixmap = QPixmap.fromImage(QImage(rgb, width, height, width * 3, QImage.Format_RGB888))
         pixmap.setDevicePixelRatio(self.devicePixelRatioF())
-        self.cache.put(page, (scale, doc_id, pixmap), width * height * 4)
+        self.cache.put(page, (scale, doc_id, pixmap), width * height * 4, protected=self.visible_pages())
         if not self.doc.modified:
             self.doc.pending.pop(page, None)  # the saved highlight is part of the pixels now
         self.render_seconds.append(seconds)
@@ -289,12 +313,16 @@ class PdfView(QAbstractScrollArea):
             entry = self.cache[page] if page in self.cache else None
             pixmap = entry[2] if entry else None
             box = self._target(page, pixmap)
+            painter.fillRect(box.adjusted(1, 2, 2, 3), PAGE_SHADOW)
             if pixmap:
                 painter.setRenderHint(QPainter.SmoothPixmapTransform, entry[0] != self._scale())  # stale: smooth stretch
                 painter.drawPixmap(box, pixmap, QRectF(pixmap.rect()))
                 self.first_paint = self.first_paint or time.perf_counter()
             else:
                 painter.fillRect(box, Qt.white)
+            painter.setPen(PAGE_BORDER)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(box.adjusted(-0.5, -0.5, 0.5, 0.5))
         if self.selected_annotation:
             page, index = self.selected_annotation
             item = next((a for a in self.doc.annotations(page) if a['index'] == index), None)

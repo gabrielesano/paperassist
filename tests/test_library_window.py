@@ -562,7 +562,8 @@ class ReferenceCardTests(LibraryWindowCase):
         self.assertEqual(self.panel.list.accessibleName(), "References")
         ref["local_invalid"] = True
         self.panel._fill()
-        self.assertEqual(self.panel.list.item(0).data(Qt.UserRole + 2), "#9a4b2e")
+        self.assertEqual(self.panel.list.item(0).data(Qt.UserRole + 2), "#7a3216")
+        self.assertEqual(self.panel.list.item(0).data(Qt.UserRole + 3)[0], "#b0482a")
         self.panel.payload_status = "partial"
         self.panel._fill()
         self.assertTrue(self.panel.analysis_note.isVisibleTo(self.window))

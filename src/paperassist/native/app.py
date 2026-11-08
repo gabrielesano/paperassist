@@ -10,13 +10,17 @@ from contextlib import ExitStack, contextmanager
 from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QSocketNotifier, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+import paperassist
 from paperassist import paths
 from paperassist.paths import locate_existing
 from paperassist.workspace import LibraryInUse, Workspace, library_lock
 
+from .about import COMPONENTS, component_info
 from .document import PdfDocument
 from .renderer import RenderClient
 from .source import FileSource
+from .theme import brand_icon
+from .wayland import install_wayland_warning_filter
 from .window import MainWindow
 
 SELF_TEST_SECONDS = 60  # a cold start of a frozen app on a busy CI runner can be slow
@@ -45,10 +49,17 @@ def self_test(path):
         return False
     _, _, _, width, height, rgb, _ = pages[0]
     dark = sum(value < 128 for value in rgb) / len(rgb)
-    print(f"self-test {'ok' if dark else 'failed'}: {len(doc)} pages, page 1 is {width}x{height}, "
+    missing_meta = [
+        title for title, names in COMPONENTS
+        if "not installed" in component_info(names) or "unknown license" in component_info(names)
+    ]
+    ok = dark > 0 and not missing_meta
+    print(f"self-test {'ok' if ok else 'failed'}: {len(doc)} pages, page 1 is {width}x{height}, "
           f"{len(doc.words(0))} words, {dark:.2%} dark pixels")
+    if missing_meta:
+        print(f"self-test metadata missing: {', '.join(missing_meta)}")
     doc.close()
-    return dark > 0
+    return ok
 
 
 class LibraryMissing(RuntimeError):
@@ -120,6 +131,7 @@ def termination_requests(app):
 
 def run(argv=None):
     parser = argparse.ArgumentParser(prog="paperassist.native", description="PaperAssist native reader")
+    parser.add_argument("-v", "--version", action="version", version=f"PaperAssist {paperassist.__version__}")
     parser.add_argument("pdfs", nargs="*", help="PDF files to open, one tab each; without any, the library opens")
     parser.add_argument("--data-dir", help="library directory (default: PAPERASSIST_DATA_DIR, the folder chosen in the app, "
                                            "or the per-user data directory)")
@@ -127,8 +139,11 @@ def run(argv=None):
     args = parser.parse_args(argv)
     if args.self_test:
         return 0 if self_test(args.self_test) else 1
+    install_wayland_warning_filter()
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("PaperAssist")
+    app.setDesktopFileName("paperassist")
+    app.setWindowIcon(brand_icon(64))
     with termination_requests(app):
         return _run_sessions(app, args)
 

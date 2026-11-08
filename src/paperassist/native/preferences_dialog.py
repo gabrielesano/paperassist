@@ -1,20 +1,24 @@
 """Preferences dialog: interface chrome size, downloads folder, and library location."""
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QFont
-from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QLayout,
+    QHBoxLayout, QLabel, QLayout, QLineEdit, QPushButton, QVBoxLayout,
 )
+from shiboken6 import isValid
 
 from paperassist import paths, settings
 from paperassist.workspace import WorkspaceConflict
 
 from .interface_zoom import ZOOM_CHOICES, parse_zoom, window_style
+from .theme import ERROR_INK
 
 
-def _button(text, name, accessible):
-    return QPushButton(text, objectName=name, accessibleName=accessible)
+def _button(text, name, accessible, primary=False):
+    btn = QPushButton(text, objectName=name, accessibleName=accessible)
+    if primary:
+        btn.setProperty("primary", True)
+    return btn
 
 
 class PreferencesDialog(QDialog):
@@ -23,65 +27,77 @@ class PreferencesDialog(QDialog):
         self.host, self.zoom_value, self.base_font = host, 1, QFont(host.font())
         self._return_focus = None
         self._saved_inbox, self._plan = "", None
-        self.setStyleSheet(
-            "#preferences-dialog { background: #fbfcf7; border: 1px solid #cfcac1; }"
-            "#preferences-library-confirm { background: #f3f1eb; border: 1px solid #cfcac1; border-radius: 4px; }"
-        )
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(8)
         layout.setSizeConstraint(QLayout.SetFixedSize)
         layout.addWidget(QLabel("<b>Preferences</b>"))
-        layout.addWidget(QLabel("Interface size"))
+
+        size_label = QLabel("Interface size")
+        size_label.setStyleSheet("font-weight: 600;")
+        layout.addWidget(size_label)
         self.size_combo = QComboBox(objectName="preferences-zoom", accessibleName="Interface size")
         for value in ZOOM_CHOICES:
             self.size_combo.addItem(f"{round(value * 100)}%", value)
         layout.addWidget(self.size_combo)
         layout.addWidget(QLabel("Applies at once to the toolbar, panels and dialogs on this computer. "
-                               "Documents keep their own zoom.", wordWrap=True))
+                                "Documents keep their own zoom.", objectName="muted-note", wordWrap=True))
+
         self.library_section = QFrame()
         section = QVBoxLayout(self.library_section)
-        section.setContentsMargins(0, 0, 0, 0)
+        section.setContentsMargins(0, 6, 0, 0)
+        section.setSpacing(6)
         self.inbox_edit = QLineEdit(objectName="preferences-inbox", accessibleName="Folder for manual downloads")
         self.inbox_browse = _button("Browse…", "preferences-browse", "Browse for the manual downloads folder")
-        self.inbox_save = _button("Save", "preferences-inbox-save", "Save manual downloads folder")
+        self.inbox_save = _button("Save", "preferences-inbox-save", "Save manual downloads folder", primary=True)
         self.inbox_clear = _button("Clear", "preferences-inbox-clear", "Clear manual downloads folder")
         self.library_edit = QLineEdit(objectName="preferences-library", accessibleName="Library location")
         self.library_browse = _button("Browse…", "preferences-library-browse", "Browse for the library folder")
         self.library_check = _button("Use this folder", "preferences-library-use", "Use this library folder")
-        self.library_note = QLabel(objectName="preferences-library-note", wordWrap=True)
+        self.library_note = QLabel(objectName="muted-note", wordWrap=True)
+
         for title, field, buttons, note in (
             ("Folder for manual downloads", self.inbox_edit, (self.inbox_browse, self.inbox_save, self.inbox_clear),
              QLabel("Save PDFs you download by hand here; PaperAssist copies matching ones "
-                    "into the library and never changes this folder.", wordWrap=True)),
+                    "into the library and never changes this folder.", objectName="muted-note", wordWrap=True)),
             ("Library location", self.library_edit, (self.library_browse, self.library_check), self.library_note),
         ):
             label = QLabel(title)
+            label.setStyleSheet("font-weight: 600;")
             label.setBuddy(field)
             section.addWidget(label)
             row = QHBoxLayout()
+            row.setSpacing(6)
             row.addWidget(field, 1)
             for button in buttons:
                 row.addWidget(button)
             section.addLayout(row)
             section.addWidget(note)
+
         self.confirm_box = QFrame(objectName="preferences-library-confirm", visible=False)
         self.confirm_label = QLabel(objectName="preferences-library-question", wordWrap=True)
-        self.confirm_yes = _button("Open library", "preferences-library-yes", "Confirm library folder")
+        self.confirm_yes = _button("Open library", "preferences-library-yes", "Confirm library folder", primary=True)
         self.confirm_no = _button("Cancel", "preferences-library-no", "Cancel library folder change")
         confirm_layout = QVBoxLayout(self.confirm_box)
+        confirm_layout.setContentsMargins(12, 10, 12, 10)
+        confirm_layout.setSpacing(8)
         confirm_layout.addWidget(self.confirm_label)
         row = QHBoxLayout()
+        row.setSpacing(8)
         for button in (self.confirm_yes, self.confirm_no):
             row.addWidget(button)
         row.addStretch(1)
         confirm_layout.addLayout(row)
         section.addWidget(self.confirm_box)
+
         self.message = QLabel(objectName="preferences-message", accessibleName="Preferences status",
                               wordWrap=True, visible=False)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         for widget in (self.library_section, self.message, buttons):
             layout.addWidget(widget)
+
         self.size_combo.currentIndexChanged.connect(self._on_size_changed)
         self.inbox_browse.clicked.connect(lambda: self._browse(self.inbox_edit, "Folder for manual downloads"))
         self.inbox_save.clicked.connect(self._save_inbox)
@@ -112,7 +128,7 @@ class PreferencesDialog(QDialog):
 
     def _say(self, text, bad=False):
         self.message.setText(text)
-        self.message.setStyleSheet("color: #b3261e;" if bad else "")
+        self.message.setStyleSheet(f"color: {ERROR_INK};" if bad else "")
         self.message.setVisible(bool(text))
 
     def _close_confirm(self, *_):

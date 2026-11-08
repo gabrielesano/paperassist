@@ -9,6 +9,11 @@ from .engine import Pdf, Rect
 IGNORED = set("\u00ad\u2010\u2011\u2012\u2013\u2014\u2015\u2212-`¨¯´¸ˆ˘˙˚˛˜˝\ufffe\x02")
 
 
+def bibliography_destination(name):
+    """Recognize explicit bibliography targets without treating figure or affiliation links as citations."""
+    return bool(name and re.search(r"(?:^|[._:-])(?:bib|ref|cite)(?:[._:\d-]|$)|bib\d+$", name, re.I))
+
+
 def visible_chars(text):
     for at, original in enumerate(text):
         for char in unicodedata.normalize("NFKD", original).lower():
@@ -124,8 +129,14 @@ def next_citation_index(positions, last, here):
 def citation_matches(refs, text, destination=None):
     """Only recognized markers consume links; uncertain candidates remain an explicit choice."""
     if destination is not None:
-        return [ref for ref in refs if destination in ref.get("destinations", [])]
-    marker = re.fullmatch(r"\s*\[([\d,;\s–—−-]+)\]\s*", text)
+        named = [ref for ref in refs if destination in ref.get("destinations", [])]
+        if named:
+            return named
+        if re.search(r"(?:^|[._:-])(?:fig(?:ure)?|sec(?:tion)?|eq(?:uation)?|table|tab)(?=[._:\d-]|$)",
+                     destination, re.I):
+            return []
+    text = text.strip().rstrip(".,;")
+    marker = re.fullmatch(r"\[([\d,;\s–—−-]+)\]", text)
     if marker:
         numbers = []
         for part in re.split("[,;]", marker[1]):

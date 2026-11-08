@@ -43,6 +43,8 @@ class OutlinePanel(QTreeWidget):
     def __init__(self):
         super().__init__()
         self.setHeaderHidden(True)
+        self.setIndentation(14)
+        self.setAnimated(False)
         self.setAccessibleName("Document outline")
         self.itemClicked.connect(self._clicked)
 

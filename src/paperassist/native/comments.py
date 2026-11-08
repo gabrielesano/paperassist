@@ -6,8 +6,9 @@ from weakref import WeakSet
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
 
+from .theme import ERROR_INK, FlowLayout, TEAL
 
 DEFAULT_COLOR = "#aa700f"
 
@@ -156,32 +157,46 @@ class CommentsPanel(QWidget):
         self.controller, self.view = controller, None
         self._built, self._rows = object(), []
         self.column = QVBoxLayout(self)
-        self.column.setContentsMargins(6, 0, 6, 6)
-        self.status = QLabel(wordWrap=True)
+        self.column.setContentsMargins(10, 8, 10, 8)
+        self.column.setSpacing(6)
+        self.status = QLabel(objectName="muted-note", wordWrap=True)
         self.column.addWidget(self.status)
+
+        self.add_box = QWidget()
+        add_flow = FlowLayout(self.add_box, margin=0, h_spacing=8, v_spacing=2)
         self.add = QPushButton("Add comment")
+        self.add.setProperty("link", True)
         self.add.clicked.connect(controller.compose)
-        self.column.addWidget(self.add)
+        add_flow.addWidget(self.add)
+        self.column.addWidget(self.add_box)
+
         self.composer = QWidget()
         form = QVBoxLayout(self.composer)
-        form.setContentsMargins(0, 0, 0, 0)
-        self.head = QLabel(wordWrap=True, textFormat=Qt.PlainText)
+        form.setContentsMargins(0, 2, 0, 8)
+        form.setSpacing(6)
+        self.head = QLabel(objectName="muted-note", wordWrap=True, textFormat=Qt.PlainText)
+        self.quote_preview = QLabel(objectName="comment-quote", wordWrap=True, textFormat=Qt.PlainText)
         self.text = QTextEdit(placeholderText="Write a comment…", objectName="comment-text")
         self.text.setAccessibleName("Comment text")
-        self.text.setMaximumHeight(160)
+        self.text.setMaximumHeight(130)
         self.text.textChanged.connect(self._typed)
-        row = QHBoxLayout()
+
+        actions_flow = FlowLayout(margin=0, h_spacing=8, v_spacing=4)
         self.save_button = QPushButton("Save comment")
+        self.save_button.setProperty("primary", True)
         cancel = QPushButton("Cancel")
         self.save_button.clicked.connect(lambda: controller.save_draft(controller.window.pane()))
         cancel.clicked.connect(lambda: controller.discard_draft(controller.window.pane()))
-        row.addWidget(self.save_button)
-        row.addWidget(cancel)
+        actions_flow.addWidget(self.save_button)
+        actions_flow.addWidget(cancel)
+
         form.addWidget(self.head)
+        form.addWidget(self.quote_preview)
         form.addWidget(self.text)
-        form.addLayout(row)
+        form.addLayout(actions_flow)
         self.column.addWidget(self.composer)
-        self.scroll = QScrollArea(widgetResizable=True)
+
+        self.scroll = QScrollArea(objectName="comments-scroll", widgetResizable=True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.column.addWidget(self.scroll, 1)
         self.undo = QPushButton("Comment deleted · Undo")
@@ -207,15 +222,20 @@ class CommentsPanel(QWidget):
     def refresh(self, view):
         self.view = view
         model = view.notes_model if view else None
-        self.status.setText(("Comments unavailable: " + model.error) if model and model.error else
+        has_error = bool(model and model.error)
+        self.status.setStyleSheet(f"color: {ERROR_INK};" if has_error else "")
+        self.status.setText(("Comments unavailable: " + model.error) if has_error else
                             "Comments belong to the active paper." if model else
                             "Comments are available for papers in the library.")
         self.add.setEnabled(model is not None)
         draft = view.comment_draft if view else None
         self.composer.setVisible(draft is not None)
+        self.add_box.setVisible(draft is None)
         self.add.setVisible(draft is None)
         if draft is not None:
-            self.head.setText(f"Comment · Page {draft['page']}\n" + (quote(draft) or "Page comment. Select PDF text to anchor it to a phrase."))
+            self.head.setText(f"Comment · Page {draft['page']}")
+            snippet = quote(draft)
+            self.quote_preview.setText(snippet or "Page comment. Select PDF text to anchor it to a phrase.")
             if self.text.toPlainText() != draft.get("text", ""):
                 self.text.blockSignals(True)
                 self.text.setPlainText(draft.get("text", ""))
@@ -226,7 +246,7 @@ class CommentsPanel(QWidget):
             self._build_rows(view, model, notes)
         selected = view.selected_comment if view else None
         for note, row in self._rows:
-            style = "#comment-row { background: #e6eeeb; }" if selected == note else ""
+            style = f"#comment-row {{ background: #e6eeeb; border-left: 3px solid {TEAL}; }}" if selected == note else ""
             if row.styleSheet() != style:
                 row.setStyleSheet(style)
         self.undo.setVisible(bool(model and model.deleted is not None))
@@ -236,26 +256,34 @@ class CommentsPanel(QWidget):
         host = QWidget()
         rows = QVBoxLayout(host)
         rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(0)
         for note in notes:
             row = QWidget(objectName="comment-row")
+            row.setAttribute(Qt.WA_StyledBackground, True)
             column = QVBoxLayout(row)
+            column.setContentsMargins(6, 8, 6, 10)
+            column.setSpacing(5)
+            header = FlowLayout(margin=0, h_spacing=12, v_spacing=2)
             jump = QPushButton(f"Page {note.get('page', '?')}")
+            jump.setProperty("link", True)
             jump.clicked.connect(lambda _=False, note=note: view.select_comment(note, scroll=True))
-            column.addWidget(jump)
+            remove = QPushButton("Delete comment")
+            remove.setProperty("link", True)
+            remove.clicked.connect(lambda _=False, note=note: model.update(note))
+            header.addWidget(jump)
+            header.addWidget(remove)
+            column.addLayout(header)
             if quote(note):
-                selected = QLabel(str(quote(note)), wordWrap=True, textFormat=Qt.PlainText)
+                selected = QLabel(str(quote(note)), objectName="comment-quote", wordWrap=True, textFormat=Qt.PlainText)
                 selected.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 column.addWidget(selected)
             text = QLabel(str(note.get("text", "")), wordWrap=True, textFormat=Qt.PlainText)
             text.setTextInteractionFlags(Qt.TextSelectableByMouse)
             column.addWidget(text)
-            remove = QPushButton("Delete comment")
-            remove.clicked.connect(lambda _=False, note=note: model.update(note))
-            column.addWidget(remove)
             rows.addWidget(row)
             self._rows.append((note, row))
         if model and not notes:
-            rows.addWidget(QLabel("No comments on this document yet.", wordWrap=True))
+            rows.addWidget(QLabel("No comments on this document yet.", objectName="muted-note", wordWrap=True))
         rows.addStretch()
         old = self.scroll.takeWidget()
         self.scroll.setWidget(host)
@@ -293,7 +321,7 @@ class CommentsController(QObject):
     def refresh(self, *_):
         pane = self.window.pane()
         self.panel.refresh(pane.view if pane else None)
-        if hasattr(self.window, "annotation_bar"):
+        if getattr(self.window, "annotation_bar", None) is not None:
             self.window.annotation_bar.refresh()
 
     def show_mode(self, mode):

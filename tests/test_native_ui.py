@@ -652,9 +652,13 @@ class WindowTests(unittest.TestCase):
         for name in ("short", "a-very-long-paper-title-" * 6):
             quick = self.window.open_quick(FileSource(self.pdf(name)))
             self.pump(lambda: quick.view.has_page(0))
-            self.assertTrue(quick.title_label.isVisible())
-            self.assertLessEqual(quick.title_label.geometry().right(), quick.quick_buttons[0].geometry().left())
-            self.assertTrue(all(button.isVisible() for button in quick.quick_buttons))
+            if quick.title_label.isVisible():
+                self.assertLessEqual(quick.title_label.geometry().right(), quick.quick_buttons[0].geometry().left())
+            hidden = [button.defaultAction() for button in quick.quick_buttons if not button.isVisible()]
+            if hidden:
+                quick.bar.overflow.popup()
+                self.assertTrue(all(action in quick.bar.overflow.menu.actions() for action in hidden))
+                quick.bar.overflow.menu.hide()
 
     def test_a_narrow_reader_stacks_and_says_why_the_layout_switch_waits(self):
         self.window.set_columns(outline=False, details=False)
@@ -870,6 +874,59 @@ class WindowTests(unittest.TestCase):
         view.delete_annotation()
         view.undo()
         self.assertEqual(view.doc.pdf.data, before)
+
+    def test_welcome_screen_unified_toolbar_zoom_label_and_dirty_save_indicator(self):
+        bar = self.window.annotation_bar
+        keys = self.window.shortcuts
+        self.assertTrue(self.window.welcome.isVisibleTo(self.window))
+        self.assertEqual(self.window.welcome.objectName(), 'welcome-screen')
+        self.assertEqual(self.window.welcome.open_file_button.accessibleName(), 'Open a PDF file')
+        self.assertFalse(keys.page_field.isVisibleTo(self.window))
+        self.assertFalse(self.window.save_action.isEnabled())
+        self.assertFalse(bar.isVisibleTo(self.window))
+
+        tab = self.open('unified-toolbar')
+        pane = tab.main
+        self.assertLess(pane.layout().indexOf(pane.find_bar), pane.layout().indexOf(pane.view))
+        self.assertTrue(keys.page_field.isVisibleTo(self.window))
+        self.assertEqual(self.window.fit_action.text(), 'Fit width')
+        pane.view.zoom_by(1.25)
+        self.assertTrue(self.window.fit_action.text().endswith('%'))
+        self.window.fit_action.trigger()
+        self.assertEqual(self.window.fit_action.text(), 'Fit width')
+
+        save_btn = self.window.main_bar.widgetForAction(self.window.save_action)
+        self.assertFalse(save_btn.property('dirty'))
+        self.highlight(pane)
+        self.assertTrue(save_btn.property('dirty'))
+        self.window.save()
+        self.assertFalse(save_btn.property('dirty'))
+
+    def test_contextual_annotation_bar_auto_shows_and_color_chips_pick_colors(self):
+        from paperassist.native.annotation_bar import install as install_annotation_bar
+
+        bar = install_annotation_bar(self.window)
+        view = self.open('contextual-bar').main.view
+        self.assertFalse(bar.isVisibleTo(self.window))
+
+        self.window.highlight_action.setChecked(True)
+        self.assertTrue(bar.isVisibleTo(self.window))
+        green_hex, green_chip = bar.colors.buttons[1]
+        self.assertEqual(green_hex, '#8FD3AA')
+        green_chip.click()
+        self.assertEqual(bar.colors.currentIndex(), 1)
+        self.assertTrue(green_chip.isChecked())
+        self.assertEqual([round(c * 255) for c in view.highlight_color], [143, 211, 170])
+
+        bar.select.trigger()
+        self.assertFalse(bar.isVisibleTo(self.window))
+
+        view.set_highlights_visible(False)
+        bar.refresh()
+        self.assertTrue(bar.isVisibleTo(self.window))
+        view.set_highlights_visible(True)
+        bar.refresh()
+        self.assertFalse(bar.isVisibleTo(self.window))
 
 
 @needs_qt

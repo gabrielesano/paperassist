@@ -111,7 +111,15 @@ class CitationLogicTests(unittest.TestCase):
                 {"id": "b", "authors": "Smith, K.", "year": "2015"}]
         self.assertEqual(citation_matches(refs, "Smith et al. (2015)"), refs)
         self.assertEqual(citation_matches(refs, "unrelated", "ref.a"), refs[:1])
+        self.assertEqual(citation_matches(refs, "Smith et al. (2015)", "unmapped"), refs)
         self.assertEqual(citation_matches(refs, "Section 2015"), [])
+        self.assertEqual(citation_matches(refs, "Smith et al. (2015)", "section.1"), [])
+
+    def test_unmapped_destination_falls_back_to_complete_numeric_marker(self):
+        refs = [{"id": "a", "label": "1"}, {"id": "b", "label": "2"}]
+        self.assertEqual(citation_matches(refs, "[1, 2]", "unknown"), refs)
+        self.assertEqual(citation_matches(refs, "[1, 3]", "unknown"), [])
+        self.assertEqual(citation_matches(refs, "[1]", "figure.1"), [])
 
     def test_pdfium_locates_repeated_occurrences_and_page_only_fallback(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -218,15 +226,20 @@ class CitationPanelTests(unittest.TestCase):
         workspace = Mock()
         panel = ReferencesPanel(workspace)
         self.addCleanup(panel.close)
-        view = SimpleNamespace()
+        class View:
+            pass
+        view = View()
         panel.view = view
         link = SimpleNamespace(destination=None, rect=Rect(10, 10, 50, 20))
         doc = SimpleNamespace(_links={0: [link]}, words=lambda page: [(10, 10, 50, 20, "[1, 2]")])
         view.doc = doc
         panel.refs = [
             {"id": 1, "label": "1", "title": "A&A & Keppens"},
-            {"id": 2, "label": "2", "title": "Second paper"},
+            {"id": 2, "label": "2", "title": "Second paper", "local_document_id": 22},
         ]
+        panel._fill()
+        opened = Mock()
+        panel.open_requested.connect(opened)
         self.assertTrue(panel._citation_link(view, link))
         buttons = panel.choices.findChildren(QPushButton)
         self.assertEqual(len(buttons), 2)
@@ -234,27 +247,57 @@ class CitationPanelTests(unittest.TestCase):
         self.assertIn("&&", keppens_button.text())
         self.assertTrue(QKeySequence.mnemonic(keppens_button.text()).isEmpty())
         self.assertEqual(keppens_button.text(), "1 A&&A && Keppens")
+        keppens_button.click()
+        self.assertEqual(panel.expanded, 1)
+        self.assertEqual(panel.list.currentItem().data(257), 1)
+        opened.assert_not_called()
+        self.assertTrue(panel._citation_link(view, link))
+        next(b for b in panel.choices.findChildren(QPushButton) if "Second paper" in b.text()).click()
+        opened.assert_called_once_with(22)
 
-    def test_load_and_analysis_errors_name_the_operation(self):
+    def test_named_bibliography_link_waits_for_loading_and_reveals_result(self):
+        from types import SimpleNamespace
         from unittest.mock import Mock
         from paperassist.native.references_panel import ReferencesPanel
-        for operation in ("load", "analyze"):
-            workspace = Mock()
-            start = workspace.submit if operation == "load" else workspace.analyze_references
-            panel = ReferencesPanel(workspace)
-            panel.document_id = 1
-            start.side_effect = RuntimeError("queue full")
-            run = panel._load if operation == "load" else panel.analyze
-            run(1)
-            self.assertIn(f"Could not {operation}", panel.status.text())
-            start.side_effect = None
-            start.return_value = {"id": "test-job"}
-            run(1)
-            watcher = panel.analyzing[1]
-            watcher.stop()
-            watcher.finished.emit({"status": "failed", "error": "unreadable"})
-            self.assertIn(f"Could not {operation}", panel.status.text())
-            panel.close()
+
+        class View:
+            pass
+
+        panel = ReferencesPanel(None)
+        self.addCleanup(panel.close)
+        panel.document_id = 7
+        watcher = panel.analyzing[7] = Mock()
+        view = panel.view = View()
+        citation = SimpleNamespace(destination="bm_apjaa348cbib74", rect=Rect(10, 10, 50, 20))
+        affiliation = SimpleNamespace(destination="bm_apjaa348caf1", rect=Rect(60, 10, 90, 20))
+        view.doc = SimpleNamespace(_links={0: [citation, affiliation]}, words=lambda page: [(10, 10, 50, 20, "2014")])
+        self.assertFalse(panel._citation_link(view, affiliation))
+        self.assertTrue(panel._citation_link(view, citation))
+        self.assertIn("Loading references", panel.status.text())
+        ref = {"id": 1, "label": "Reale 2014", "destinations": [citation.destination]}
+        panel._job_done(7, {"status": "completed", "result": {"references": [ref], "status": "partial"}}, "load")
+        self.assertEqual(panel.expanded, 1)
+        self.assertEqual(panel.list.currentItem().data(257), 1)
+        watcher.deleteLater.assert_called_once()
+
+    def test_unmatched_bibliography_link_stays_in_reader_and_offers_retry(self):
+        from types import SimpleNamespace
+        from paperassist.native.references_panel import ReferencesPanel
+
+        class View:
+            pass
+
+        panel = ReferencesPanel(None)
+        self.addCleanup(panel.close)
+        panel.document_id = 7
+        view = panel.view = View()
+        link = SimpleNamespace(destination="bm_apjaa348cbib74", rect=Rect(10, 10, 50, 20))
+        view.doc = SimpleNamespace(_links={0: [link]}, words=lambda page: [(10, 10, 50, 20, "2014")])
+        for refs in ([], [{"id": 1, "label": "Other", "destinations": ["bib-other"]}]):
+            panel.refs = refs
+            self.assertTrue(panel._citation_link(view, link))
+            self.assertIn("not found", panel.status.text())
+            self.assertFalse(panel.retry.isHidden())
 
     def test_load_and_analysis_errors_name_the_operation(self):
         from unittest.mock import Mock

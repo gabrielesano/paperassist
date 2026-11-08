@@ -1,15 +1,15 @@
 """The library list: search, open in a tab or quick view, and import PDFs as a background job."""
-from pathlib import Path
-
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 from paperassist.library import pdf_files
+
 from .jobs import JobWatcher
 from .library_source import display_title
 from .metadata_dialog import MetadataDialog
+from .theme import APP_STYLE, serif_heading_font
 
 REVIEW = QColor("#a15c00")  # amber: not an error, a paper whose metadata nobody confirmed
 NEEDS_REVIEW = ("needs_review", "incomplete")
@@ -30,15 +30,20 @@ class LibraryDialog(QDialog):
         super().__init__(parent)
         self.workspace, self.watcher = workspace, None
         self.setWindowTitle("Library")
-        self.resize(920, 560)
+        self.resize(940, 580)
+        self.heading = QLabel("Library")
+        self.heading.setProperty("headingScale", "dialog")
+        self.heading.setFont(serif_heading_font(self.font()))
         self.search = QLineEdit(placeholderText="Search title, author, year or DOI", clearButtonEnabled=True)
         self.search.setAccessibleName("Search the library")
-        self.table = QTreeWidget(rootIsDecorated=False, uniformRowHeights=True, headerLabels=["Title", "Authors", "Year", "Metadata"])
+        self.table = QTreeWidget(objectName="dialog-tree", rootIsDecorated=False, uniformRowHeights=True,
+                                 headerLabels=["Title", "Authors", "Year", "Metadata"])
         self.table.setAccessibleName("Papers")
         self.table.setColumnWidth(0, 420)
         self.table.setColumnWidth(1, 240)
         self.table.setColumnWidth(2, 70)
         self.open_button = QPushButton("Open")
+        self.open_button.setProperty("primary", True)
         self.quick_button = QPushButton("Quick view")
         self.edit_button = QPushButton("Edit details…")
         self.edit_button.setToolTip("Correct the title, authors, year or DOI (F2)")
@@ -46,32 +51,45 @@ class LibraryDialog(QDialog):
         self.folder_button = QPushButton("Import folder…")
         self.cancel_button = QPushButton("Cancel import")
         self.progress = QProgressBar()
-        self.hint = QLabel("The library is empty.\nChoose Import PDFs or Import folder to add papers.", alignment=Qt.AlignCenter)
+        self.hint = QLabel("The library is empty.\nChoose Import PDFs or Import folder to add papers.",
+                           objectName="muted-note", alignment=Qt.AlignCenter)
         self.hint.setAccessibleName("Empty library")
-        self.estimate = QLabel(wordWrap=True)  # what an import would add, shown before anything is copied
+        self.estimate = QLabel(objectName="muted-note", wordWrap=True)  # what an import would add, shown before anything is copied
         self.estimate.setAccessibleName("Import estimate")
         self.start_button = QPushButton("Start import")
+        self.start_button.setProperty("primary", True)
         self.discard_button = QPushButton("Cancel selection")
-        self.message = QLabel(wordWrap=True)
+        self.message = QLabel(objectName="muted-note", wordWrap=True)
+
         import_row = QHBoxLayout()
+        import_row.setSpacing(8)
         import_row.addWidget(self.progress, 1)
         import_row.addWidget(self.cancel_button)
+
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         for widget in (self.import_button, self.folder_button):
             buttons.addWidget(widget)
         buttons.addWidget(self.message, 1)
         for widget in (self.edit_button, self.quick_button, self.open_button):
             buttons.addWidget(widget)
+
         self.confirm_row = QHBoxLayout()
+        self.confirm_row.setSpacing(8)
         for widget in (self.estimate, self.start_button, self.discard_button):
             self.confirm_row.addWidget(widget, 1 if widget is self.estimate else 0)
+
         column = QVBoxLayout(self)
+        column.setContentsMargins(22, 20, 22, 18)
+        column.setSpacing(10)
+        column.addWidget(self.heading)
         column.addWidget(self.search)
         column.addWidget(self.table, 1)
         column.addWidget(self.hint, 1)
         column.addLayout(self.confirm_row)
         column.addLayout(import_row)
         column.addLayout(buttons)
+
         self.pending = []
         self.typing = QTimer(self, singleShot=True, interval=150, timeout=self.refresh)
         self.search.textChanged.connect(self.typing.start)
@@ -87,7 +105,14 @@ class LibraryDialog(QDialog):
         self.cancel_button.clicked.connect(lambda: self.watcher.cancel())
         self._importing(False)
         self._discard_selection()
+        if parent is None:
+            self.setStyleSheet(APP_STYLE)
         self.refresh()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange) and hasattr(self, "heading"):
+            self.heading.setFont(serif_heading_font(self.search.font()))
 
     def keyPressEvent(self, event):
         # A key event handler rather than a QShortcut: that only fires once the window counts as active.

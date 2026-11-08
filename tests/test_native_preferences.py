@@ -827,6 +827,45 @@ class NativePreferencesTests(unittest.TestCase):
         self.pump()
         self.assertGreater(self.assert_buttons_fit(window.details_column, "Comments panel (with comment)"), 0)
 
+    def test_expanded_card_refits_during_zoom_and_resize(self):
+        from test_library_window import cited_pdf
+
+        workspace = Workspace(self.dir / "zoom-refit-library")
+        self.addCleanup(workspace.close)
+        path = cited_pdf(self.dir / "zoom-refit.pdf", pages=3)
+        doc = workspace.library.import_stream(io.BytesIO(path.read_bytes()), path.name)
+        references.analyze(workspace.library, doc["id"])
+        window = self.make_window(workspace=workspace, size=(1400, 900))
+        tab = window.open_library_document(doc["id"])
+        panel = window.details
+        self.pump(lambda: tab.main.view.has_page(0) and panel.list.count() >= 2)
+        item = panel.list.item(0)
+        panel._expand(item)
+        card = panel.list.itemWidget(item)
+        card.title.linkActivated.emit("open")  # rebuilds the missing reference with its searches open
+        self.assertFalse(card.isVisible())  # deletion of the old index widget is deferred
+        card = panel.list.itemWidget(item)
+        toggle = next(button for button in card.findChildren(QPushButton)
+                      if button.isCheckable() and "Browser searches" in button.text())
+        toggle.setChecked(True)
+
+        for zoom, size in ((1, (1400, 900)), (1.5, (1400, 900)),
+                           (1.5, (800, 650)), (1, (800, 650))):
+            window.resize(*size)
+            window.preferences_dialog.apply_zoom(zoom)
+            self.pump()
+            width = panel.list.viewport().width()
+            needed = card.layout().totalHeightForWidth(width)
+            self.assertGreaterEqual(item.sizeHint().height(), needed)
+            self.assertGreaterEqual(card.height(), needed)
+            for widget in [card.title, *card.findChildren(QPushButton)]:
+                if widget.isVisible():
+                    bottom = widget.mapTo(card, widget.rect().bottomLeft()).y()
+                    self.assertLess(bottom, card.height(), widget.text())
+            self.assertGreaterEqual(panel.list.visualItemRect(panel.list.item(1)).top(),
+                                    panel.list.visualItemRect(item).bottom())
+            self.assert_buttons_fit(window.detail_switch.tab_bar, f"details tabs at {zoom}")
+
     def test_expanded_card_refits_its_height_when_the_panel_narrows(self):
         from test_library_window import cited_pdf
 
@@ -859,6 +898,24 @@ class NativePreferencesTests(unittest.TestCase):
         needed = card.layout().totalHeightForWidth(panel.list.viewport().width())
         self.assertGreater(needed, wide)
         self.assertGreaterEqual(item.sizeHint().height(), needed)
+
+    def test_single_header_details_column_and_flow_layout_height_for_width(self):
+        from PySide6.QtWidgets import QWidget
+        from paperassist.native.theme import FlowLayout
+
+        workspace = Workspace(self.dir / "header-flow-library")
+        self.addCleanup(workspace.close)
+        window = self.make_window(workspace=workspace, size=(1280, 820))
+        headers = [w for w in window.details_column.findChildren(QWidget) if w.objectName() == "column-header"]
+        self.assertEqual(len(headers), 1)
+        self.assertIs(window.detail_switch.tab_bar.parentWidget(), headers[0])
+
+        host = QWidget()
+        flow = FlowLayout(host, h_spacing=12, v_spacing=4)
+        for label in ("Open in quick view", "Open in tab", "Choose another paper", "Reset automatic link"):
+            flow.addWidget(QPushButton(label, host))
+        self.assertTrue(flow.hasHeightForWidth())
+        self.assertGreater(flow.heightForWidth(140), flow.heightForWidth(900))
 
 
 if __name__ == "__main__":

@@ -11,12 +11,15 @@ from typing import Callable
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QAction, QIntValidator, QKeySequence, QShortcut
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLineEdit, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
+                               QTextBrowser, QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
 from paperassist.library import MAX_LABEL
 
 from .library_source import display_title
 from .positions import current_page
+from .theme import DIALOG_BG, INK, LINE, MUTED, icon, serif_heading_font
+from .toolbar import reserve_zoom_width
 
 
 @dataclass(frozen=True)
@@ -37,7 +40,7 @@ TABLE = [
     Entry("Navigation", ("P", "K"), "Previous page", lambda s: s.step_page(-1)),
     Entry("Navigation", ("Home",), "First page", lambda s: s.go_to_page(0)),
     Entry("Navigation", ("End",), "Last page", lambda s: s.go_to_page(LAST)),
-    Entry("Navigation", ("G",), "Go to page: type a number, then Enter", lambda s: s.page_field.focus()),
+    Entry("Navigation", ("G",), "Go to page: type a number, then Enter", lambda s: s.focus_page()),
     Entry("Navigation", ("Up", "Down"), "Scroll the document (click it first)"),
     Entry("Navigation", ("Space", "Shift+Space"), "Scroll a screen down or up"),
     Entry("Navigation", ("PgUp", "PgDown"), "Scroll a screen up or down"),
@@ -72,51 +75,92 @@ def other_commands(window, own):
     return [(keys, name) for name, keys in rows.items()]
 
 
+def _format_keys(keys):
+    badges = [
+        f"<span style='background:#ffffff; border:1px solid #c9d4ca; padding:1px 5px; font-weight:600;'>"
+        f"{html.escape(k)}</span>"
+        for k in keys
+    ]
+    return " / ".join(badges)
+
+
 def show_help(window):
     sections = {}
     for entry in TABLE:
         sections.setdefault(entry.group, []).append(([sequence_text(k) for k in entry.keys], entry.label))
     sections["Toolbar and menu"] = other_commands(window, window.shortcuts.actions)
-    body = "".join(
-        f"<h3>{html.escape(group)}</h3><table cellpadding='3'>" + "".join(
-            f"<tr><td><b>{html.escape(' / '.join(keys))}</b></td><td>{html.escape(label)}</td></tr>" for keys, label in rows)
-        + "</table>" for group, rows in sections.items())
+    body = f"<div style='color:{INK};'>" + "".join(
+        f"<p style='margin:14px 0 4px 0; color:{MUTED}; font-weight:700; text-transform:uppercase;'>"
+        f"{html.escape(group)}</p>"
+        f"<hr style='border:0; background:{LINE}; height:1px; margin:0 0 6px 0;'/>"
+        f"<table width='100%' cellspacing='0' cellpadding='4'>" + "".join(
+            f"<tr><td>{html.escape(label)}</td>"
+            f"<td align='right' style='white-space:nowrap;'>{_format_keys(keys)}</td></tr>"
+            for keys, label in rows
+        ) + "</table>"
+        for group, rows in sections.items()
+    ) + "</div>"
     dialog = QDialog(window)
     dialog.setObjectName("shortcuts-help")
     dialog.setWindowTitle("Keyboard shortcuts")
     dialog.setAttribute(Qt.WA_DeleteOnClose)
-    dialog.resize(560, 620)
+    dialog.resize(640, 640)
     layout = QVBoxLayout(dialog)
-    layout.addWidget(QTextBrowser(html=body))
-    layout.addWidget(QLabel("Letter keys work when no text field has focus."))
+    layout.setContentsMargins(22, 20, 22, 18)
+    layout.setSpacing(10)
+    heading = QLabel("Keyboard shortcuts")
+    heading.setProperty("headingScale", "dialog")
+    heading.setFont(serif_heading_font(dialog.font()))
+    browser = QTextBrowser(html=body)
+    browser.setAccessibleName("Keyboard shortcuts list")
+    browser.setStyleSheet(f"QTextBrowser {{ background: {DIALOG_BG}; border: 0; }}")
+    note = QLabel("Letter keys work when no text field has focus.", objectName="muted-note")
+    buttons = QDialogButtonBox(QDialogButtonBox.Close)
+    buttons.rejected.connect(dialog.reject)
+    for widget in (heading, note, browser, buttons):
+        layout.addWidget(widget, 1 if widget is browser else 0)
     dialog.open()
     return dialog
 
 
 class PageField(QWidget):
-    """Current page and total for the active document, in the status bar so it never covers the PDF."""
+    """Current page and total for one document, grouped with page step buttons."""
 
-    def __init__(self, shortcuts):
+    def __init__(self, shortcuts, prefix="Main paper"):
         super().__init__()
-        self.shortcuts, self.view = shortcuts, None
-        self.edit = QLineEdit(alignment=Qt.AlignRight, toolTip="Go to page (G)")
-        self.edit.setAccessibleName("Page number")
+        self.shortcuts, self.view, self.prefix = shortcuts, None, prefix
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.toolbar_actions = []
+        self.edit = QLineEdit(alignment=Qt.AlignCenter, toolTip="Go to page (G)")
+        self.edit.setAccessibleName(f"{prefix}: page number")
         self.edit.setValidator(QIntValidator(1, 99999))
-        self.edit.setMinimumWidth(52)
-        self.edit.setMaximumWidth(68)
-        self.total = QLabel()
+        self.edit.setMinimumWidth(46)
+        self.edit.setMaximumWidth(62)
+        self.total = QLabel(objectName="muted-note")
+        self.total.setFixedWidth(self.total.fontMetrics().horizontalAdvance('/ 99999') + 4)
         row = QHBoxLayout(self)
-        row.setContentsMargins(6, 0, 6, 0)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(5)
         row.addWidget(self.edit)
         row.addWidget(self.total)
         self.edit.returnPressed.connect(self.commit)
-        self.edit.installEventFilter(shortcuts)
+        self.edit.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched is self.edit and event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+            self.leave()
+            return True
+        return super().eventFilter(watched, event)
 
     def show_page(self, view):
         self.view = view
-        self.setVisible(view is not None)
-        self.setEnabled(view is not None)
-        if view is None:
+        self.total.setFixedWidth(self.total.fontMetrics().horizontalAdvance('/ 99999') + 4)
+        shown = view is not None
+        for action in self.toolbar_actions:
+            action.setVisible(shown)
+        self.setVisible(shown)
+        self.setEnabled(shown)
+        if not shown:
             self.edit.clear()
             self.total.clear()
             return
@@ -140,6 +184,15 @@ class PageField(QWidget):
         if view:
             view.setFocus()
         self.show_page(view)
+
+    def add_overflow_actions(self, menu):
+        submenu = menu.addMenu(f'{self.prefix}: page number')
+        field = PageField(self.shortcuts, self.prefix)
+        field.show_page(self.view)
+        action = QWidgetAction(submenu)
+        action.setDefaultWidget(field)
+        submenu.addAction(action)
+        return submenu
 
 
 class RenameEdit(QLineEdit):
@@ -174,7 +227,7 @@ class Shortcuts(QObject):
                 window.addAction(action)
                 self.actions.append(action)
         self.page_field = PageField(self)
-        window.statusBar().addPermanentWidget(self.page_field)
+        self._place_page_controls(window)
         window.details.filter.installEventFilter(self)
         bar = window.tabs.tabBar()
         bar.installEventFilter(self)
@@ -185,17 +238,95 @@ class Shortcuts(QObject):
         window.tabs.currentChanged.connect(self.refresh_page)
         self.refresh_page()
 
+    def _place_page_controls(self, window):
+        main_bar = getattr(window, "main_bar", None)
+        anchor = getattr(window, "page_anchor_action", None)
+        if main_bar is None or anchor is None:
+            window.statusBar().addPermanentWidget(self.page_field)
+            return
+        prev = QAction(icon('chevron_left', INK, 15), 'Main paper: previous page', window)
+        prev.triggered.connect(lambda: self.step_page(-1, self.main_view()))
+        following = QAction(icon('chevron_right', INK, 15), 'Main paper: next page', window)
+        following.triggered.connect(lambda: self.step_page(1, self.main_view()))
+        self.page_field.toolbar_actions = [
+            main_bar.insertAction(anchor, prev) or prev,
+            main_bar.insertWidget(anchor, self.page_field),
+            main_bar.insertAction(anchor, following) or following,
+            main_bar.insertSeparator(anchor),
+        ]
+
     # ---- pages -----------------------------------------------------------------------------
     def view(self):
         pane = self.window.pane()
         return pane.view if pane else None
 
+    def main_view(self):
+        return self.window.tab().main.view if self.window.tab() else None
+
+    def focus_page(self):
+        pane = self.window.pane()
+        field = getattr(pane, 'navigation_field', None) if pane and pane.quick else self.page_field
+        if field:
+            bar = pane.navigation_bar if pane and pane.quick else self.window.main_bar
+            if bar.overflow.button.isVisible() and bar.overflow.is_hidden(field):
+                bar.overflow.popup()
+                submenu = next((menu for menu in bar.overflow.generated_menus if menu.title() == f'{field.prefix}: page number'), None)
+                if submenu:
+                    submenu.popup(bar.overflow.menu.mapToGlobal(bar.overflow.menu.rect().topRight()))
+                    submenu.actions()[0].defaultWidget().focus()
+            else:
+                field.focus()
+
+    def _make_quick_controls(self, pane):
+        bar, view = pane.navigation_bar, pane.view
+        before = set(bar.actions())
+        anchor = pane.quick_buttons[0].defaultAction()
+        def button(text, glyph, slot):
+            action = QAction(icon(glyph, INK, 15), f'Second paper: {text}', bar)
+            action.triggered.connect(slot)
+            bar.insertAction(anchor, action)
+            widget = bar.widgetForAction(action)
+            widget.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            widget.setAccessibleName(action.text())
+            return action
+
+        button('previous page', 'chevron_left', lambda: self.step_page(-1, view))
+        pane.navigation_field = PageField(self, 'Second paper')
+        bar.insertWidget(anchor, pane.navigation_field)
+        button('next page', 'chevron_right', lambda: self.step_page(1, view))
+        button('find', 'find', pane.find_bar.open)
+        button('zoom out', 'minus', lambda: view.zoom_by(0.8))
+        pane.navigation_fit = QAction('Fit width', bar)
+        pane.navigation_fit.triggered.connect(view.fit_width)
+        bar.insertAction(anchor, pane.navigation_fit)
+        pane.navigation_fit.setToolTip('Second paper: fit width')
+        fit_button = bar.widgetForAction(pane.navigation_fit)
+        fit_button.setAccessibleName('Second paper: fit width')
+        button('zoom in', 'plus', lambda: view.zoom_by(1.25))
+        pane.navigation_actions = [action for action in bar.actions() if action not in before]
+        pane._fit_title()
+
+    def _refresh_quick_controls(self, pane):
+        if not hasattr(pane, 'navigation_field'):
+            self._make_quick_controls(pane)
+        pane.navigation_field.show_page(pane.view)
+        text = 'Fit width' if pane.view.fit else f'{round(pane.view.zoom * 100)}%'
+        button = pane.navigation_bar.widgetForAction(pane.navigation_fit)
+        reserve_zoom_width(pane.navigation_fit, button, text)
+
     def refresh_page(self, *_):
         for pane in self.window.all_panes():
             if pane.view not in self.bound:
                 self.bound.add(pane.view)
-                pane.view.moved.connect(lambda view=pane.view: view is self.view() and self.page_field.show_page(view))
-        self.page_field.show_page(self.view())
+                pane.view.moved.connect(self._on_view_moved)
+            if pane.quick:
+                self._refresh_quick_controls(pane)
+        self.page_field.show_page(self.main_view())
+
+    def _on_view_moved(self):
+        self.refresh_page()
+        if hasattr(self.window, "sync_zoom_label"):
+            self.window.sync_zoom_label()
 
     def go_to_page(self, page, view=None):
         """Zero-based page; numbers outside the document land on the first or last page."""
@@ -203,8 +334,8 @@ class Shortcuts(QObject):
         if view:
             view.goto(max(0, min(page, len(view.doc) - 1)))
 
-    def step_page(self, step):
-        if view := self.view():
+    def step_page(self, step, view=None):
+        if view := view or self.view():
             self.go_to_page(current_page(view) + step, view)
 
     # ---- tabs and columns ------------------------------------------------------------------
@@ -290,9 +421,6 @@ class Shortcuts(QObject):
                 self.rename_tab(index)
                 return True
         elif event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
-            if watched is self.page_field.edit:
-                self.page_field.leave()
-                return True
             if watched is self.window.details.filter:
                 if watched.text():
                     watched.clear()
