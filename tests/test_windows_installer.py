@@ -81,7 +81,7 @@ class WindowsInstallerTests(unittest.TestCase):
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="paperassist-windows-")
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.addCleanup(self.temporary.cleanup)
         self.app = self.root / "Programs with spaces/PaperAssist"
         self.binary = self.app / "PaperAssist.exe"
@@ -143,14 +143,14 @@ class WindowsInstallerTests(unittest.TestCase):
             self.assertTrue((self.app / name).is_file(), name)
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
             self.assertEqual(winreg.QueryValueEx(key, "DisplayVersion")[0], __version__)
-            self.assertEqual(Path(winreg.QueryValueEx(key, "InstallLocation")[0]), self.app)
+            self.assertEqual(Path(winreg.QueryValueEx(key, "InstallLocation")[0]).resolve(), self.app)
         self.assertTrue(self.start_link.exists())
         self.assertTrue(self.desktop_link.exists())
         script = self.root / "shortcut.ps1"
         script.write_text('param([string]$ShortcutPath)\n$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)\n$shortcut.TargetPath\n')
         target = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-File", str(script), str(self.start_link)],
                                 capture_output=True, text=True, check=True, timeout=20).stdout.strip()
-        self.assertEqual(Path(target), self.binary)
+        self.assertEqual(Path(target).resolve(), self.binary)
 
         data = self.binary.read_bytes()
         pe = struct.unpack_from("<I", data, 0x3C)[0]
@@ -173,7 +173,7 @@ class WindowsInstallerTests(unittest.TestCase):
             if isinstance(workers, dict):
                 workers = [workers]
             self.assertTrue(any("multiprocessing-fork" in (worker.get("CommandLine") or "")
-                                and Path(worker.get("ExecutablePath") or "") == self.binary for worker in workers))
+                                and Path(worker.get("ExecutablePath") or "").resolve() == self.binary for worker in workers))
             executable_before = hashlib.sha256(self.binary.read_bytes()).hexdigest()
             for args in (self.setup_command(), [str(self.uninstaller), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]):
                 result = subprocess.run(args, capture_output=True, timeout=45)
