@@ -383,13 +383,19 @@ class MainWindow(QMainWindow):
     def open_dialog(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF (*.pdf)")
         if path:
-            self.open_source(FileSource(path))
+            if opener := getattr(self, 'file_opener', None):
+                opener.receive([path])
+            else:
+                self.open_source(FileSource(path))
 
     # ---- quick view -----------------------------------------------------------------------
     def quick_dialog(self):
         path, _ = QFileDialog.getOpenFileName(self, "Quick view", "", "PDF (*.pdf)")
         if path and self.tab():
-            self.open_quick(FileSource(path))
+            if opener := getattr(self, 'file_opener', None):
+                opener.receive([path], quick=True)
+            else:
+                self.open_quick(FileSource(path))
 
     def open_quick(self, source):
         tab = self.tab()
@@ -549,12 +555,21 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event):
-        if not self.confirm(self.all_panes()):
-            return event.ignore()
-        for pane in self.all_panes():
-            pane.release()  # also stores the reading positions
-        self.details.close()
-        self.acquisition.close()
-        for dialog in self.findChildren(QDialog):
-            dialog.close()
-        event.accept()
+        self._closing = True
+        accepted = False
+        try:
+            if (opener := getattr(self, 'file_opener', None)) and opener.busy:
+                self.statusBar().showMessage('PDFs are still opening. Wait for opening to finish before closing.', 8000)
+                return event.ignore()
+            if not self.confirm(self.all_panes()):
+                return event.ignore()
+            for pane in self.all_panes():
+                pane.release()  # also stores the reading positions
+            self.details.close()
+            self.acquisition.close()
+            for dialog in self.findChildren(QDialog):
+                dialog.close()
+            event.accept()
+            accepted = True
+        finally:
+            self._closing = accepted

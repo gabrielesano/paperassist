@@ -42,14 +42,14 @@ generate_notices(notices_path, ocr_runtime=ocr_root)
 # A Widgets reader that draws its own pages needs none of the following. PyInstaller's
 # Qt hooks collect every plugin of the modules they see, so the unwanted files are
 # filtered out of the analysis result here instead of being deleted from the bundle.
-EXCLUDED_MODULES = ["PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick"]
+EXCLUDED_MODULES = ["PySide6.QtQml", "PySide6.QtQuick"]
 EXCLUDED_PLUGIN_DIRS = {
     "imageformats", "iconengines", "tls", "generic", "networkinformation",
     "egldeviceintegrations", "designer", "qmltooling", "sqldrivers",
 }
 KEPT_PLATFORMS = ("xcb", "wayland", "windows", "cocoa", "offscreen")  # offscreen serves tests and --self-test
 EXCLUDED_PLUGINS = ("libqgtk3",)  # the GTK theme drags in the GTK stack; the portal theme stays
-EXCLUDED_QT_LIBRARIES = ("Qt6Network", "Qt6EglFS", "Qt6EglFs", "QtNetwork")  # Svg and OpenGL stay: the Wayland plugins link them
+EXCLUDED_QT_LIBRARIES = ("Qt6EglFS", "Qt6EglFs")  # Network supplies local sockets; Svg/OpenGL support Wayland.
 
 # Linux system libraries that only libqgtk3, the GTK theme plugin, needed: GTK itself, its
 # drawing and accessibility stack, Kerberos and the X extensions beyond what Qt uses.
@@ -143,5 +143,12 @@ if sys.platform == "darwin":
             "CFBundleVersion": os.environ.get("GITHUB_RUN_NUMBER", "1"),
             "CFBundleGetInfoString": f"PaperAssist {__version__}",
             "LSApplicationCategoryType": "public.app-category.productivity",
+            "CFBundleDocumentTypes": [{
+                "CFBundleTypeName": "PDF document",
+                "CFBundleTypeRole": "Viewer",
+                "LSHandlerRank": "Alternate",
+                "LSItemContentTypes": ["com.adobe.pdf"],
+                "CFBundleTypeExtensions": ["pdf"],
+            }],
         },
     )

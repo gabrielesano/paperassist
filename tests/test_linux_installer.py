@@ -170,14 +170,13 @@ class LinuxInstallerTestCase(unittest.TestCase):
         launcher_text = launcher.read_text()
         self.assertIn("# Managed-By: PaperAssist-Linux-Installer", launcher_text)
 
-        # Desktop entry & icons (no PDF MimeType or %F file handoff in alpha)
+        # Register a supported handler without changing the user's default application.
         desktop_entry = self.data_dir / "applications" / "paperassist.desktop"
         self.assertTrue(desktop_entry.is_file())
         desktop_text = desktop_entry.read_text()
         self.assertIn("# Managed-By: PaperAssist-Linux-Installer", desktop_text)
-        self.assertIn(f'Exec="{launcher}"\n', desktop_text)
-        self.assertNotIn("MimeType=", desktop_text)
-        self.assertNotIn("%F", desktop_text)
+        self.assertIn(f'Exec="{launcher}" %F\n', desktop_text)
+        self.assertIn("MimeType=application/pdf;", desktop_text)
         self.assertNotIn("%f", desktop_text)
         self.assertTrue((app_dir / "_internal" / "fake_qt.so.6").is_symlink())
 
@@ -258,10 +257,10 @@ class LinuxInstallerTestCase(unittest.TestCase):
         self.assertEqual(res_run.returncode, 0, res_run.stderr)
         self.assertIn("my research paper.pdf second arg", res_run.stdout)
 
-        # Verify desktop file has properly quoted Exec line without %F or MimeType
+        # File arguments remain outside the quoted executable path.
         desktop_file = custom_home / "data dir" / "applications" / "paperassist.desktop"
         self.assertTrue(desktop_file.is_file())
-        self.assertIn(f'Exec="{launcher}"\n', desktop_file.read_text())
+        self.assertIn(f'Exec="{launcher}" %F\n', desktop_file.read_text())
 
     def test_idempotent_repeated_installation(self):
         """Test that re-running the same installer over an existing installation succeeds cleanly."""

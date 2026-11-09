@@ -269,6 +269,15 @@ Source and standalone launches use the native reader. Existing libraries, saved
 PDF revisions, notes, reading positions and preferences remain compatible; the
 historical library lock filename is retained to coordinate with older versions.
 
+External PDF opening (command-line arguments, Open and operating-system file
+events) imports a managed copy into the active library, deduplicating by exact
+content. Opening an already cataloged original selects its latest saved revision
+and preserves any existing unsaved reader edits. Explicit Save creates a library
+revision; it never replaces the external source file. A second invocation forwards
+its request to the owner of the selected library over a same-user local socket,
+without an HTTP server. Distinct libraries may have distinct windows. Platform
+PDF registrations offer Open with; only the user selects a default reader.
+
 Evaluate a targeted parser such as pypdf for background bulk metadata extraction,
 independent of the reader tab. Test bounds on problematic files; limiting page count
 alone does not guarantee low memory. Keep bibliography analysis deterministic and

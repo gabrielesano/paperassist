@@ -72,7 +72,7 @@ class DesktopEntryTestCase(unittest.TestCase):
             entry.get("Comment"),
             "Read research PDFs locally and consult cited references",
         )
-        self.assertEqual(entry.get("Exec"), "paperassist")
+        self.assertEqual(entry.get("Exec"), "paperassist %F")
         self.assertEqual(entry.get("Icon"), "paperassist")
         self.assertEqual(entry.get("Terminal"), "false")
         self.assertEqual(entry.get("Categories"), "Office;Viewer;Science;Literature;")
@@ -83,27 +83,16 @@ class DesktopEntryTestCase(unittest.TestCase):
         self.assertEqual(entry.get("StartupNotify"), "true")
         self.assertEqual(entry.get("StartupWMClass"), "PaperAssist")
 
-    def test_scope_restrictions_no_mimetypes_no_field_codes(self) -> None:
-        """Verify strict alpha scope: no MimeType association and no %f/%F/%u/%U codes."""
+    def test_pdf_handler_accepts_files_without_forcing_a_default(self) -> None:
+        """Declare PDF support and file arguments; the desktop user chooses the default reader."""
         content = DESKTOP_FILE.read_text(encoding="utf-8")
         config = configparser.ConfigParser(interpolation=None)
         config.read_string(content)
         entry = config["Desktop Entry"]
 
-        # Alpha scope: PaperAssist does NOT register as default PDF reader or associate MIME types
-        self.assertNotIn("MimeType", entry, "MimeType must NOT be set in alpha desktop entry")
-        self.assertNotIn(
-            "application/pdf", content, "Desktop entry must not declare application/pdf association"
-        )
-
-        # Exec must NOT contain file-open field codes (%f, %F, %u, %U)
-        exec_val = entry.get("Exec", "")
-        for code in ("%f", "%F", "%u", "%U"):
-            self.assertNotIn(
-                code,
-                exec_val,
-                f"Exec command must not contain '{code}' field code in minimal desktop entry",
-            )
+        self.assertEqual(entry.get('MimeType'), 'application/pdf;')
+        self.assertEqual(entry.get('Exec'), 'paperassist %F')
+        self.assertNotIn('X-Default', entry)
 
     def test_desktop_file_validate(self) -> None:
         """Run freedesktop desktop-file-validate validator if installed."""

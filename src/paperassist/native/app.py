@@ -7,6 +7,7 @@ import socket
 import sqlite3
 import sys
 import tempfile
+import time
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from paperassist.workspace import LibraryInUse, Workspace, library_lock
 
 from .about import COMPONENTS, component_info
 from .document import PdfDocument
+from .instance import InstanceServer, absolute_paths, forward
+from .open_files import FileOpenEvents, OpenFiles
 from .renderer import RenderClient
 from .source import FileSource
 from .theme import brand_icon
@@ -161,7 +164,7 @@ def run(argv=None):
     parser = argparse.ArgumentParser(prog="paperassist", description="PaperAssist native reader. "
                                     "Use 'paperassist import --help' for command-line library import.")
     parser.add_argument("-v", "--version", action="version", version=f"PaperAssist {paperassist.__version__}")
-    parser.add_argument("pdfs", nargs="*", help="PDF files to open, one tab each; without any, the library opens")
+    parser.add_argument("pdfs", nargs="*", help="PDF files to import/reuse and open in library tabs")
     parser.add_argument("--data-dir", help="library directory (default: PAPERASSIST_DATA_DIR, the folder chosen in the app, "
                                            "or the per-user data directory)")
     checks = parser.add_mutually_exclusive_group()
@@ -178,6 +181,15 @@ def run(argv=None):
     app.setApplicationName("PaperAssist")
     app.setDesktopFileName("paperassist")
     app.setWindowIcon(brand_icon(64))
+    if not hasattr(app, 'file_open_events'):
+        app.file_open_events = FileOpenEvents(app)
+    app.processEvents()
+    try:
+        args.pdfs = absolute_paths([*args.pdfs, *app.file_open_events.pending])
+    except ValueError as error:
+        QMessageBox.warning(None, 'PaperAssist', str(error))
+        return 1
+    app.file_open_events.pending.clear()
     with termination_requests(app):
         return _run_sessions(app, args)
 
@@ -188,8 +200,22 @@ def _run_sessions(app, args):
     while True:
         with ExitStack() as session:
             try:
-                workspace = session.enter_context(open_workspace(data_dir)) if not args.pdfs else None
+                directory, _ = locate_existing(data_dir)
+                if forward(directory, args.pdfs):
+                    return 0
+                workspace = session.enter_context(open_workspace(data_dir))
             except (LibraryInUse, LibraryMissing, OSError, sqlite3.Error) as error:
+                if isinstance(error, LibraryInUse):
+                    # The first process may hold the lock while its window and endpoint are starting.
+                    deadline = time.monotonic() + 1.5
+                    try:
+                        while time.monotonic() < deadline:
+                            if forward(directory, args.pdfs, connect_ms=100):
+                                return 0
+                            time.sleep(.05)
+                    except RuntimeError as delivery_error:
+                        QMessageBox.warning(None, 'PaperAssist', str(delivery_error))
+                        return 1
                 message = ("This library is open in another PaperAssist window; close it first."
                            if isinstance(error, LibraryInUse) else f"Could not open the library:\n{error}")
                 if previous_library is None:
@@ -203,8 +229,16 @@ def _run_sessions(app, args):
                 QMessageBox.warning(None, "PaperAssist", f"{message}\n\nReopening the previous library: {previous_library}")
                 previous_library, data_dir = None, None
                 continue
+            except (RuntimeError, ValueError, FileNotFoundError) as error:
+                QMessageBox.warning(None, 'PaperAssist', str(error))
+                return 1
             directory = workspace.data_dir if workspace else None
-            code, target = show(app, workspace, args.pdfs)
+            try:
+                code, target = show(app, workspace, args.pdfs)
+            except (OSError, RuntimeError) as error:
+                QMessageBox.warning(None, 'PaperAssist', f'Could not start the library window:\n{error}')
+                return 1
+            args.pdfs = []  # A later library switch must not import the launch files again.
         if not target:
             return code
         # prepare_switch persisted the chosen folder; reopen through settings, not as a fixed --data-dir.
@@ -213,17 +247,25 @@ def _run_sessions(app, args):
 
 def show(app, workspace, pdfs):
     client = RenderClient()
-    window = MainWindow(client, workspace)
-    window.show()
-    for path in pdfs:
-        window.open_source(FileSource(path))
-    if workspace and not pdfs:
-        window.show_library()
+    window = server = None
     try:
+        window = MainWindow(client, workspace)
+        window.file_opener = OpenFiles(window)
+        server = InstanceServer(workspace.data_dir, window.file_opener.receive, window)
+        app.file_open_events.receiver = window.file_opener.receive
+        window.show()
+        window.file_opener.receive(pdfs)
+        app.file_open_events.flush()
         return app.exec(), window.switch_target
     finally:
-        window.deleteLater()
-        QCoreApplication.sendPostedEvents(window, QEvent.DeferredDelete)
-        del window
-        gc.collect()
+        app.file_open_events.receiver = None
+        if server:
+            server.close()
+            server = None
+        if window:
+            window.file_opener.close()
+            window.deleteLater()
+            QCoreApplication.sendPostedEvents(window, QEvent.DeferredDelete)
+            del window
+            gc.collect()
         client.shutdown()

@@ -30,8 +30,12 @@ and rollback mechanisms handle installation. Obsolete files from earlier builds
 may remain until uninstallation; upgrades do not recursively purge `_internal`.
 
 The alpha installer is not Authenticode-signed. Reputation and publisher trust
-on downloaded installers are not established by a successful CI run. PDF file
-associations and second-instance file delivery remain outside this package.
+on downloaded installers are not established by a successful CI run. The optional
+**Add PaperAssist to Open with for PDF files** task registers a current-user PDF
+handler and capabilities. Setup never replaces the default `.pdf` handler or
+UserChoice; uninstallation removes the owned registrations. Subsequent launches
+deliver PDFs to the existing owner of the selected library, importing managed
+copies and preserving unsaved edits and external originals.
 
 ## Building and verification
 
@@ -53,8 +57,12 @@ They check target rejection, install and repeated upgrade in a path with spaces,
 the current-user uninstall registry entry, shortcut targets, a console-free PE
 executable, PDF rendering, a real visible GUI, and the installed render-worker
 path. Setup and uninstall must refuse the running GUI. A normal window close is
-followed by upgrade and uninstall, with byte-for-byte preservation of the fixture
-library, PDF, preferences, and an unowned file inside the application directory.
+followed by upgrade and uninstall. Tests also execute the registered PDF command,
+check duplicate reuse in the existing process, preserve source originals and
+manual metadata, and verify registry cleanup without changing PDF defaults.
+Reading positions and explicitly imported papers are expected library changes;
+upgrade and uninstall preserve that resulting library, preferences and an unowned
+file inside the application directory byte for byte.
 
 The source checkout tests skip this acceptance suite until an installer exists.
 The Build workflow runs it against the actual installer before uploading the EXE,

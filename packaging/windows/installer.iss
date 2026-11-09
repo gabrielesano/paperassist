@@ -28,9 +28,21 @@ OutputDir={#OutputDir}
 OutputBaseFilename=PaperAssist-{#AppVersion}-windows-x86_64-setup
 Compression=lzma2
 SolidCompression=yes
+ChangesAssociations=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
+Name: "pdfhandler"; Description: "Add PaperAssist to Open with for PDF files"; Flags: unchecked
+
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\PaperAssist.PDF"; ValueType: string; ValueName: ""; ValueData: "PDF document"; Tasks: pdfhandler; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\PaperAssist.PDF\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\PaperAssist.exe,0"; Tasks: pdfhandler
+Root: HKCU; Subkey: "Software\Classes\PaperAssist.PDF\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\PaperAssist.exe"" ""%1"""; Tasks: pdfhandler
+Root: HKCU; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: string; ValueName: "PaperAssist.PDF"; ValueData: ""; Tasks: pdfhandler; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\PaperAssist\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "PaperAssist"; Tasks: pdfhandler; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\PaperAssist\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "Read and annotate research PDFs in a local library"; Tasks: pdfhandler
+Root: HKCU; Subkey: "Software\PaperAssist\Capabilities\FileAssociations"; ValueType: string; ValueName: ".pdf"; ValueData: "PaperAssist.PDF"; Tasks: pdfhandler
+Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "PaperAssist"; ValueData: "Software\PaperAssist\Capabilities"; Tasks: pdfhandler; Flags: uninsdeletevalue
 
 [Files]
 Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

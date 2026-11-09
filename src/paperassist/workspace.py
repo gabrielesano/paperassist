@@ -154,6 +154,23 @@ class Workspace:
         return self.submit(lambda job, cancel: self.library.import_paths(
             paths, progress=lambda done, total: job.update(progress={'completed': done, 'total': total}), cancel=cancel))
 
+    def open_files(self, paths):
+        """Import/reuse external opening requests without blocking the reader thread."""
+        if not isinstance(paths, list) or not paths or not all(isinstance(path, str) and path for path in paths):
+            raise ValueError('Choose local PDF files to open.')
+        def open_files(job, cancel):
+            result = {'documents': [], 'errors': []}
+            for index, path in enumerate(paths):
+                if cancel.is_set():
+                    break
+                try:
+                    result['documents'].append(self.library.open_file(path))
+                except (OSError, ValueError, KeyError) as error:
+                    result['errors'].append({'path': path, 'error': str(error)})
+                job['progress'] = {'completed': index + 1, 'total': len(paths)}
+            return result
+        return self.submit(open_files)
+
     def refresh_metadata(self, document_ids=None, *, online=True, ocr='auto'):
         """Refresh a snapshot of the whole library, or the explicitly selected PDFs.
 

@@ -320,6 +320,30 @@ class Library:
     def import_stream(self, stream, filename: str) -> dict:
         return self._import_stream(stream, filename, None)
 
+    def open_file(self, path: str | Path) -> dict:
+        """Reuse this library's original/current revision, or import a managed copy of an external file."""
+        path = Path(path).expanduser().resolve(strict=True)
+        if not path.is_file() or path.suffix.lower() != '.pdf':
+            raise ValueError('Choose a PDF file, not a folder or another file type.')
+        owner = path.parent.parent
+        managed = path.parent.name in ('originals', 'working') and (owner / 'library.sqlite3').is_file()
+        if managed:
+            if owner != self.data_dir.resolve():
+                raise ValueError('This PDF belongs to another PaperAssist library. Open that library to use it.')
+            for document in self.list_documents():
+                original = self.originals / self._stored_name(document)
+                current = self.working / f"{document['id']}-{document['revision']}.pdf"
+                if path == original.resolve():
+                    with path.open('rb') as source:
+                        if hashlib.file_digest(source, 'sha256').hexdigest() != document['sha256']:
+                            raise ValueError('The managed original has changed. Restore its original bytes before opening it.')
+                    return document
+                if document['revision'] and path == current.resolve():
+                    return document
+            raise ValueError('This managed PDF is missing from the catalog or is an older revision. Open the paper from Library.')
+        with path.open('rb') as stream:
+            return self._import_stream(stream, path.name, str(path))
+
     def _import_stream(self, stream, filename, source_path):
         filename = Path(filename.replace("\\", "/")).name or "document.pdf"
         with self._lock:

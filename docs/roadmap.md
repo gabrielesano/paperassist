@@ -10,23 +10,25 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-1. Prepare the next alpha release with bundled OCR. Set a new release version,
-   rebuild and publish the verified artifacts. The
+1. Verify and prepare the `0.2.0a1` alpha with managed PDF opening, native file
+   delivery and bundled OCR, then publish the verified artifacts. The
    existing `0.1.0a4` release downloads predate bundled OCR and are not replaced by
    CI artifacts. See [host acceptance](development/host-acceptance.md).
-2. Implement native file delivery from a second invocation to the correct existing
-   window, focusing it and preserving unsaved edits. Define the managed-library
-   behavior before registering optional PDF associations on each platform. See
-   [the desktop integration plan](development/desktop-plan.md).
-3. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
+2. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
    GUI trials and interactive Windows/macOS reading, editing, focus and display
    checks. Hosted build and installer tests cover automated acceptance; untested
    environments remain documented rather than blocking local development.
-4. Before broader distribution, address Windows signing and macOS Developer ID
+3. Before broader distribution, address Windows signing and macOS Developer ID
    signing/notarization, and verify additional OS/architecture targets as needed.
 
 ## Completed transitions and automated acceptance
 
+- Managed PDF copies for command-line/system opening, Open and Quick view;
+  duplicate reuse and unchanged external originals on Save. Native local-socket
+  delivery selects the correct library owner without discarding unsaved edits.
+  PDF Open with registrations are included for Linux, Windows and macOS without
+  forcing a default reader. See [desktop integration](development/desktop-plan.md)
+  and [the current verification record](development/file-opening.md).
 - Native source entry point, with CLI import, the existing library process lock
   and PDF.js annotation/note interoperability retained.
 - Retirement of the web reader, Flask server, pywebview host, PDF.js vendor tree,

@@ -1145,7 +1145,7 @@ if [ "$NO_DESKTOP" -ne 1 ]; then
     else
         EXEC_TARGET="$INSTALL_DIR/PaperAssist"
     fi
-    ESCAPED_EXEC=$(printf '%s' "$EXEC_TARGET" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\$/\\\$/g' -e 's/`/\\`/g')
+    ESCAPED_EXEC=$(printf '%s' "$EXEC_TARGET" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\$/\\\$/g' -e 's/`/\\`/g' -e 's/%/%%/g')
 
     mkdir -p "$APPLICATIONS_DIR" || {
         echo "Error: Cannot create applications directory: $APPLICATIONS_DIR" >&2
@@ -1154,11 +1154,12 @@ if [ "$NO_DESKTOP" -ne 1 ]; then
     DESKTOP_TMP="$APPLICATIONS_DIR/.paperassist.desktop.tmp.$$"
 
     if [ -f "$INSTALL_DIR/desktop/paperassist.desktop" ]; then
-        EXEC_LINE="Exec=\"$ESCAPED_EXEC\"" awk '
+        EXEC_LINE="Exec=\"$ESCAPED_EXEC\" %F" awk '
             BEGIN { header_printed = 0 }
             /^\[Desktop Entry\]/ {
                 print $0
                 print "# Managed-By: PaperAssist-Linux-Installer"
+                print "MimeType=application/pdf;"
                 header_printed = 1
                 next
             }
@@ -1179,7 +1180,8 @@ Type=Application
 Name=PaperAssist
 GenericName=Research Paper Reader
 Comment=Read research PDFs locally and consult cited references
-Exec="$ESCAPED_EXEC"
+Exec="$ESCAPED_EXEC" %F
+MimeType=application/pdf;
 Icon=paperassist
 Terminal=false
 Categories=Office;Viewer;Science;Literature;
@@ -1270,6 +1272,9 @@ fi
 if [ -n "$RECORDED_DESKTOP" ]; then
     echo "Desktop entry installed to:"
     echo "  $RECORDED_DESKTOP"
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$APPLICATIONS_DIR" >/dev/null 2>&1 || true
+    fi
 fi
 
 exit 0

@@ -26,6 +26,40 @@ if pdf_available:
 
 @needs_qt
 class SwitchRecoveryTests(unittest.TestCase):
+    def test_launch_files_are_not_reimported_when_switching_libraries(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            old, target = root / 'old', root / 'target'
+            Workspace(old).close()
+            Workspace(target).close()
+            seen = []
+
+            def show(_app, workspace, pdfs):
+                seen.append(list(pdfs))
+                if len(seen) == 1:
+                    return 0, workspace.prepare_switch(str(target), 'open')
+                return 0, None
+
+            with patch('paperassist.paths.config_file', return_value=root / 'config.json'), \
+                    patch.object(native_app, 'show', side_effect=show):
+                paths.save_library(old)
+                self.assertEqual(native_app.run([str(root / 'source.pdf')]), 0)
+            self.assertEqual(seen, [[str(root / 'source.pdf')], []])
+
+    def test_startup_race_retries_delivery_and_reports_a_closing_owner(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            Workspace(directory).close()
+            with library_lock(directory), patch.object(native_app.QMessageBox, 'warning') as warning:
+                with patch.object(native_app, 'forward', side_effect=[False, True]) as deliver:
+                    self.assertEqual(native_app.run(['--data-dir', directory]), 0)
+                    self.assertEqual(deliver.call_count, 2)
+                    warning.assert_not_called()
+                with patch.object(native_app, 'forward', side_effect=[False, RuntimeError('Window is closing')]):
+                    self.assertEqual(native_app.run(['--data-dir', directory]), 1)
+                    self.assertIn('Window is closing', warning.call_args.args[2])
+
     def test_failed_target_restores_the_previous_choice_and_reopens_its_lock(self):
         app = QApplication.instance() or QApplication([])
         for failure in ("missing", "locked", "corrupt"):

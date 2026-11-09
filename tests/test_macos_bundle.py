@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -40,12 +41,13 @@ if CommandLine.arguments[1] == "window" {
 }
 
 let config = NSWorkspace.OpenConfiguration()
-config.createsNewApplicationInstance = true
-config.arguments = Array(CommandLine.arguments.dropFirst(2))
+let files = CommandLine.arguments[1] == "files"
+config.createsNewApplicationInstance = !files
+if !files { config.arguments = Array(CommandLine.arguments.dropFirst(2)) }
 config.environment = ProcessInfo.processInfo.environment
 var finished = false
 var status: Int32 = 1
-NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: CommandLine.arguments[1]), configuration: config) { app, error in
+let completed: (NSRunningApplication?, Error?) -> Void = { app, error in
     if let app = app {
         print(app.processIdentifier)
         status = 0
@@ -53,6 +55,14 @@ NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: CommandLine.argument
         fputs("LaunchServices: \(String(describing: error))\n", stderr)
     }
     finished = true
+}
+if files {
+    NSWorkspace.shared.open(Array(CommandLine.arguments.dropFirst(3)).map { URL(fileURLWithPath: $0) },
+        withApplicationAt: URL(fileURLWithPath: CommandLine.arguments[2]), configuration: config,
+        completionHandler: completed)
+} else {
+    NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: CommandLine.arguments[1]),
+        configuration: config, completionHandler: completed)
 }
 while !finished { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05)) }
 exit(status)
@@ -77,6 +87,10 @@ class MacOSBundleTests(unittest.TestCase):
         self.assertEqual(info["CFBundleIdentifier"], "org.paperassist.PaperAssist")
         self.assertFalse(info.get("LSBackgroundOnly", False))
         self.assertIn(__version__, info["CFBundleGetInfoString"])
+        document_type, = info['CFBundleDocumentTypes']
+        self.assertEqual(document_type['CFBundleTypeRole'], 'Viewer')
+        self.assertEqual(document_type['LSHandlerRank'], 'Alternate')
+        self.assertEqual(document_type['LSItemContentTypes'], ['com.adobe.pdf'])
         resources = APP / "Contents/Resources"
         self.assertTrue((resources / info["CFBundleIconFile"]).read_bytes().startswith(b"icns"))
         self.assertTrue((resources / "LICENSE").is_file())
@@ -133,12 +147,29 @@ class MacOSBundleTests(unittest.TestCase):
             finally:
                 workspace.close()
             catalog = library / "library.sqlite3"
-            catalog_before = catalog.read_bytes()
-            # File arguments use standalone mode; a normal Finder launch opens
-            # the default library. Exercise both without conflating their state.
-            for arguments in ((str(pdf),), ()):
+            cold = root / 'Cold è % paper.pdf'
+            cold_bytes = original + b'\n%Cold Finder PDF\n'
+            cold.write_bytes(cold_bytes)
+
+            def wait_count(expected):
+                deadline = time.monotonic() + 15
+                count = 0
+                while time.monotonic() < deadline:
+                    with sqlite3.connect(catalog.as_uri() + '?mode=ro', uri=True) as db:
+                        count = db.execute('SELECT COUNT(*) FROM documents').fetchone()[0]
+                    if count == expected:
+                        break
+                    time.sleep(.1)
+                self.assertEqual(count, expected, 'Finder requests must import in the library owner')
+
+            # Exercise cold Finder events and a normal application launch, then
+            # send warm Finder events to the exact same running application.
+            for index, arguments in enumerate((('files', str(copied), str(cold)), (str(copied),)):
                 with self.subTest(arguments=arguments):
-                    launched = command(str(launcher), str(copied), *arguments, env=env, cwd=root)
+                    second = root / f'Warm {index} è % paper.pdf'
+                    second_bytes = original + f'\n%Warm Finder PDF {index}\n'.encode()
+                    second.write_bytes(second_bytes)
+                    launched = command(str(launcher), *arguments, env=env, cwd=root)
                     pid = int(launched.stdout.strip().splitlines()[-1])
                     try:
                         deadline = time.monotonic() + 20
@@ -156,6 +187,13 @@ class MacOSBundleTests(unittest.TestCase):
                         else:
                             matching = [line for line in processes if str(binary) in line]
                             self.fail(f"Missing window or frozen worker: window={probe.returncode == 0}, worker={worker}; {matching}")
+                        wait_count(2 + index)
+                        warm = command(str(launcher), 'files', str(copied), str(pdf), str(second), env=env, cwd=root)
+                        self.assertEqual(int(warm.stdout.strip().splitlines()[-1]), pid)
+                        wait_count(3 + index)
+                        delivered = command(str(binary), str(pdf), str(second), env=env, cwd=root)
+                        self.assertEqual(delivered.returncode, 0)
+                        time.sleep(.5)  # Let the accepted queue finish before asking the window to close.
                         os.kill(pid, signal.SIGTERM)
                         deadline = time.monotonic() + 10
                         while time.monotonic() < deadline:
@@ -166,11 +204,19 @@ class MacOSBundleTests(unittest.TestCase):
                                 break
                             time.sleep(0.1)
                         self.assertIsNone(pid, "Application did not close cleanly")
-                        if arguments:
-                            self.assertEqual(catalog.read_bytes(), catalog_before)
                         self.assertEqual(pdf.read_bytes(), original)
+                        self.assertEqual(second.read_bytes(), second_bytes)
+                        self.assertEqual(cold.read_bytes(), cold_bytes)
                         self.assertEqual(stored_pdf.read_bytes(), original)
                         self.assertEqual(list((library / "working").glob("*.pdf")), [])
+                        workspace = Workspace(library)
+                        try:
+                            self.assertEqual(len(workspace.library.list_documents()), 3 + index)
+                            for document in workspace.library.list_documents():
+                                self.assertEqual(document['revision'], 0)
+                                self.assertEqual(workspace.library.get_notes(document['id']), [])
+                        finally:
+                            workspace.close()
                     finally:
                         if pid is not None:
                             try:

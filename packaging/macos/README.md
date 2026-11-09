@@ -46,10 +46,12 @@ through the copied executable in an isolated home outside the checkout.
 The copied app is also launched through LaunchServices with a native Cocoa
 window. The test checks window ownership and dimensions through CoreGraphics,
 and confirms that the renderer runs from the copied frozen executable. Both a
-normal app launch and a launch with a PDF argument are exercised. SIGTERM must
+normal app launch and cold/warm Finder-style file events are exercised, along
+with second-process CLI delivery to the existing owner. PDF imports are deduplicated
+managed copies, and the returned LaunchServices PID must identify the same owner. SIGTERM must
 close the app and leave the source PDF, stored original, and unsaved-revision
-directory unchanged. Standalone file mode must leave the library catalog
-untouched. These checks do not automate every editing
+directory unchanged. The catalog gains only the expected managed imports;
+reading positions may be persisted. These checks do not automate every editing
 workflow or establish compatibility with older macOS versions.
 
 Updating means quitting PaperAssist and replacing its app in Applications.
@@ -57,7 +59,9 @@ Removing the app does not remove research data. The default library is
 `~/Library/Application Support/PaperAssist`; preferences are in
 `~/Library/Preferences/PaperAssist/config.json`. A library selected elsewhere stays
 at its selected location. The package does not register itself as the default PDF
-viewer or implement file delivery from a second app invocation.
+viewer. Its PDF document type uses Viewer role and Alternate rank; choose a
+default through Finder yourself. File events are buffered until the library
+window can receive them.
 
 References: [PyInstaller macOS bundles](https://pyinstaller.org/en/stable/spec-files.html#spec-file-options-for-a-macos-bundle),
 [Apple software distribution](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution),

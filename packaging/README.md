@@ -6,8 +6,9 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current local candidate is **0.1.0a3**. It fixes maintenance locking,
-interrupted first-install recovery, and the CI ELF inspection gate. Build commands
+The current candidate is **0.2.0a1**, with native file delivery, managed PDF
+opening, optional OS PDF registrations and bundled offline OCR. See
+[the desktop integration record](../docs/development/desktop-plan.md). Build commands
 below produce the current source version. See the [maintenance verification](../docs/development/linux-alpha-maintenance.md)
 for current artifacts and results; the `0.1.0a2` measurements and examples below
 describe the preserved earlier candidate.
@@ -55,8 +56,9 @@ The test checks title/authors, original-file integrity and bundled notices.
 ### Bundle Filtering & Footprint
 
 A Qt Widgets reader that renders its own PDF pages requires only a lean subset of Qt and system libraries:
-- **Excluded Qt modules**: Qt QML, Quick, Network, Qt translations, and designer plugins.
+- **Excluded Qt modules**: Qt QML, Quick, Qt translations, and designer plugins.
 - **Excluded Qt plugin categories**: `imageformats`, `iconengines`, `tls`, `generic`, `networkinformation`, `egldeviceintegrations`, `designer`, `qmltooling`, `sqldrivers`.
+- **Local file delivery**: QtNetwork supplies local sockets/named pipes; no HTTP server is started.
 - **Kept platform plugins**: `xcb`, `wayland`, `windows`, `cocoa`, and `offscreen`.
 - **Excluded theme plugins**: `libqgtk3` is excluded along with its deep GTK dependency tree; the lightweight FreeDesktop portal theme is retained.
 - **Excluded system libraries**: GTK3 (`libgtk-3`, `libgdk`, `libcairo`, `libpango`), Kerberos, and extended X11 extensions.
@@ -201,7 +203,7 @@ The installer guarantees complete separation between software binaries and user 
 
 ## 6. Known Limitations of Alpha (`0.1.0a2`)
 
-1. **Desktop PDF File Association**: `paperassist.desktop` intentionally does not declare `MimeType=application/pdf` yet; single-instance file handoff from desktop file managers is deferred to Session 4.
+1. **Historical PDF integration gap**: resolved in 0.2.0a1. The desktop entry declares `application/pdf` and `%F`; delivery reuses the selected library owner. Default-reader settings remain under user control.
 2. **Background Updates**: Automatic background updates are not included in this release.
 3. **Foreign File Protection**: If an unrelated file already exists at `~/.local/bin/paperassist` (such as from a previous `pipx` install) or destination directories, the installer validates ownership and refuses to overwrite foreign or unmanaged files.
 4. **Wayland Text-Input Trace**: Upstream Qt 6.12 text-input race condition warnings (`QWaylandTextInputv3::disableSurface: Trying to disable ... but 0x0 is focused`) are surgically filtered at runtime without masking errors (`PAPERASSIST_RAW_QT_LOGS=1` disables filtering; see `docs/development/wayland-investigation.md`).

@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -420,7 +421,7 @@ class TestInstalledFrozenExecutableAcceptance(unittest.TestCase):
         desktop_lines = desktop_file.read_text(encoding="utf-8").splitlines()
         exec_line = next(line for line in desktop_lines if line.startswith("Exec="))
         raw_exec = exec_line.split("=", 1)[1].strip()
-        exec_cmd = raw_exec[1:-1] if raw_exec.startswith('"') and raw_exec.endswith('"') else raw_exec
+        exec_cmd = shlex.split(raw_exec)[0]
         res_exec = subprocess.run([exec_cmd, "--version"], cwd="/tmp", env=self.env, capture_output=True, text=True)
         self.assertEqual(res_exec.returncode, 0, f"Exec command failed:\n{res_exec.stderr}")
         self.assertIn(f"PaperAssist {__version__}", res_exec.stdout)
