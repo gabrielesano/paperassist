@@ -418,3 +418,69 @@ class ReadableNameTests(unittest.TestCase):
         again = self.library.import_stream(io.BytesIO(self.payload), 'new.pdf')
         self.assertEqual(again['stored_name'], 'paper.pdf')
         self.assertEqual(self.library.get_path(doc['id'], False).read_bytes(), self.payload)
+
+
+class OcrMetadataTests(unittest.TestCase):
+    """OCR fills provisional gaps only; the PDF and confirmed values stay authoritative."""
+    EXTRACTED = {"title": "Heating of Coronal Loops", "authors": "Ada Lovelace; Grace Hopper", "year": None,
+                 "sources": {"title": "ocr_title", "authors": "ocr_authors"}, "header_text": "Heating of Coronal Loops",
+                 "candidates": {"doi": ["10.1234/loops"], "arxiv": [], "title": ["Heating of Coronal Loops"], "year": [1998]},
+                 "identifier_sources": {"doi": {"10.1234/loops": "ocr"}, "arxiv": {}}, "evidence": {"title_confidence": 95}}
+    REPORT = {"status": "completed", "message": "Offline OCR finished.", "cache_hit": False, "language": "eng"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.library = Library(Path(self.tmp.name) / 'library')
+        self.doc = self.library.import_stream(io.BytesIO(pdf()), 'scan.pdf')
+
+    def test_provisional_gaps_are_filled_with_ocr_provenance_and_stay_reviewable(self):
+        done = self.library.apply_ocr_metadata(self.doc['id'], self.EXTRACTED, self.REPORT)
+        self.assertEqual((done['title'], done['authors']), ('Heating of Coronal Loops', 'Ada Lovelace; Grace Hopper'))
+        self.assertEqual(done['metadata_status'], 'needs_review')
+        self.assertIsNone(done['year'])
+        self.assertIsNone(done['doi'])
+        self.assertEqual(done['metadata']['sources'], {'title': 'ocr_title', 'authors': 'ocr_authors'})
+        self.assertEqual(done['metadata']['ocr']['status'], 'completed')
+        self.assertEqual(done['metadata']['candidates']['doi'], ['10.1234/loops'])
+        self.assertEqual(done['metadata']['identifier_sources']['doi'], {'10.1234/loops': 'ocr'})
+
+    def test_ocr_values_survive_a_native_reread_that_finds_nothing(self):
+        self.library.apply_ocr_metadata(self.doc['id'], self.EXTRACTED, self.REPORT)
+        again = self.library.refresh_metadata(self.doc['id'])
+        self.assertEqual((again['title'], again['authors']), ('Heating of Coronal Loops', 'Ada Lovelace; Grace Hopper'))
+        self.assertEqual(again['metadata']['sources']['title'], 'ocr_title')
+        self.assertEqual(again['metadata']['candidates']['doi'], ['10.1234/loops'])
+
+    def test_useful_native_title_and_confirmed_values_are_not_replaced(self):
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.add_metadata({'/Title': 'Native cooling model'})
+        stream = io.BytesIO()
+        writer.write(stream)
+        native = self.library.import_stream(io.BytesIO(stream.getvalue()), 'native.pdf')
+        done = self.library.apply_ocr_metadata(native['id'], self.EXTRACTED, self.REPORT)
+        self.assertEqual((done['title'], done['authors']), ('Native cooling model', 'Ada Lovelace; Grace Hopper'))
+        for status in ('corrected', 'verified'):
+            with self.subTest(status=status):
+                other = self.library.import_stream(io.BytesIO(pdf() + status.encode()), status + '.pdf')
+                self.library.update_metadata(other['id'], {'title': 'Confirmed title', 'authors': 'Confirmed Author'}, status=status)
+                kept = self.library.apply_ocr_metadata(other['id'], self.EXTRACTED, self.REPORT)
+                self.assertEqual((kept['title'], kept['authors'], kept['metadata_status']),
+                                 ('Confirmed title', 'Confirmed Author', status))
+                self.assertEqual(kept['metadata']['ocr']['status'], 'completed')
+
+    def test_failed_ocr_keeps_metadata_and_earlier_evidence(self):
+        self.library.apply_ocr_metadata(self.doc['id'], self.EXTRACTED, self.REPORT)
+        failed = self.library.apply_ocr_metadata(self.doc['id'], {}, {"status": "unavailable", "message": "Offline OCR is unavailable."})
+        self.assertEqual(failed['title'], 'Heating of Coronal Loops')
+        self.assertEqual(failed['metadata']['ocr']['status'], 'unavailable')
+        self.assertEqual(failed['metadata']['ocr']['candidates']['doi'], ['10.1234/loops'])
+
+    def test_original_file_is_untouched_and_no_revision_is_created(self):
+        original = self.library.get_path(self.doc['id'], annotated=False)
+        before = original.read_bytes()
+        done = self.library.apply_ocr_metadata(self.doc['id'], self.EXTRACTED, self.REPORT)
+        self.assertEqual(original.read_bytes(), before)
+        self.assertEqual(done['revision'], 0)
+

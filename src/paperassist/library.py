@@ -15,7 +15,7 @@ from pathlib import Path
 from pypdf import PdfReader
 
 from .citation import pdf_name
-from .metadata import PARSER_VERSION, extract_metadata
+from .metadata import PARSER_VERSION, extract_metadata, useful
 
 MAX_LABEL = 80
 RESERVED_NAME = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", re.I)
@@ -41,6 +41,39 @@ def safe_filename(name: str) -> str:
 def _surname(authors: str) -> str:
     words = re.split(r"\s*(?:[;,]|\band\b)\s*", authors.strip())[0].split()
     return words[-1] if words else ""
+
+
+def _ocr_candidates(metadata):
+    """Keep OCR evidence across a native reparse without making its identifiers authoritative."""
+    ocr = metadata.get("ocr") or {}
+    candidates = {key: list(values) for key, values in metadata.get("candidates", {}).items()}
+    for key, values in ocr.get("candidates", {}).items():
+        candidates[key] = list(dict.fromkeys([*candidates.get(key, []), *values]))
+    identifiers = {key: dict(values) for key, values in metadata.get("identifier_sources", {}).items()}
+    for key, values in ocr.get("identifier_sources", {}).items():
+        identifiers[key] = {**values, **identifiers.get(key, {})}
+    return {**metadata, "candidates": candidates, "identifier_sources": identifiers}
+
+
+def _local_metadata(document, extracted):
+    metadata = _ocr_candidates({**document["metadata"], **extracted})
+    values = {key: extracted.get(key) for key in ("title", "authors", "year")}
+    values["year"] = document["year"] or values["year"]
+    previous = document["metadata"].get("sources", {})
+    metadata["sources"] = dict(metadata.get("sources", {}))
+    for key in ("title", "authors"):
+        if str(previous.get(key, "")).startswith("ocr") and (
+                not values[key] or key == "title" and metadata["sources"].get(key) in ("filename", "arxiv_id")):
+            values[key] = document[key]
+            metadata["sources"][key] = previous[key]
+    if values["year"] and not extracted.get("year") and previous.get("year"):
+        metadata["sources"]["year"] = previous["year"]
+    if document["metadata_status"] in ("corrected", "verified"):
+        values = {key: document[key] for key in values}
+        metadata["sources"] = previous
+    if any(str(source).startswith("ocr") for source in metadata["sources"].values()):
+        metadata["header_text"] = (metadata.get("ocr") or {}).get("header_text") or metadata.get("header_text", "")
+    return values, metadata
 
 
 def pdf_files(paths, errors: list[dict] | None = None) -> list[Path]:
@@ -274,14 +307,12 @@ class Library:
                             db.execute("UPDATE documents SET stored_name = ? WHERE id = ?", (name, row["id"]))
                         result = doc
                         if result["metadata"].get("parser_version", 0) < PARSER_VERSION:
-                            metadata = {**doc["metadata"], **extract_metadata(dest, doc["filename"])}
+                            values, metadata = _local_metadata(doc, extract_metadata(dest, doc["filename"]))
                             confirmed = row["metadata_status"] in ("corrected", "verified")
-                            if confirmed:
-                                metadata["sources"] = doc["metadata"].get("sources", {})
                             db.execute("UPDATE documents SET extracted = ? WHERE id = ?", (json.dumps(metadata), row["id"]))
                             if not confirmed:
                                 db.execute("UPDATE documents SET title = ?, authors = ?, year = COALESCE(year, ?) WHERE id = ?",
-                                           (metadata["title"], metadata["authors"], metadata.get("year"), row["id"]))
+                                           (values["title"], values["authors"], values["year"], row["id"]))
                         result = self._document(db.execute("SELECT * FROM documents WHERE id = ?", (row["id"],)).fetchone())
                         result["duplicate"] = True
                         return result
@@ -400,16 +431,49 @@ class Library:
         with self._lock:
             # A correction made while extraction was running takes precedence.
             current = self.get_document(document_id)
-            metadata = {**current["metadata"], **extracted}
+            values, metadata = _local_metadata(current, extracted)
             confirmed = current["metadata_status"] in ("corrected", "verified")
-            if confirmed:
-                metadata["sources"] = current["metadata"].get("sources", {})
             with self._connect() as db:
                 db.execute("UPDATE documents SET extracted = ? WHERE id = ?", (json.dumps(metadata), document_id))
                 if not confirmed:
                     db.execute("UPDATE documents SET title = ?, authors = ?, year = COALESCE(year, ?), "
                                "metadata_status = 'needs_review' WHERE id = ?",
-                               (extracted["title"], extracted["authors"], extracted.get("year"), document_id))
+                               (values["title"], values["authors"], values["year"], document_id))
+        return self.get_document(document_id)
+
+    def apply_ocr_metadata(self, document_id: int, extracted: dict, report: dict) -> dict:
+        """Fill provisional gaps from OCR; the PDF, confirmed fields and corrections stay authoritative."""
+        with self._lock:
+            document = self.get_document(document_id)
+            metadata = dict(document["metadata"])
+            outcome = {key: report[key] for key in ("status", "message", "cache_key", "cache_hit", "language",
+                       "engine_version", "config") if key in report}
+            if extracted:
+                outcome.update({key: extracted.get(key, {}) for key in ("candidates", "identifier_sources", "evidence")})
+                outcome["header_text"] = extracted.get("header_text", "")
+            else:
+                previous = metadata.get("ocr") or {}
+                outcome = {**previous, **outcome}
+            metadata["ocr"] = outcome
+            metadata = _ocr_candidates(metadata)
+            values = {}
+            if document["metadata_status"] not in ("corrected", "verified"):
+                sources = metadata["sources"] = dict(metadata.get("sources", {}))
+                if extracted.get("title") and (not useful(document["title"]) or sources.get("title") in ("filename", "arxiv_id")):
+                    values["title"] = extracted["title"]
+                if extracted.get("authors") and not document["authors"].strip():
+                    values["authors"] = extracted["authors"]
+                if extracted.get("year") and not document["year"]:
+                    values["year"] = extracted["year"]
+                for key in values:
+                    sources[key] = extracted.get("sources", {}).get(key, "ocr")
+                if values:
+                    metadata["header_text"] = extracted.get("header_text", "")
+            with self._connect() as db:
+                db.execute("UPDATE documents SET extracted = ? WHERE id = ?", (json.dumps(metadata), document_id))
+                if values:
+                    db.execute("UPDATE documents SET " + ", ".join(f"{key} = ?" for key in values) +
+                               " WHERE id = ?", (*values.values(), document_id))
         return self.get_document(document_id)
 
     def record_metadata_refresh(self, document_id: int, status: str, message: str) -> dict:

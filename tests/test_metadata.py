@@ -3,7 +3,75 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from paperassist.metadata import PARSER_VERSION, extract_metadata, useful
+from paperassist.metadata import PARSER_VERSION, extract_metadata, extract_ocr_metadata, useful
+
+
+def line(text, top, height, confidence=95):
+    """A synthetic OCR line; words are laid out left to right."""
+    words = [{"text": word, "bbox": [60 + 40 * index, top, 90 + 40 * index, top + height], "confidence": confidence}
+             for index, word in enumerate(text.split())]
+    return {"text": text, "bbox": [60, top, 60 + 40 * len(words), top + height], "confidence": confidence,
+            "words": list(range(len(words))), "_words": words}
+
+
+def page_report(lines, number=0, size=(612, 792)):
+    words = []
+    for entry in lines:
+        offset = len(words)
+        words.extend(entry.pop("_words"))
+        entry["words"] = [offset + index for index in entry["words"]]
+    return {"pages": [{"page": number, "size": list(size), "words": words, "lines": lines,
+                       "text": "\n".join(entry["text"] for entry in lines)}]}
+
+
+def body_lines(start=300):
+    return [line(f"ordinary sentence number {number} of the paper body", start + 12 * number, 8) for number in range(8)]
+
+
+class OcrMetadataTests(unittest.TestCase):
+    def test_title_authors_and_provenance_come_from_the_prominent_lines(self):
+        report = page_report([line("Heating of Coronal", 60, 20), line("Loops by Waves", 85, 20),
+                              line("Ada Lovelace and Grace Hopper", 120, 11), line("Abstract", 180, 10), *body_lines()])
+        result = extract_ocr_metadata(report)
+        self.assertEqual(result["title"], "Heating of Coronal Loops by Waves")
+        self.assertEqual(result["authors"], "Ada Lovelace; Grace Hopper")
+        self.assertEqual(result["sources"], {"title": "ocr_title", "authors": "ocr_authors"})
+        self.assertEqual(result["evidence"]["title_confidence"], 95)
+
+    def test_capital_titles_at_body_size_are_recognised_but_author_lines_are_not_merged(self):
+        report = page_report([line("THE ASTROPHYSICAL JOURNAL, 330:474-479, 1988", 20, 8), line("NANOFLARES AND THE SOLAR CORONA", 60, 9),
+                              line("E. N. PARKER", 75, 9), line("ABSTRACT", 110, 9), *body_lines()])
+        result = extract_ocr_metadata(report)
+        self.assertEqual(result["title"], "NANOFLARES AND THE SOLAR CORONA")
+        self.assertEqual(result["authors"], "E. N. PARKER")
+
+    def test_body_year_and_ocr_doi_are_only_candidates(self):
+        report = page_report([line("Heating of Coronal Loops", 60, 20), line("Ada Lovelace", 100, 11),
+                              line("Observed in 1998 and doi:10.1234/loops.5.", 140, 8), *body_lines()])
+        result = extract_ocr_metadata(report)
+        self.assertIsNone(result["year"])
+        self.assertNotIn("year", result["sources"])
+        self.assertIn(1998, result["candidates"]["year"])
+        self.assertEqual(result["candidates"]["doi"], ["10.1234/loops.5"])
+        self.assertEqual(result["identifier_sources"]["doi"], {"10.1234/loops.5": "ocr"})
+
+    def test_explicit_arxiv_submission_stamp_may_supply_the_year(self):
+        report = page_report([line("Heating of Coronal Loops", 60, 20), line("Ada Lovelace", 100, 11),
+                              line("arXiv:1807.00395v1 [astro-ph.SR] 1 Jul 2018", 140, 8), *body_lines()])
+        result = extract_ocr_metadata(report)
+        self.assertEqual((result["year"], result["sources"]["year"]), (2018, "ocr_arxiv_submission_date"))
+
+    def test_low_confidence_or_untyped_text_yields_no_title(self):
+        noisy = page_report([line("Heating of Coronal Loops", 60, 20, confidence=40), *body_lines()])
+        plain = page_report([line("Heating of Coronal Loops", 60, 8), *body_lines()])
+        self.assertEqual(extract_ocr_metadata(noisy), {})
+        self.assertEqual(extract_ocr_metadata(plain), {})
+        self.assertEqual(extract_ocr_metadata({"pages": []}), {})
+
+    def test_cover_page_is_skipped_for_the_next_page(self):
+        cover = page_report([line("Downloaded from the publisher archive", 60, 20)], number=0)["pages"][0]
+        paper = page_report([line("Heating of Coronal Loops", 60, 20), line("Ada Lovelace", 100, 11), *body_lines()], number=1)["pages"][0]
+        self.assertEqual(extract_ocr_metadata({"pages": [cover, paper]})["title"], "Heating of Coronal Loops")
 
 
 class MetadataTests(unittest.TestCase):

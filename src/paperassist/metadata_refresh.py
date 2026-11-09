@@ -1,7 +1,12 @@
 """Local metadata recovery with optional, corroborated online enrichment."""
 
-from . import arxiv_metadata, crossref_metadata
-from .metadata import useful
+from . import arxiv_metadata, crossref_metadata, ocr
+from .metadata import extract_ocr_metadata, useful
+
+OCR_MODES = ("off", "auto", "force")
+# A title plus authors needs roughly 100 characters; a born-digital first page has far more
+# before its abstract, while a scan carries none or only a stamp such as a repository footer.
+SCANT_HEADER = 150
 
 
 def _lookup(document, cfg, cancel, progress):
@@ -33,8 +38,44 @@ def _local_message(document):
     return "Local extraction: missing " + ", ".join(missing) + "." if missing else "Local metadata extracted."
 
 
-def refresh(library, document_ids, cfg, online, job, cancel):
-    result = {"documents": [], "preserved": 0, "local": 0, "verified": 0, "errors": [], "cancelled": False}
+def _wants_ocr(document, mode):
+    """Auto mode spends OCR time only where native extraction cannot have worked."""
+    status = document["metadata_status"]
+    if mode == "off" or status == "corrected":
+        return False
+    if mode == "force":
+        return True
+    metadata = document["metadata"]
+    insufficient = (not useful(document["title"]) or not document["authors"].strip()
+                    or metadata.get("sources", {}).get("title") in ("filename", "arxiv_id"))
+    scant = (metadata.get("first_page_text_status") != "extracted"
+             or len(metadata.get("header_text", "")) < SCANT_HEADER)
+    return status != "verified" and insufficient and scant
+
+
+def _ocr_message(report, document, before):
+    gained = [key for key in ("title", "authors") if document[key] != before[key]]
+    if gained:
+        return f"Recovered {' and '.join(gained)} with offline OCR; review {'them' if len(gained) > 1 else 'it'}.", True
+    if report["status"] == "completed":
+        return "Offline OCR found no new title or authors.", False
+    if report["status"] == "empty":
+        return "Offline OCR found no readable text.", False
+    return report["message"][:300].strip(), False
+
+
+def _run_ocr(library, document, cancel, progress):
+    report = ocr.recover(library.get_path(document["id"], annotated=False), library.data_dir / "cache" / "ocr",
+                         document["sha256"], cancel, language="eng", progress=progress)
+    if report["status"] == "cancelled":
+        return report, document
+    extracted = extract_ocr_metadata(report) if report["status"] in ("completed", "empty") else {}
+    updated = library.apply_ocr_metadata(document["id"], extracted, report)
+    return report, updated
+
+
+def refresh(library, document_ids, cfg, online, job, cancel, ocr_mode="auto"):
+    result = {"documents": [], "preserved": 0, "local": 0, "verified": 0, "ocr": 0, "errors": [], "cancelled": False}
     total = len(document_ids)
     job["progress"] = {"completed": 0, "total": total}
     for index, document_id in enumerate(document_ids):
@@ -44,9 +85,17 @@ def refresh(library, document_ids, cfg, online, job, cancel):
         try:
             before = library.get_document(document_id)
             document = library.refresh_metadata(document_id)
+            ocr_note = ""
+            if _wants_ocr(document, ocr_mode) and not cancel.is_set():
+                reread = document
+                job["progress"] = {"completed": index, "total": total, "stage": "ocr"}
+                report, document = _run_ocr(library, document, cancel, lambda step: job.update(progress={
+                    "completed": index, "total": total, "stage": "ocr", "page": step["page"], "attempt": step["attempt"]}))
+                ocr_note, recovered = _ocr_message(report, document, reread)
+                result["ocr"] += recovered
             improved = any(document[key] != before[key] for key in ("title", "authors", "year", "doi"))
             result["local"] += improved
-            status, message = "local", _local_message(document)
+            status, message = "local", " ".join(filter(None, [_local_message(document), ocr_note]))
             if document["metadata_status"] == "corrected":
                 message = "Manual corrections preserved."
             elif not online:

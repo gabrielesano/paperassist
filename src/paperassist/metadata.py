@@ -107,7 +107,7 @@ def _header_authors(lines, title):
         line = re.sub(r"(?<=[^\W\d_])\d+", "", line)
         line = re.sub(r"[*†‡∗∧♯¶]+", ";", line)
         line = re.sub(r"[\d¨´]", "", line)
-        parts = [part.strip(" ,;") for part in re.split(r"[,;]|\s+(?:and|&)\s+", line)]
+        parts = [part.strip(" ,;") for part in re.split(r"[,;]|\s+(?:and|&)\s+", line, flags=re.I)]
         if not parts or any(not 2 <= len(part.split()) <= 5 or
                             any(not name.fullmatch(word) for word in part.split()) or
                             not any(char.isupper() for char in part) or re.search(r"\b[A-Z]\.$", part)
@@ -143,6 +143,103 @@ def _arxiv_year(text, identifiers):
             if year == initial_year:
                 dates.add(year)
     return next(iter(dates)) if len(dates) == 1 else None
+
+
+OCR_CONFIDENCE = 70
+COVER = re.compile(r"cover\s*(?:page|sheet)|downloaded\s+from|accepted\s+manuscript|your use of the jstor", re.I)
+
+
+def _line_height(line, page):
+    heights = [page["words"][index]["bbox"][3] - page["words"][index]["bbox"][1] for index in line["words"]]
+    return statistics.median(heights)
+
+
+def _ocr_title(lines, page):
+    """The most prominent stacked group of confident lines above the abstract.
+
+    Scanned journals often set titles in capitals at body size, so a line counts when it
+    is clearly taller than body text or entirely uppercase; a group of large lines wins
+    over the topmost capitals, and a title that is neither is left unrecognised.
+    """
+    body = statistics.median(word["bbox"][3] - word["bbox"][1] for word in page["words"])
+    end = min((line["bbox"][1] for line, _ in lines if re.match(r"\W*(?:abstract|summary|introduction|received|accepted)\b",
+                                                              line["text"], re.I)), default=page["size"][1])
+    limit = min(end, page["size"][1] * .5)
+
+    def titled(line, height):
+        text = line["text"]
+        return (line["bbox"][1] < limit and line["confidence"] >= OCR_CONFIDENCE and 4 <= len(text) <= 220
+                and (height >= body * 1.15 or text.isupper()) and not BOILERPLATE.search(text)
+                and not re.search(r"\b[A-Z]\.(?:\s|$)", text)  # an initial marks an author line
+                and sum(char.isalpha() for char in text) >= len(text) * .65)
+
+    groups = []
+    for line, height in lines:
+        if not titled(line, height):
+            continue
+        previous = groups[-1][-1] if groups else None
+        if previous and min(previous[1], height) >= max(previous[1], height) * .8 and \
+                line["bbox"][1] - previous[0]["bbox"][3] < max(previous[1], height) * 1.8:
+            groups[-1].append((line, height))
+        else:
+            groups.append([(line, height)])
+    large = lambda group: max(height for _, height in group) >= body * 1.4
+    best = max(groups, key=large, default=None)
+    return [line for line, _ in best[:4]] if best else []
+
+
+def _ocr_page(page):
+    lines = sorted(page["lines"], key=lambda line: (line["bbox"][1], line["bbox"][0]))
+    sized = [(line, _line_height(line, page)) for line in lines if line["words"]]
+    chosen = _ocr_title(sized, page)
+    title = " ".join(line["text"] for line in chosen)
+    title = re.sub(r"(?<=[A-Za-z])-\s+(?=[a-z])", "", title).rstrip(" !*†‡¶")  # trailing footnote mark
+    if not 12 <= len(title) <= 300 or len(title.split()) < 3:
+        return None
+    after = lines.index(chosen[-1]) + 1
+    following = [line for line in lines[after:after + 8] if line["confidence"] >= OCR_CONFIDENCE]
+    texts = [re.sub(r"^by\s+", "", line["text"], flags=re.I) for line in following]
+    authors = _header_authors([title, *texts], title)
+    confidence = statistics.mean(line["confidence"] for line in chosen)
+    return {"title": title, "authors": authors, "page": page["page"] + 1,
+            "title_confidence": round(confidence, 1),
+            "authors_confidence": round(statistics.mean(line["confidence"] for line in following), 1) if authors else None}
+
+
+def extract_ocr_metadata(report: dict) -> dict:
+    """Provisional fields from recognised first pages; every value keeps its OCR provenance.
+
+    A year in body text is only a candidate. An OCR DOI is likewise only a candidate,
+    because one misread character yields a different, valid-looking identifier.
+    """
+    pages = [page for page in report.get("pages", []) if page.get("lines")]
+    if not pages:
+        return {}
+    found = next((fields for page in pages if not (COVER.search(page["text"]) and len(page["words"]) < 120)
+                  if (fields := _ocr_page(page))), None)
+    text = "\n".join(page["text"] for page in pages)[:100_000]
+    identifier_sources = {"doi": {}, "arxiv": {}}
+    for match in DOI.finditer(text):
+        identifier_sources["doi"].setdefault(match.group().rstrip(".,;)").lower(), "ocr")
+    for match in ARXIV.finditer(text):
+        identifier_sources["arxiv"].setdefault(match.group(1), "ocr")
+    year = _arxiv_year(text, identifier_sources["arxiv"])
+    sources = {"year": "ocr_arxiv_submission_date"} if year else {}
+    result = {"title": "", "authors": "", "year": year, "sources": sources, "identifier_sources": identifier_sources,
+              "candidates": {"doi": sorted(identifier_sources["doi"]), "arxiv": sorted(identifier_sources["arxiv"]),
+                             "title": [], "year": sorted({int(y) for y in re.findall(r"\b(?:19|20)\d{2}\b", text[:10000])})},
+              "header_text": "", "evidence": {}}
+    if found:
+        source_page = next(page for page in pages if page["page"] + 1 == found["page"])
+        result.update(title=found["title"], authors=found["authors"], header_text="\n".join(_header(source_page["text"]))[:4000],
+                      evidence={key: found[key] for key in ("page", "title_confidence", "authors_confidence")})
+        result["candidates"]["title"] = [found["title"]]
+        sources["title"] = "ocr_title"
+        if found["authors"]:
+            sources["authors"] = "ocr_authors"
+    if not (result["title"] or result["candidates"]["doi"] or result["candidates"]["arxiv"]):
+        return {}
+    return result
 
 
 def extract_metadata(path: Path, filename: str) -> dict:

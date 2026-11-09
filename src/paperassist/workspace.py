@@ -157,8 +157,13 @@ class Workspace:
         return self.submit(lambda job, cancel: self.library.import_paths(
             paths, progress=lambda done, total: job.update(progress={'completed': done, 'total': total}), cancel=cancel))
 
-    def refresh_metadata(self, document_ids=None, *, online=True):
-        """Refresh a snapshot of the whole library, or the explicitly selected PDFs."""
+    def refresh_metadata(self, document_ids=None, *, online=True, ocr='auto'):
+        """Refresh a snapshot of the whole library, or the explicitly selected PDFs.
+
+        ocr: 'off', 'auto' (only scans native extraction cannot read) or 'force'.
+        """
+        if ocr not in metadata_refresh.OCR_MODES:
+            raise ValueError("ocr must be one of: " + ", ".join(metadata_refresh.OCR_MODES))
         if document_ids is None:
             document_ids = [document['id'] for document in self.library.list_documents()]
         elif (not isinstance(document_ids, list) or not document_ids
@@ -167,7 +172,7 @@ class Workspace:
         document_ids = list(dict.fromkeys(document_ids))
         cfg = self.get_settings()
         return self.submit(lambda job, cancel: metadata_refresh.refresh(
-            self.library, document_ids, cfg, online, job, cancel))
+            self.library, document_ids, cfg, online, job, cancel, ocr))
 
     def import_files(self, streams):
         """Stage (name, binary stream) uploads before returning; the job owns their cleanup."""

@@ -10,7 +10,10 @@ from unittest.mock import patch
 
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from paperassist import metadata_refresh
 from paperassist.workspace import Workspace
+from test_metadata import body_lines, line, page_report
+from test_ocr import needs_ocr, scan_pdf
 
 
 class MetadataRefreshTests(unittest.TestCase):
@@ -21,10 +24,10 @@ class MetadataRefreshTests(unittest.TestCase):
         self.addCleanup(self.workspace.close)
         self.library = self.workspace.library
         arxiv = patch("paperassist.metadata_refresh.arxiv_metadata.lookup", return_value=None)
-        arxiv.start()
+        self.arxiv = arxiv.start()
         self.addCleanup(arxiv.stop)
         network = patch("paperassist.retrieval._get", return_value=b'{"message":{"items":[]}}')
-        network.start()
+        self.network = network.start()
         self.addCleanup(network.stop)
 
     def add(self, title="The cooling of coronal loops", author="Ada Lovelace"):
@@ -204,6 +207,145 @@ class MetadataRefreshTests(unittest.TestCase):
         self.assertEqual(recovered["metadata"]["verified"]["arxiv_id"], record["arxiv_id"])
         self.assertEqual(recovered["metadata"]["verified"]["evidence"], record["evidence"])
         self.assertEqual(done["result"]["verified"], 1)
+
+    def add_scan(self, name="scan.pdf", width=300):
+        """A page without text or metadata: native extraction knows nothing about it."""
+        writer = PdfWriter()
+        writer.add_blank_page(width, 400)
+        stream = io.BytesIO()
+        writer.write(stream)
+        return self.library.import_stream(io.BytesIO(stream.getvalue()), name)
+
+    @staticmethod
+    def report(*lines, status="completed"):
+        pages = page_report([*lines, *body_lines()])["pages"] if lines else []
+        return {"status": status, "message": "Offline OCR finished.", "pages": pages, "cache_hit": False}
+
+    def recognised(self):
+        return self.report(line("Heating of Coronal Loops", 60, 20), line("Ada Lovelace", 100, 11))
+
+    def refresh(self, ids=None, **options):
+        return self.finish(self.workspace.refresh_metadata(ids, **options))
+
+    def test_ocr_mode_must_be_known(self):
+        with self.assertRaises(ValueError):
+            self.workspace.refresh_metadata(ocr="always")
+
+    def test_off_never_calls_ocr_and_auto_skips_papers_native_extraction_identified(self):
+        scan, native = self.add_scan(), self.add()
+        with patch("paperassist.metadata_refresh.ocr.recover") as recover:
+            self.refresh([scan["id"]], online=False, ocr="off")
+            self.refresh([native["id"]], online=False)
+        recover.assert_not_called()
+
+    def test_auto_skips_insufficient_metadata_when_the_native_text_is_ample(self):
+        doc = self.add_scan()
+        text = "Heating of coronal loops by waves in a long and carefully typeset title page " * 3
+        with patch("paperassist.metadata_refresh.ocr.recover") as recover:
+            with patch("paperassist.library.extract_metadata", return_value=self.extracted(
+                    doc, first_page_text_status="extracted", header_text=text)):
+                self.refresh([doc["id"]], online=False)
+        recover.assert_not_called()
+
+    def test_auto_recovers_a_scan_and_keeps_it_provisional_without_any_http_request(self):
+        doc = self.add_scan()
+        seen = []
+
+        def recover(path, cache_dir, sha256, cancel, **options):
+            options["progress"]({"stage": "recognizing", "page": 1, "attempt": 2})
+            seen.append((Path(path).name, Path(cache_dir), sha256, options["language"],
+                         self.workspace.job_status(next(iter(self.workspace.jobs)))["progress"]))
+            return self.recognised()
+        before = self.library.get_path(doc["id"], annotated=False).read_bytes()
+        with patch("paperassist.metadata_refresh.ocr.recover", side_effect=recover):
+            done = self.refresh(online=False)
+        self.network.assert_not_called()
+        self.arxiv.assert_not_called()
+        self.assertEqual(seen[0][1:4], (self.library.data_dir / "cache" / "ocr", doc["sha256"], "eng"))
+        self.assertEqual(seen[0][4], {"completed": 0, "total": 1, "stage": "ocr", "page": 1, "attempt": 2})
+        recovered = self.library.get_document(doc["id"])
+        self.assertEqual((recovered["title"], recovered["authors"]), ("Heating of Coronal Loops", "Ada Lovelace"))
+        self.assertEqual(recovered["metadata_status"], "needs_review")
+        self.assertIn("Recovered title and authors with offline OCR; review them.", recovered["metadata"]["refresh"]["message"])
+        self.assertEqual((done["result"]["ocr"], done["result"]["errors"]), (1, []))
+        self.assertEqual(self.library.get_path(doc["id"], annotated=False).read_bytes(), before)
+        self.assertEqual(recovered["revision"], 0)
+
+    def test_force_runs_ocr_but_native_corrected_and_verified_values_win(self):
+        native, corrected, verified = self.add(), self.add_scan("a.pdf", 301), self.add_scan("b.pdf", 302)
+        self.library.update_metadata(corrected["id"], {"title": "My correction"})
+        self.library.update_metadata(verified["id"], {"title": "Verified title", "authors": "Verified Author"}, status="verified")
+        with patch("paperassist.metadata_refresh.ocr.recover", return_value=self.recognised()) as recover:
+            done = self.refresh(online=False, ocr="force")
+        self.assertEqual(recover.call_count, 2)  # a manual correction is never read again
+        self.assertEqual(self.library.get_document(native["id"])["title"], "The cooling of coronal loops")
+        self.assertEqual(self.library.get_document(corrected["id"])["title"], "My correction")
+        confirmed = self.library.get_document(verified["id"])
+        self.assertEqual((confirmed["title"], confirmed["authors"], confirmed["metadata_status"]),
+                         ("Verified title", "Verified Author", "verified"))
+        self.assertEqual(done["result"]["ocr"], 0)
+
+    def test_ocr_comes_before_the_online_lookup_so_its_candidates_can_be_corroborated(self):
+        doc = self.add_scan()
+        report = self.report(line("Heating of Coronal Loops", 60, 20), line("Ada Lovelace", 100, 11),
+                             line("doi:10.1234/loops.5", 130, 8))
+        seen = []
+
+        def crossref(document, *args, **options):
+            seen.append((document["title"], document["metadata"]["candidates"]["doi"]))
+            return None
+        with patch("paperassist.metadata_refresh.ocr.recover", return_value=report):
+            with patch("paperassist.metadata_refresh.crossref_metadata.lookup", side_effect=crossref):
+                self.refresh([doc["id"]])
+        self.assertEqual(seen, [("Heating of Coronal Loops", ["10.1234/loops.5"])])
+        self.assertIsNone(self.library.get_document(doc["id"])["doi"])
+
+    def test_unavailable_failed_and_empty_ocr_keep_existing_values_without_counting_errors(self):
+        doc = self.add_scan()
+        for status, message, expected in [
+                ("unavailable", "Offline OCR is unavailable: Tesseract 5 is not installed.", "Tesseract 5 is not installed."),
+                ("timeout", "Offline OCR reached its time limit.", "time limit"),
+                ("failed", "Offline OCR failed: boom", "boom"),
+                ("empty", "No readable text was found by offline OCR.", "Offline OCR found no readable text.")]:
+            with self.subTest(status=status):
+                report = {"status": status, "message": message, "pages": [], "cache_hit": False}
+                with patch("paperassist.metadata_refresh.ocr.recover", return_value=report):
+                    done = self.refresh([doc["id"]], online=False)
+                kept = self.library.get_document(doc["id"])
+                self.assertEqual((kept["title"], done["result"]["errors"], done["result"]["ocr"]), ("scan", [], 0))
+                self.assertIn(expected, kept["metadata"]["refresh"]["message"])
+                self.assertEqual(kept["metadata"]["ocr"]["status"], status)
+
+    def test_cancelling_during_ocr_stops_the_job_and_leaves_the_paper_unchanged(self):
+        first, second = self.add_scan(), self.add_scan("two.pdf", 301)
+
+        def recover(path, cache_dir, sha256, cancel, **options):
+            cancel.set()
+            return {"status": "cancelled", "message": "Offline OCR cancelled.", "pages": [], "cache_hit": False}
+        with patch("paperassist.metadata_refresh.ocr.recover", side_effect=recover) as call:
+            job = self.refresh(online=False)
+        self.assertEqual((job["status"], call.call_count), ("cancelled", 1))
+        self.assertEqual(self.library.get_document(first["id"])["title"], "scan")
+        self.assertNotIn("ocr", self.library.get_document(first["id"])["metadata"])
+        self.assertEqual(self.library.get_document(second["id"])["metadata"].get("refresh"), None)
+
+    @needs_ocr
+    def test_real_engine_recovers_a_generated_scan_from_a_path_with_spaces(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = scan_pdf(Path(folder) / "Scanned paper è.pdf")
+            with path.open("rb") as stream:
+                doc = self.library.import_stream(stream, path.name)
+            original = self.library.get_path(doc["id"], annotated=False).read_bytes()
+            done = self.refresh(online=False)
+            again = self.refresh(online=False, ocr="force")
+        recovered = self.library.get_document(doc["id"])
+        self.assertEqual((recovered["title"], recovered["authors"]), ("Adiabatic Heating of Coronal Loops", "Ada Lovelace; Grace Hopper"))
+        self.assertEqual((recovered["metadata"]["sources"]["title"], recovered["year"]), ("ocr_title", None))
+        self.assertEqual(done["result"]["ocr"], 1)
+        self.assertTrue(recovered["metadata"]["ocr"]["cache_hit"])
+        self.assertEqual(again["result"]["ocr"], 0)
+        self.assertEqual(self.library.get_path(doc["id"], annotated=False).read_bytes(), original)
+        self.assertEqual(recovered["revision"], 0)
 
     def test_one_provider_failure_does_not_hide_success_from_another(self):
         doc = self.add()
