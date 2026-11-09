@@ -2,6 +2,7 @@
 
 import ctypes
 from ctypes import wintypes
+from contextlib import closing
 import hashlib
 import io
 import json
@@ -212,7 +213,7 @@ class WindowsInstallerTests(unittest.TestCase):
             self.assertEqual(repeated.returncode, 0)
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                with sqlite3.connect((self.library / 'library.sqlite3').as_uri() + '?mode=ro', uri=True) as db:
+                with closing(sqlite3.connect((self.library / 'library.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
                     count = db.execute('SELECT COUNT(*) FROM documents').fetchone()[0]
                 if count == 2:
                     break
