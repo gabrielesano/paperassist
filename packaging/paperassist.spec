@@ -12,6 +12,18 @@ from paperassist import __version__
 
 root = Path(SPECPATH).parent
 
+# Refuse an incomplete or stale OCR runtime instead of publishing a partial app.
+ocr_spec = importlib.util.spec_from_file_location('paperassist_build_ocr', root / 'packaging' / 'ocr' / 'build_ocr.py')
+ocr_mod = importlib.util.module_from_spec(ocr_spec)
+ocr_spec.loader.exec_module(ocr_mod)
+ocr_root = root / 'build' / 'ocr' / 'runtime'
+if not (ocr_root / 'manifest.json').is_file():
+    raise RuntimeError('Build bundled OCR first: python packaging/ocr/build_ocr.py')
+ocr_manifest = ocr_mod.verify_runtime(ocr_root)
+ocr_executable = 'tesseract.exe' if sys.platform == 'win32' else 'tesseract'
+ocr_data = [(str(ocr_root / name), str(Path('ocr') / Path(name).parent))
+            for name in [*ocr_manifest['files'], 'manifest.json'] if name != ocr_executable]
+
 # Load local collect_notices helper avoiding name collision with PyPA 'packaging'
 notices_spec = importlib.util.spec_from_file_location(
     "paperassist_collect_notices", str(root / "packaging" / "collect_notices.py")
@@ -25,7 +37,7 @@ generate_provenance = getattr(notices_mod, "generate_provenance", None)
 build_dir = root / "build" / "notices"
 build_dir.mkdir(parents=True, exist_ok=True)
 notices_path = build_dir / "THIRD-PARTY-NOTICES.txt"
-generate_notices(notices_path)
+generate_notices(notices_path, ocr_runtime=ocr_root)
 
 # A Widgets reader that draws its own pages needs none of the following. PyInstaller's
 # Qt hooks collect every plugin of the modules they see, so the unwanted files are
@@ -89,13 +101,14 @@ metadata_datas = (
 a = Analysis(
     [str(root / "packaging" / "entry.py")],
     pathex=[str(root / "src")],
-    hiddenimports=["paperassist.native.worker"],  # the render process's spawn entry
+    hiddenimports=["paperassist.native.worker", "paperassist.ocr"],
     excludes=EXCLUDED_MODULES,
-    binaries=collect_dynamic_libs("pypdfium2_raw"),
+    binaries=collect_dynamic_libs("pypdfium2_raw") + [(str(ocr_root / ocr_executable), 'ocr')],
     datas=collect_data_files("pypdfium2_raw")
           + metadata_datas
           + [(str(root / "LICENSE"), ".")]
-          + [(str(notices_path), ".")],
+          + [(str(notices_path), ".")]
+          + ocr_data,
 )
 a.binaries = [entry for entry in a.binaries if not unwanted(entry)]
 a.datas = [entry for entry in a.datas if not unwanted(entry)]

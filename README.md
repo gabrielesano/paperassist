@@ -2,9 +2,19 @@
 
 Reading a research paper is rarely linear. Half the time you are scrolling to the back to check who *Vance & Lindström (2022)* is, hunting through a `Downloads` folder full of cryptic publisher filenames to see if you already have that PDF, and losing your place in the paragraph you were actually trying to understand.
 
-**PaperAssist** is a calm, local reading desk and shared library for scientific PDFs. It runs as a self-contained native desktop application built with Qt Widgets and PDFium, with no PaperAssist account, cloud sync, background web server, telemetry, or language models. Reading and local import work offline; optional online reference actions use external services only when requested. A library can reuse the same PDF across multiple source papers; it is not a cloud collaboration service.
+**PaperAssist** is a calm, local reading desk and shared library for scientific PDFs. It runs as a self-contained native desktop application built with Qt Widgets and PDFium, with no PaperAssist account, cloud sync, background web server, telemetry, or large language models. Reading and local import work offline; optional online reference actions use external services only when requested. A library can reuse the same PDF across multiple source papers; it is not a cloud collaboration service.
 
 > **Project status:** Alpha (`0.1.0a4`). Reading, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
+
+**Current development, not yet released:** The native reader is now the default
+source entry point; the Flask/PDF.js/pywebview stack and Node toolchain have been
+retired. New standalone builds include minimal offline OCR with Tesseract 5.5.4,
+Leptonica and the English LSTM model. The bundled runtime adds 5.26 MiB and has
+passed an offline Linux container test without system Tesseract. Windows/macOS
+and the Ubuntu 22.04 build baseline still need verification for this change.
+The existing `0.1.0a4` downloads predate bundled OCR. See the
+[web retirement](docs/development/web-retirement.md) and
+[bundled OCR verification](docs/development/bundled-ocr.md) records.
 
 The screenshots below show the native reader on Linux with synthetic papers and a disposable library. The library screenshot reflects `0.1.0a4`; reader views were captured under `0.1.0a3`. System fonts and window appearance vary by platform.
 
@@ -61,22 +71,22 @@ If you prefer running from source with **Python 3.11+**:
 git clone https://github.com/gabrielesano/paperassist
 cd paperassist
 python -m venv .venv
-.venv/bin/python -m pip install -e '.[native]'
-.venv/bin/python -m paperassist.native
+.venv/bin/python -m pip install -e '.'
+.venv/bin/python -m paperassist
 ```
 
 On Windows PowerShell, replace `.venv/bin/python` in both commands with `.venv\Scripts\python.exe`.
 
 ### Command-line usage
 
-When installed via the standalone Linux installer, `paperassist` launches the native reader directly. When running from a Python environment, `python -m paperassist.native` launches the native reader, while the `paperassist` console script provides the CLI import tool and the transitional web fallback:
+Both the standalone application and the source console command open the native reader. From source, `python -m paperassist` uses the same entry point; `python -m paperassist.native` remains available. Command-line import is available in source installations:
 
 | Command | What it does |
 | --- | --- |
-| `paperassist [FILE.pdf ...] [--data-dir DIR]` *(standalone install)*<br>`.venv/bin/python -m paperassist.native [FILE.pdf ...] [--data-dir DIR]` *(from source)* | Open the native desktop reader (opens the Library window, or opens the given PDF files directly in tabs) |
-| `paperassist --self-test FILE.pdf` *(Linux standalone)*<br>`.venv/bin/python -m paperassist.native --self-test FILE.pdf` *(from source)* | Headlessly render page 1 of `FILE.pdf` via the frozen/native render worker to verify the runtime (exits `0` on success) |
+| `paperassist [FILE.pdf ...] [--data-dir DIR]`<br>`.venv/bin/python -m paperassist [FILE.pdf ...] [--data-dir DIR]` *(from source)* | Open the native desktop reader (opens the Library window, or opens the given PDF files directly in tabs) |
+| `paperassist --self-test FILE.pdf`<br>`.venv/bin/python -m paperassist --self-test FILE.pdf` *(from source)* | Headlessly render page 1 of `FILE.pdf` via the frozen/native render worker to verify the runtime (exits `0` on success) |
+| `paperassist --self-test-ocr SCAN.pdf` *(new builds)*<br>`.venv/bin/python -m paperassist --self-test-ocr SCAN.pdf` *(from source, after building OCR)* | Verify the included OCR runtime on a scanned PDF without creating a library or changing the PDF |
 | `paperassist import PATH... [--data-dir DIR]` *(source CLI)* | Import PDF files or folders recursively into the library from the terminal |
-| `paperassist serve [--open] [--host H] [--port N] [--data-dir DIR]` *(source CLI)* | Run the transitional local web interface (`127.0.0.1:8765`) in your browser |
 
 Only one instance accesses a library at a time (protected by a lock file inside the library folder). While the app is open, import new papers from the **Library** window (`L`) rather than running CLI imports against the same library in parallel.
 
@@ -131,7 +141,7 @@ Open **Library** (`L` key) to browse and search your collection by title, tab na
   - **Read scanned PDFs with offline OCR (checked by default):** Runs local PDF extraction and invokes **offline OCR** only if native text at the top of the first page (before the abstract) is absent or shorter than 150 characters, and metadata remains incomplete.
   - **Recover selected papers with OCR:** Forces OCR on all selected papers, including scans that already possess an incomplete or low-quality text layer.
   - **Online corroboration:** When **Look up metadata online (arXiv, Crossref)** is enabled, DOIs, arXiv IDs, publication references, and titles/authors recovered by OCR or local heuristics are sent to external providers to verify and corroborate records. Uncheck this toggle to run completely offline without network requests.
-  - See [Installing Tesseract for offline OCR](#installing-tesseract-for-offline-ocr) below to configure the optional local OCR engine.
+  - New standalone builds include the offline OCR engine and English model; see [Offline OCR](#offline-ocr).
 
 ![Library refresh menu showing options to refresh selected papers, papers that need review, recover with OCR, or force refresh the entire library](docs/screenshots/library-refresh-menu.png)
 
@@ -227,36 +237,32 @@ Source availability, authentication rules, and quotas are controlled by each pro
 - **Separate rendering process:** PDFium renders whole-page bitmaps in a worker process with a bounded page cache; it does not use tile rendering. Memory and latency vary with documents, zoom, open panes, and platform. See the scoped measurements in [native stack notes](docs/development/native-stack.md), rather than treating them as a fixed memory guarantee or a security sandbox.
 - **No AI guesswork:** Importing, metadata extraction, and citation matching are 100% deterministic.
 - **Citation detection is partial:** PaperAssist recognizes author-year and bracketed numeric citations, abstaining when entries cannot be disambiguated. A six-paper tuning benchmark reported about 96% recall at the reference/page level, not exact sentence-level accuracy or a guarantee on new papers. The private benchmark is not reproducible from this repository; see [accuracy notes](docs/development/citation-accuracy.md). OCR errors, superscripts, and unusual styles can cause missed citations.
-- **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer (PaperAssist does not write an OCR text layer into PDFs). For scanned papers lacking extractable text, **Refresh metadata** can optionally invoke a local **Tesseract** (`eng`) worker in an isolated background process to recover provisional titles and authors (reading page 1, and falling back to page 2 only if no title is recognized on page 1). Tesseract is not bundled with PaperAssist; when absent, OCR is marked unavailable without affecting normal metadata extraction.
-- **Packaged OCR verification:** Offline OCR has only been executed and verified when running PaperAssist from a source checkout on Linux. It has never been executed or tested in any installed standalone package (Linux installer script, Windows setup EXE, or macOS DMG), neither in baseline runs nor under edge cases like non-ASCII paths, Windows DLL search order, or macOS Finder launches without shell `PATH`. PaperAssist checks system `PATH` and standard install directories (`/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `%ProgramFiles%\Tesseract-OCR`, and `%LOCALAPPDATA%\Programs\Tesseract-OCR`), but custom executable overrides via settings or environment variables are not currently supported.
+- **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer (PaperAssist does not write an OCR text layer into PDFs). For scanned papers lacking extractable text, **Refresh metadata** can optionally invoke a local **Tesseract** (`eng`) worker in an isolated background process to recover provisional titles and authors (reading page 1, and falling back to page 2 only if no title is recognized on page 1). New standalone builds include a minimal Tesseract engine and English model; it requires no separate Tesseract installation. A missing or damaged bundled runtime is reported without affecting normal metadata extraction.
+- **Packaged OCR verification:** The bundled engine has been tested on Linux from a copied standalone app with an empty `PATH` and in an offline Fedora 43 container without system Tesseract or language data. Windows and macOS build/verification steps are configured; execution on those hosts remains pending. See [bundled OCR verification](docs/development/bundled-ocr.md).
 
 ---
 
-## Installing Tesseract for offline OCR
+## Offline OCR
 
-Offline OCR metadata recovery is optional and uses an external installation of **Tesseract (4.1 or newer)** with English language data (`eng.traineddata`). PaperAssist checks standard system paths automatically.
+New standalone builds include a minimal **Tesseract 5.5.4** engine, Leptonica and the
+English LSTM model. No separate OCR installation, model download or network
+connection is needed. The engine runs in PaperAssist's isolated background OCR
+worker and reads the grayscale pages rendered by PDFium. Only metadata recovery
+uses OCR; it does not add a searchable text layer to the PDF.
 
-- **Debian / Ubuntu (including Ubuntu 22.04 LTS with Tesseract 4.1.1):**
-  ```bash
-  sudo apt install tesseract-ocr tesseract-ocr-eng
-  ```
-  *(On Ubuntu and Debian, `tesseract-ocr` pulls in `tesseract-ocr-eng` as a standard dependency).*
-- **Fedora:**
-  ```bash
-  sudo dnf install tesseract tesseract-langpack-eng
-  ```
-  *(Fedora's base `tesseract` package omits language data; `tesseract-langpack-eng` is required).*
-- **macOS (Homebrew):**
-  ```bash
-  brew install tesseract
-  ```
-  *(Homebrew includes English language data by default).*
-- **Windows:**
-  Install using the [UB Mannheim Tesseract installer](https://github.com/UB-Mannheim/tesseract/wiki) (English language data is included by default). You can also install it via `winget`:
-  ```powershell
-  winget install UB-Mannheim.TesseractOCR
-  ```
-  PaperAssist automatically checks `%ProgramFiles%\Tesseract-OCR\tesseract.exe` as well as per-user installations in `%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe`. Adding Tesseract to your Windows system `PATH` is recommended if installed to an alternate directory.
+This feature is available in the current source and newly built bundles; the
+published `0.1.0a4` installers have not been replaced.
+
+For development from source, compile the same private runtime once using CMake
+and a C/C++ compiler:
+
+```bash
+.venv/bin/python packaging/ocr/build_ocr.py
+```
+
+The source app automatically uses the resulting `build/ocr/runtime` directory.
+A source installation without that build can still use a system Tesseract 4.1+
+with English data. Standalone builds always use their own engine and model.
 
 ---
 
@@ -264,22 +270,20 @@ Offline OCR metadata recovery is optional and uses an external installation of *
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e '.[native]'
+.venv/bin/python -m pip install -e '.'
 
 # Run the Python & native Qt test suite (headless offscreen mode supported)
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v
 
 # Run a headless native rendering self-test on a fixture PDF
-.venv/bin/python -m paperassist.native --self-test tests/fixtures/pdfjs-annotations.pdf
-
-# Run the transitional web frontend unit tests
-npm ci && node --test tests/*.test.mjs
+.venv/bin/python -m paperassist --self-test tests/fixtures/pdfjs-annotations.pdf
 ```
 
 To build the standalone application bundle and Linux installer locally:
 
 ```bash
-.venv/bin/python -m pip install '.[native]' 'pyinstaller>=6.15,<7'
+.venv/bin/python -m pip install '.' 'pyinstaller>=6.15,<7'
+.venv/bin/python packaging/ocr/build_ocr.py
 .venv/bin/pyinstaller packaging/paperassist.spec --noconfirm --distpath dist --workpath build
 .venv/bin/python packaging/installer/build_installer.py
 ```
@@ -297,4 +301,8 @@ For architecture, packaging, and verification details, see:
 
 PaperAssist is free software licensed under the **GNU General Public License v3.0 or later** (see [`LICENSE`](LICENSE)).
 
-The native reader uses [Qt / PySide6](https://wiki.qt.io/Qt_for_Python), [PDFium](https://pdfium.googlesource.com/pdfium/) through [pypdfium2](https://github.com/pypdfium2-team/pypdfium2), and [pypdf](https://github.com/py-pdf/pypdf). These components retain their own licenses; standalone builds include `THIRD-PARTY-NOTICES.txt` and bundled dependency license files. The transitional web interface bundles [Mozilla PDF.js](https://github.com/mozilla/pdf.js) under the Apache License 2.0 (see [`src/paperassist/web/vendor/pdfjs/LICENSE`](src/paperassist/web/vendor/pdfjs/LICENSE)).
+The native reader uses [Qt / PySide6](https://wiki.qt.io/Qt_for_Python), [PDFium](https://pdfium.googlesource.com/pdfium/) through [pypdfium2](https://github.com/pypdfium2-team/pypdfium2), and [pypdf](https://github.com/py-pdf/pypdf). These components retain their own licenses; standalone builds include `THIRD-PARTY-NOTICES.txt` and bundled dependency license files.
+
+New OCR-enabled bundles also include Tesseract and the English `tessdata_fast`
+model under Apache-2.0, and Leptonica under BSD-2-Clause. Their full license texts
+and pinned source URLs are included in the bundle's third-party notices.

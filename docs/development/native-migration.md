@@ -1,5 +1,9 @@
 # Native migration acceptance inventory
 
+The native parity inventory is accepted. The web interface, HTTP server and
+pywebview host were subsequently retired. References to web source files and
+endpoints below describe the historical migration baseline.
+
 This is the native parity contract derived from the web application inspected
 on 2026-11-05. It does not choose a toolkit or PDF engine. Unchecked boxes are
 remaining native acceptance work, not claims that these features are missing

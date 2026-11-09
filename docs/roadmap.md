@@ -15,16 +15,22 @@ readiness still requires the checks below.
    Confirm the format and supported targets, rebuild, implement installation and
    desktop integration, and verify clean installations before publication.
 2. Extend standalone builds and PDF associations to further OS/architecture
-   targets. Retire the web interface, HTTP server and pywebview host through a
-   deliberate transition ([desktop plan](development/desktop-plan.md)).
-3. Bundle a minimal Tesseract 5 so [offline OCR](development/offline-ocr.md) works
-   without external dependencies. Build only what PaperAssist uses: the engine
-   reading the grayscale PGM pages it renders and writing TSV, Leptonica without
-   optional image codecs, and the English LSTM model. Build it from source on each
-   release host (the Linux baseline, Ubuntu 22.04, ships only 4.1), add its
-   licenses to the third-party notices, and prefer the bundled engine over a system
-   one. Record the size added per platform, and accept it only after a frozen
-   bundle recovers a scan on clean hosts without a system Tesseract.
+   targets, including the remaining native file-delivery and desktop integration
+   work ([desktop plan](development/desktop-plan.md)).
+3. Complete host acceptance of the [minimal bundled OCR runtime](development/bundled-ocr.md).
+   The source build, PyInstaller integration, English LSTM model, licenses and
+   per-platform size manifest are implemented. Linux frozen OCR works without
+   system Tesseract; Windows/macOS execution and Ubuntu 22.04 baseline verification
+   remain to be run through the release build workflow.
+
+## Completed transition
+
+The web reader, Flask HTTP server and pywebview host are retired. The native
+reader is the default source entry point; Qt/PDFium are core dependencies.
+PDF.js assets, npm manifests and the Node CI job are removed. CLI import and
+existing library data remain supported. Historical PDF.js-generated annotation
+and notes fixtures remain as interoperability regressions.
+See the [retirement verification](development/web-retirement.md).
 
 ## Regression acceptance sequence
 

@@ -11,51 +11,19 @@ verified bibliographic values remain protected. OCR recovery alone never marks a
 paper as verified: uncertain titles, authors, dates and identifiers remain
 reviewable, with their source retained in the extraction record.
 
-## Runtime dependencies
+## Included runtime
 
-The native dependency group already provides PDFium for rendering. OCR also
-requires the Tesseract executable (version 4.1 or newer; Ubuntu 22.04 ships 4.1.1)
-and English language data (`eng.traineddata`). Tesseract and language data are
-external runtime dependencies; the current PyInstaller specification does not
-bundle them.
+Standalone builds include a private minimal Tesseract 5 engine, Leptonica and the
+English LSTM model. The engine reads PDFium's grayscale PGM pages and produces TSV.
+The build disables legacy OCR, training tools, graphics, archive/network support
+and optional Leptonica image codecs. It never downloads models at runtime.
+See [the bundled OCR build and verification record](bundled-ocr.md).
 
-Install the dependencies separately when needed:
-
-```sh
-# Debian / Ubuntu
-sudo apt-get install tesseract-ocr tesseract-ocr-eng
-
-# Fedora
-sudo dnf install tesseract tesseract-langpack-eng
-
-# macOS with Homebrew
-brew install tesseract
-```
-
-For Windows, follow the installer links in the
-[Tesseract installation guide](https://tesseract-ocr.github.io/tessdoc/Installation.html)
-and include English language data. The UB Mannheim Windows installer offers both
-all-users installations (`Program Files`) and "Install just for me", which installs
-to `%LOCALAPPDATA%\Programs\Tesseract-OCR` and does not add itself to `PATH`.
-PaperAssist checks both locations as well as `PATH`.
-The Fedora language package is documented in the
-[Fedora package catalog](https://packages.fedoraproject.org/pkgs/tesseract-tessdata/tesseract-langpack-eng/index.html).
-
-Check the engine and data before testing the application:
-
-```sh
-tesseract --version
-tesseract --list-langs
-```
-
-Tesseract 4.1 or newer is supported across common distributions (Ubuntu 22.04 ships 4.1.1,
-Debian 12 ships 5.3.0, and Ubuntu 24.04 ships 5.3.4). In both 4.1 and 5.x, `--version` begins
-with `tesseract X.Y.Z`, TSV output columns match, and `--psm 3` and `--psm 11` operate
-identically. However, 4.1 `--list-langs` outputs `List of available languages (N):` without the
-`in "<dir>"` directory path present in 5.x banners. The language list must include `eng`. A
-missing binary, missing language model or engine failure produces an actionable per-paper
-outcome and keeps the previous metadata intact. Installing a Python wrapper alone does not
-install the Tesseract executable or its models.
+The source app prefers the same runtime in `build/ocr/runtime`, produced with
+`python packaging/ocr/build_ocr.py`. Only source installations without that build
+may fall back to a system Tesseract 4.1+ and installed language data. Frozen apps
+use their own engine and English model exclusively. Missing bundled files produce
+an actionable repair message rather than silently changing the engine or model.
 
 ## Process and package constraints
 
@@ -70,13 +38,12 @@ Tesseract without a shell. Cancelling an OCR worker must also stop its Tesseract
 child, remove temporary images and release process handles; terminating the
 Python worker alone can leave the external child running.
 
-External programs launched by a frozen app need their normal system library
-search environment. Restore the original `LD_LIBRARY_PATH` for the Tesseract
-child on Linux. Windows DLL search changes and package hooks can also affect
-external children. Finder-launched macOS apps have a reduced `PATH`, so a
-Terminal-only executable lookup does not prove Homebrew discovery works.
-These platform behaviors are described in
-[PyInstaller's external program guidance](https://pyinstaller.org/en/stable/common-issues-and-pitfalls.html#launching-external-programs-from-the-frozen-application).
+The bundled child retains the frozen app's library search environment so it can
+load packaged compiler runtimes. Its English data directory is passed explicitly;
+a user's `TESSDATA_PREFIX` cannot redirect it. Source-only system engines restore
+the original library search environment. Windows subprocesses have no console
+window; only the isolated worker changes the DLL search directory. Cancellation
+uses the operating system's absolute `taskkill.exe` path, independent of `PATH`.
 
 An OCR result cache must belong to the exact immutable PDF and the OCR
 configuration. Changing engine/parser behavior, language or render settings
@@ -107,9 +74,9 @@ output from a personal library. Include these behaviors in regression coverage:
   open PDF or losing unsaved edits.
 
 Release acceptance also requires a copied frozen bundle outside the checkout on
-each supported host. Verify graceful operation without Tesseract and successful
-OCR when it is installed; source-checkout success does not establish Windows or
-Finder-launch compatibility. Record the implemented bounds, actual test results
+each supported host. Verify successful OCR without system Tesseract or model
+data, and graceful reporting of a damaged bundle; source-checkout success does
+not establish Windows or Finder-launch compatibility. Record the implemented bounds, actual test results
 and remaining host-only checks below before declaring OCR release-ready.
 
 ## Implemented behavior and bounds
@@ -144,6 +111,9 @@ and remaining host-only checks below before declaring OCR release-ready.
   lookup; with `online=False` nothing touches the network.
 
 ## Verification record
+
+The records below predate the bundled runtime. Current packaged verification is
+in [bundled-ocr.md](bundled-ocr.md).
 
 Automated (Linux, Python 3.14, Tesseract 5.5.3 with `eng` and `ita`):
 `tests/test_ocr.py` (process-group kill, cancel before/during recognition,
@@ -182,8 +152,7 @@ case at body size are dropped, and a mixed-case title at body size is not
 recognised at all (born-digital papers with such titles keep their native
 result). OCR character errors (for example `FaBio`) remain for the user to fix.
 
-Remaining host-only checks: frozen bundle acceptance on Linux, Windows and macOS
-(without Tesseract, then with it installed; Finder-launched `PATH`, Windows DLL
-search order and non-ASCII profile paths for the Tesseract child), and the
-Library-window flows (job continues after closing the window, open PDFs and
-unsaved edits are not disturbed).
+At the time of this historical record, frozen-host and Library-window checks
+were pending. The subsequent [bundled OCR record](bundled-ocr.md) covers the
+completed Linux frozen/container checks and real Library-window regression,
+and identifies the remaining Windows/macOS and baseline checks.

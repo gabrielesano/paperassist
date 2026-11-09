@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_native_support import make_pdf, needs_qt, pdf_available
+from test_ocr import needs_ocr, scan_pdf
 
 if pdf_available:
     from PySide6.QtCore import Qt
@@ -372,6 +373,44 @@ class WindowRefreshTests(MetadataCase):
         self.assertIn("A much better title", window.tabs.tabText(0))
         self.assertEqual(tab.main.title, "A much better title")
         reload.assert_called_once_with(document["id"])
+        window.hide()
+
+    @needs_ocr
+    def test_ocr_from_the_library_menu_survives_closing_it_and_keeps_unsaved_reader_edits(self):
+        from paperassist.native.engine import Rect
+        readable, original = self.add('reading.pdf', 3)
+        scan = scan_pdf(self.dir / 'Scanned paper è.pdf')
+        scanned = self.library.import_stream(io.BytesIO(scan.read_bytes()), scan.name)
+        window = MainWindow(self.client, self.workspace)
+        self.addCleanup(window.deleteLater)
+        window.show()
+        tab = window.open_library_document(readable['id'])
+        self.addCleanup(lambda: [pane.release() for pane in window.all_panes()])
+        tab.main.view.doc.add_highlight(0, [Rect(40, 60, 120, 74)])
+        tab.main.view.edited.emit()
+        edited = tab.main.view.doc
+        window.show_library()
+        dialog = window.library_dialog
+        dialog.online_metadata.setChecked(False)
+        for index in range(dialog.table.topLevelItemCount()):
+            item = dialog.table.topLevelItem(index)
+            item.setSelected(item.data(0, Qt.UserRole) == scanned['id'])
+        self.assertEqual(dialog.selected_ids(), [scanned['id']])
+        dialog.recover_selected.trigger()
+        self.assertIsNotNone(dialog.watcher)
+        dialog.close()
+        self.pump(lambda: dialog.watcher is None, seconds=60)
+        updated = self.library.get_document(scanned['id'])
+        self.assertEqual(updated['title'], 'Adiabatic Heating of Coronal Loops')
+        self.assertEqual(updated['authors'], 'Ada Lovelace; Grace Hopper')
+        self.assertEqual(updated['metadata_status'], 'needs_review')
+        self.assertIn('1 recovered with OCR', dialog.message.text())
+        self.assertIs(tab.main.view.doc, edited)
+        self.assertTrue(tab.main.modified)
+        self.assertEqual(self.library.get_document(readable['id'])['revision'], 0)
+        self.assertEqual(self.library.get_document(scanned['id'])['revision'], 0)
+        self.assertEqual(self.library.get_path(readable['id']).read_bytes(), original.read_bytes())
+        self.assertEqual(self.library.get_path(scanned['id']).read_bytes(), scan.read_bytes())
         window.hide()
 
 

@@ -20,10 +20,11 @@ PaperAssist provides two packaging tiers for Linux `x86_64`:
 
 ## 1. Building the Application Bundle
 
-`packaging/paperassist.spec` builds a one-dir PyInstaller bundle of `python -m paperassist.native` (`packaging/entry.py` is its entry point). From the repository root, in an environment with the `native` extra:
+`packaging/paperassist.spec` builds a one-dir PyInstaller bundle of `python -m paperassist.native` (`packaging/entry.py` is its entry point). From the repository root, with CMake and a C/C++ compiler available:
 
 ```bash
-python -m pip install ".[native]" "pyinstaller>=6.15,<7"
+python -m pip install "." "pyinstaller>=6.15,<7"
+python packaging/ocr/build_ocr.py
 pyinstaller packaging/paperassist.spec --noconfirm --distpath dist --workpath build
 dist/PaperAssist/PaperAssist --self-test some.pdf   # exit code 0 = ok
 ```
@@ -31,6 +32,25 @@ dist/PaperAssist/PaperAssist --self-test some.pdf   # exit code 0 = ok
 `--self-test FILE.pdf` opens the file, draws page 1 through the render process with Qt's offscreen platform, and checks that the page is not blank. It runs completely headless without an active display server.
 
 The manual CI workflow (`.github/workflows/build.yml`) runs this self-test on Linux, Windows, and macOS and uploads the resulting bundle artifacts.
+
+### Included offline OCR
+
+Every standalone build includes the private OCR runtime produced by
+`packaging/ocr/build_ocr.py`: pinned Tesseract 5 and Leptonica sources, with legacy
+OCR, training tools, graphics, network/archive support and optional image codecs
+disabled, plus only the English `tessdata_fast` LSTM model and TSV configuration.
+Tesseract and Leptonica are statically linked together; compiler/system runtimes
+are collected by PyInstaller as needed. No system OCR installation is used.
+
+PyInstaller refuses missing, stale, modified or foreign-platform OCR inputs.
+The runtime manifest records source URLs, SHA-256 hashes and the payload size per
+platform. All three upstream licenses are included in the runtime and appended to
+`THIRD-PARTY-NOTICES.txt`. See [the build and verification record](../docs/development/bundled-ocr.md).
+
+`PaperAssist --self-test-ocr scan.pdf` exercises the bundled engine through the
+real spawned worker. The release workflow runs `tests.test_frozen_ocr` against a
+copied bundle with an empty `PATH`, foreign `TESSDATA_PREFIX` and a generated scan.
+The test checks title/authors, original-file integrity and bundled notices.
 
 ### Bundle Filtering & Footprint
 

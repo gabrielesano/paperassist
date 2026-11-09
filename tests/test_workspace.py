@@ -1,4 +1,4 @@
-"""The desktop-facing API works without Flask or an HTTP request context."""
+"""Shared library operations, persistence and background jobs."""
 
 import io
 import json
@@ -205,3 +205,10 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.workspace.get_preferences(), {'ui_zoom': 1.1})
         with self.assertRaises(WorkspaceConflict):
             self.open_workspace(target, 'option').prepare_switch(str(self.root / 'new'), 'move')
+
+    def test_partial_preference_migration_preserves_existing_values(self):
+        self.workspace.save_preferences({'ui_zoom': 1.25})
+        migrated = self.workspace.save_preferences({'ui_zoom': .8, 'details_expanded': False}, True)
+        self.assertEqual(migrated, {'ui_zoom': 1.25, 'details_expanded': False})
+        self.workspace.save_preferences({'quick_view_layout': 'side'})
+        self.assertEqual(self.workspace.get_preferences(), {**migrated, 'quick_view_layout': 'side'})

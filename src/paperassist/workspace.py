@@ -1,4 +1,4 @@
-"""HTTP-independent library operations and bounded background jobs.
+"""Shared library operations and bounded background jobs.
 
 A host owns the process-level library_lock for the workspace lifetime. Call close()
 before releasing it. Jobs return the same polling records to every kind of UI.
@@ -125,10 +125,7 @@ class Workspace:
         return location.classify(self.data_dir, path)
 
     def prepare_switch(self, path, action):
-        """Validate and persist the choice; the host closes this workspace, then opens it.
-
-        HTTP waits until the response is sent before releasing the current library.
-        """
+        """Validate and persist the choice; the host closes this workspace, then opens it."""
         with self.job_lock:
             if self.source in paths.FIXED:
                 raise WorkspaceConflict(paths.FIXED[self.source])
@@ -291,6 +288,7 @@ def _try_lock(file):
 def library_lock(data_dir):
     directory = Path(data_dir)
     directory.mkdir(parents=True, exist_ok=True)
+    # Keep the legacy filename so older readers and CLI imports share this lock.
     # The lock is released when the file closes, including when the process dies.
     with (directory / '.server.lock').open('a') as lock:
         try:

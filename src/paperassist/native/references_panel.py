@@ -33,7 +33,7 @@ def fold(text):
 
 
 def reference_matcher(query):
-    """Every word must match somewhere in the entry, in any order (same rule as web/reference-filter.js)."""
+    """Every word must match somewhere in the entry, in any order."""
     words = fold(query).split()
 
     def matches(ref):

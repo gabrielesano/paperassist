@@ -263,12 +263,11 @@ stalls with real papers for reader changes; a lighter design is worth extra setu
 A browser engine measured 1.1-2.2 GiB with four papers open, the native prototype
 0.3-0.5 GiB.
 
-During the migration the web interface stays usable with its current guarantees:
-a loopback HTTP app serves HTML/CSS, vanilla JavaScript modules and a pinned, locally
-served PDF.js viewer, documents are served by controlled IDs, and write requests are
-protected from unrelated web pages. It is removed, with the HTTP server and the
-pywebview window, once the native interface passes the parity checklist in
-docs/development/native-migration.md.
+Native parity is accepted in [the migration inventory](development/native-migration.md).
+The transitional web interface, HTTP server and pywebview host have been retired.
+Source and standalone launches use the native reader. Existing libraries, saved
+PDF revisions, notes, reading positions and preferences remain compatible; the
+historical library lock filename is retained to coordinate with older versions.
 
 Evaluate a targeted parser such as pypdf for background bulk metadata extraction,
 independent of the reader tab. Test bounds on problematic files; limiting page count
@@ -292,8 +291,6 @@ ambiguous or incomplete results, invalid downloads and Google fallback.
 - [pypdfium2 documentation](https://pypdfium2.readthedocs.io/)
 - [pypdf documentation](https://pypdf.readthedocs.io/)
 - [Qt for Python (PySide6)](https://doc.qt.io/qtforpython-6/)
-- [PDF.js component example](https://github.com/mozilla/pdf.js/blob/master/examples/components/simpleviewer.mjs)
-- [PDF.js document API](https://mozilla.github.io/pdf.js/api/draft/module-pdfjsLib-PDFDocumentProxy.html)
 - [pypdf metadata](https://pypdf.readthedocs.io/en/stable/user/metadata.html)
 - [pypdf text extraction](https://pypdf.readthedocs.io/en/stable/user/extract-text.html)
 - [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/)

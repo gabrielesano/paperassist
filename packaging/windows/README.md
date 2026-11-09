@@ -35,11 +35,13 @@ associations and second-instance file delivery remain outside this package.
 
 ## Building and verification
 
-On Windows x64, install the native dependencies, PyInstaller, and Inno Setup 6.3+.
+On Windows x64, install the native dependencies, PyInstaller, Inno Setup 6.3+,
+CMake and the Visual Studio C/C++ build tools.
 Then run from the checkout root:
 
 ```powershell
 python packaging/desktop/generate_icons.py --output-dir build/icons --ico build/icons/PaperAssist.ico
+python packaging/ocr/build_ocr.py
 pyinstaller packaging/paperassist.spec --noconfirm --distpath dist --workpath build
 python packaging/windows/build_installer.py
 python -m unittest tests.test_windows_installer -v

@@ -19,7 +19,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = 1
+VERSION = 2
 MAX_PIXELS = 12_000_000
 MAX_PAGES = 2
 ATTEMPT_SECONDS = 20
@@ -34,17 +34,36 @@ def _result(status, message, pages=None, **extra):
     return {"status": status, "message": message, "pages": pages or [], "cache_hit": False, **extra}
 
 
-def _environment():
+def _bundled_directory():
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS) / 'ocr'
+    return Path(__file__).resolve().parents[2] / 'build' / 'ocr' / 'runtime'
+
+
+def _is_bundled(engine):
+    return Path(engine).resolve().parent == _bundled_directory().resolve()
+
+
+def _environment(engine=None):
     env = dict(os.environ)
     env.update(OMP_THREAD_LIMIT="1", OMP_NUM_THREADS="1")
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) and not (engine and _is_bundled(engine)):
         for name in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"):
             original = env.get(name + "_ORIG")
             if original is None:
                 env.pop(name, None)
             else:
                 env[name] = original
+    if engine and _is_bundled(engine):
+        env['TESSDATA_PREFIX'] = str(_bundled_directory() / 'tessdata')
     return env
+
+
+def _process_options(engine):
+    options = {'env': _environment(engine)}
+    if os.name == 'nt':
+        options['creationflags'] = subprocess.CREATE_NO_WINDOW
+    return options
 
 
 @contextmanager
@@ -66,6 +85,11 @@ def _external_dlls():
 
 
 def _engine():
+    bundled = _bundled_directory() / ('tesseract.exe' if os.name == 'nt' else 'tesseract')
+    if bundled.is_file():
+        return str(bundled)
+    if getattr(sys, 'frozen', False):
+        return None  # A broken installation must not silently use a different engine/model.
     found = shutil.which("tesseract")
     if found:
         return str(Path(found).resolve())
@@ -79,6 +103,9 @@ def _engine():
 
 
 def _tessdata_dir(engine, listed, names):
+    if _is_bundled(engine):
+        directory = _bundled_directory() / 'tessdata'
+        return directory if all((directory / f'{name}.traineddata').is_file() for name in names) else None
     # Tesseract 4.1 does not report the directory in `tesseract --list-langs`,
     # so probe candidate locations to keep results cacheable.
     candidates = []
@@ -107,13 +134,17 @@ def _tessdata_dir(engine, listed, names):
 def _probe(language):
     engine = _engine()
     if not engine:
-        return {"available": False, "message": "Offline OCR is unavailable: Tesseract is not installed.", "languages": []}
+        message = ('The bundled OCR engine is missing. Reinstall a complete PaperAssist build.'
+                   if getattr(sys, 'frozen', False) else 'Offline OCR is unavailable: Tesseract is not installed.')
+        return {"available": False, "message": message, "languages": []}
+    bundled = _is_bundled(engine)
+    data_options = ['--tessdata-dir', str(_bundled_directory() / 'tessdata')] if bundled else []
     try:
         with _external_dlls():
             version = subprocess.run([engine, "--version"], capture_output=True, timeout=3,
-                                     env=_environment(), check=True).stdout.decode("utf-8", errors="replace")
-            listed = subprocess.run([engine, "--list-langs"], capture_output=True, timeout=3,
-                                    env=_environment(), check=True).stdout.decode("utf-8", errors="replace")
+                                     **_process_options(engine), check=True).stdout.decode("utf-8", errors="replace")
+            listed = subprocess.run([engine, *data_options, "--list-langs"], capture_output=True, timeout=3,
+                                    **_process_options(engine), check=True).stdout.decode("utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError) as error:
         return {"available": False, "message": f"Offline OCR could not start Tesseract: {error}", "languages": []}
     match = re.search(r"tesseract\s+v?(\d+(?:\.\d+)*)", version, re.I)
@@ -125,7 +156,9 @@ def _probe(language):
     languages = [line.strip() for line in listed.splitlines() if re.fullmatch(r"[A-Za-z][\w/-]*", line.strip())]
     missing = [name for name in language.split("+") if name not in languages]
     if missing:
-        return {"available": False, "message": "Offline OCR language is not installed: " + ", ".join(missing),
+        message = ('The bundled English OCR model is missing. Reinstall a complete PaperAssist build.'
+                   if bundled and missing == ['eng'] else 'Offline OCR language is not installed: ' + ', '.join(missing))
+        return {"available": False, "message": message,
                 "engine_version": match[1], "languages": languages}
     names = language.split("+")
     directory = _tessdata_dir(engine, listed, names)
@@ -140,6 +173,7 @@ def _probe(language):
                 break
     return {"available": True, "message": "Offline OCR is ready.", "engine": engine,
             "engine_version": match[1], "languages": languages, "models": models,
+            "bundled": bundled, "tessdata": str(directory) if directory else None,
             "cacheable": len(models) == len(names)}
 
 
@@ -148,8 +182,10 @@ def _terminate(process):
         return
     if os.name == "nt":
         try:
-            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            taskkill = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'taskkill.exe'
+            subprocess.run([str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
         except (OSError, subprocess.SubprocessError):
             pass
     else:
@@ -195,7 +231,7 @@ def _launch(task, arguments, cancel, deadline, progress=None):
 
 
 def capabilities(language="eng"):
-    """Check installed local tools without loading PDFium or changing the app's DLL search path."""
+    """Check local OCR without loading PDFium or changing the app's DLL search path."""
     if not re.fullmatch(r"[a-z]{3}(?:\+[a-z]{3})*", language):
         return {"available": False, "message": "Choose installed OCR language codes such as eng or eng+ita.", "languages": []}
     result = _launch("probe", {"language": language}, threading.Event(), time.monotonic() + 8)
@@ -258,7 +294,8 @@ def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, pro
         config = _config(language)
         if config["renderer"] == "unavailable":
             return _result("unavailable", "Offline OCR is unavailable: PDFium is not installed.")
-        identity = {"sha256": sha256.lower(), "engine_version": info["engine_version"], "models": info["models"], "config": config}
+        identity = {"sha256": sha256.lower(), "engine_version": info["engine_version"], "models": info["models"],
+                    "bundled": info.get('bundled', False), "config": config}
         key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         cache = Path(cache_dir)
         cache.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -267,6 +304,7 @@ def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, pro
             return cached
         with tempfile.TemporaryDirectory(prefix="ocr-", dir=cache) as staging:
             arguments = {"path": str(Path(path).resolve()), "temporary": staging, "engine": info["engine"],
+                         "tessdata": info.get('tessdata'),
                          "language": language, "deadline": deadline}
             report = _launch("ocr", arguments, cancel, deadline, progress)
         report.update(cache_key=key, engine_version=info["engine_version"], config=config, sha256=sha256.lower())
@@ -362,11 +400,12 @@ def _recognize(arguments, page, number, send):
         size, pixels, actual_dpi = _render(page, image, dpi)
         output = image.with_suffix("")
         send.send({"kind": "progress", "value": {"stage": "recognizing", "page": number + 1, "attempt": attempt, "dpi": round(actual_dpi)}})
-        command = [arguments["engine"], str(image), str(output), "-l", arguments["language"],
+        data_options = ['--tessdata-dir', arguments['tessdata']] if arguments.get('tessdata') else []
+        command = [arguments["engine"], str(image), str(output), "-l", arguments["language"], *data_options,
                    "--oem", "1", "--psm", str(segmentation), "--dpi", str(max(1, round(actual_dpi))), "tsv"]
         with _external_dlls():
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.PIPE, env=_environment())
+                                       stderr=subprocess.PIPE, **_process_options(arguments['engine']))
         try:
             _, errors = process.communicate(timeout=min(ATTEMPT_SECONDS, max(.01, arguments["deadline"] - time.monotonic())))
         except subprocess.TimeoutExpired:

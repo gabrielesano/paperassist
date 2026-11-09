@@ -10,7 +10,6 @@ __pycache__/
 .coverage
 htmlcov/
 build/
-!/src/paperassist/web/vendor/pdfjs/build/
 dist/
 
 # Local configuration and data

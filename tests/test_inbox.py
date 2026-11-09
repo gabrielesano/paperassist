@@ -9,7 +9,7 @@ from unittest import mock
 
 from paperassist import inbox, references
 from paperassist.library import Library
-from paperassist.server import create_app
+from paperassist.workspace import Workspace
 from tests.test_library import pdf
 
 FILLER = 'This article studies the heating of the solar corona by many small and impulsive energy releases in loops.'
@@ -272,40 +272,36 @@ class InboxTests(unittest.TestCase):
 
 
 @mock.patch('paperassist.retrieval._identity', return_value=None)
-class InboxEndpointTests(unittest.TestCase):
-    def test_check_folder_runs_as_a_job_and_link_file_returns_the_reference(self, identify):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name)
-        folder = root / 'downloads'
-        folder.mkdir()
-        client = create_app(root / 'library').test_client()
-        headers = {'X-PaperAssist-Token': client.get('/api/config').json['token']}
-        source = Library(root / 'library').import_stream(BytesIO(pdf()), 'source.pdf')['id']
-        references._save(Library(root / 'library'), source, {'status': 'analyzed', 'extraction_version': references.EXTRACTION_VERSION,
-                                                              'destination_version': references.DESTINATION_VERSION, 'references': [REF]})
-        endpoint = f'/api/documents/{source}/references/0/'
+class InboxWorkspaceTests(unittest.TestCase):
+    def test_folder_job_and_explicit_link_use_stored_settings(self, identify):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / 'downloads'
+            folder.mkdir()
+            workspace = Workspace(root / 'library')
+            self.addCleanup(workspace.close)
+            source = workspace.library.import_stream(BytesIO(pdf()), 'source.pdf')['id']
+            references._save(workspace.library, source, {'status': 'analyzed',
+                'extraction_version': references.EXTRACTION_VERSION,
+                'destination_version': references.DESTINATION_VERSION, 'references': [REF]})
 
-        def run(path, **body):
-            response = client.post(endpoint + path, json=body, headers=headers)
-            if response.status_code != 202:
-                return response
-            for _ in range(200):
-                job = client.get('/api/jobs/' + response.json['id']).json
-                if job['status'] in ('completed', 'failed'):
-                    return job
-                time.sleep(.01)
+            def check():
+                job = workspace.check_folder(source, '0')
+                for _ in range(200):
+                    result = workspace.job_status(job['id'])
+                    if result['status'] in ('completed', 'failed'):
+                        self.assertEqual(result['status'], 'completed', result)
+                        return result['result']
+                    time.sleep(.01)
+                self.fail('Folder check did not finish')
 
-        self.assertEqual(client.post(endpoint + 'check-folder').status_code, 403)
-        self.assertEqual(run('check-folder')['result']['status'], 'not_configured')
-        self.assertEqual(client.put('/api/settings', json={'inbox': str(folder)}, headers=headers).status_code, 200)
-        (folder / 'scan.pdf').write_bytes(pdf() + b'\n%scan')
-        self.assertEqual(run('check-folder')['result']['status'], 'unverified')
-        self.assertEqual(run('link-file', name='../library/.token').status_code, 400)
-        linked = run('link-file', name='scan.pdf')
-        self.assertEqual(linked.status_code, 200)
-        self.assertEqual(linked.json['retrieval']['status'], 'local')
-        self.assertEqual(linked.json['local_document_id'], 2)
-        # The job passes the stored settings on, so identification can use the email and ADS token.
-        # Settings store the resolved path; on Windows the temp folder may differ by its 8.3 short name.
-        self.assertTrue(os.path.samefile(identify.call_args.args[2].inbox, folder))
+            self.assertEqual(check()['status'], 'not_configured')
+            workspace.update_settings({'inbox': str(folder)})
+            (folder / 'scan.pdf').write_bytes(pdf() + b'\n%scan')
+            self.assertEqual(check()['status'], 'unverified')
+            with self.assertRaises(ValueError):
+                workspace.link_file(source, '0', '../library/settings.json')
+            linked = workspace.link_file(source, '0', 'scan.pdf')
+            self.assertEqual(linked['retrieval']['status'], 'local')
+            self.assertEqual(linked['local_document_id'], 2)
+            self.assertTrue(os.path.samefile(identify.call_args.args[2].inbox, folder))

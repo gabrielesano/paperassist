@@ -24,7 +24,7 @@ try:
 except ImportError:
     pdfium = None
 
-needs_ocr = unittest.skipUnless(pdfium and shutil.which("tesseract") and ocr._probe("eng")["available"],
+needs_ocr = unittest.skipUnless(pdfium and ocr._probe("eng")["available"],
                                 "Tesseract with English data and PDFium are required")
 
 TITLE = ("Adiabatic Heating of", "Coronal Loops")
@@ -387,6 +387,65 @@ class ProbeTests(unittest.TestCase):
              patch.object(ocr, "os", FakeOs), \
              patch.object(Path, "is_file", autospec=True, side_effect=lambda p: p == target):
             self.assertEqual(ocr._engine(), str(target))
+
+
+class BundledEngineTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.runtime = Path(folder.name) / 'ocr'
+        self.runtime.mkdir()
+        self.engine = self.runtime / ('tesseract.exe' if os.name == 'nt' else 'tesseract')
+        self.engine.write_bytes(b'private engine')
+        (self.runtime / 'tessdata').mkdir()
+        self.model = self.runtime / 'tessdata' / 'eng.traineddata'
+        self.model.write_bytes(b'private English model')
+        patcher = patch.object(ocr, '_bundled_directory', return_value=self.runtime)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_bundled_engine_wins_over_path_and_custom_model_environment(self):
+        with patch.object(ocr.shutil, 'which') as which, \
+                patch.dict(os.environ, {'TESSDATA_PREFIX': '/foreign/models'}):
+            self.assertEqual(ocr._engine(), str(self.engine))
+            self.assertEqual(ocr._environment(str(self.engine))['TESSDATA_PREFIX'], str(self.model.parent))
+            self.assertEqual(ocr._tessdata_dir(str(self.engine), 'foreign directory', ['eng']), self.model.parent)
+        which.assert_not_called()
+
+    def test_frozen_installation_never_falls_back_to_a_system_engine(self):
+        self.engine.unlink()
+        with patch.object(sys, 'frozen', True, create=True), patch.object(ocr.shutil, 'which') as which:
+            self.assertIsNone(ocr._engine())
+            info = ocr._probe('eng')
+        which.assert_not_called()
+        self.assertFalse(info['available'])
+        self.assertIn('Reinstall', info['message'])
+
+    def test_frozen_engine_retains_bundle_library_paths_but_system_engine_restores_originals(self):
+        with patch.object(sys, 'frozen', True, create=True), \
+                patch.dict(os.environ, {'LD_LIBRARY_PATH': '/bundle', 'LD_LIBRARY_PATH_ORIG': '/system'}):
+            self.assertEqual(ocr._environment(str(self.engine))['LD_LIBRARY_PATH'], '/bundle')
+            self.assertEqual(ocr._environment('/system/tesseract')['LD_LIBRARY_PATH'], '/system')
+
+    def test_probe_uses_only_its_own_models_and_does_not_cache_missing_data(self):
+        runner = ProbeTests().fake_runner(b'tesseract 5.5.4\n', b'List of available languages (1):\neng\n')
+        with patch.object(ocr.subprocess, 'run', side_effect=runner) as run:
+            info = ocr._probe('eng')
+        self.assertTrue(info['available'] and info['cacheable'] and info['bundled'])
+        self.assertEqual(info['models'], {'eng': hashlib.sha256(self.model.read_bytes()).hexdigest()})
+        self.assertIn('--tessdata-dir', run.call_args.args[0])
+        self.model.unlink()
+        runner = ProbeTests().fake_runner(b'tesseract 5.5.4\n', b'List of available languages (0):\n')
+        with patch.object(ocr.subprocess, 'run', side_effect=runner):
+            info = ocr._probe('eng')
+        self.assertFalse(info['available'])
+        self.assertIn('Reinstall', info['message'])
+
+    def test_windows_engine_does_not_open_a_console_window(self):
+        with patch.object(ocr.os, 'name', 'nt'), \
+                patch.object(ocr.subprocess, 'CREATE_NO_WINDOW', 0x08000000, create=True), \
+                patch.object(ocr, '_environment', return_value={}):
+            self.assertEqual(ocr._process_options(str(self.engine))['creationflags'], 0x08000000)
 
 
 if __name__ == "__main__":

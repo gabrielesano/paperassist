@@ -102,11 +102,11 @@ class LibraryWindowCase(unittest.TestCase):
 
 
 class StartUpTests(LibraryWindowCase):
-    def test_a_library_open_in_the_browser_gives_a_message_and_a_clean_exit(self):
+    def test_a_library_open_in_another_window_gives_a_message_and_a_clean_exit(self):
         shown = []
         with library_lock(self.workspace.data_dir), patch.object(QMessageBox, "warning", lambda *args: shown.append(args[2])):
             self.assertEqual(native_app.run(["--data-dir", str(self.workspace.data_dir)]), 1)
-        self.assertIn("browser", shown[0])
+        self.assertIn("another PaperAssist window", shown[0])
 
     def test_the_lock_is_released_after_the_window_session(self):
         with native_app.open_workspace(self.workspace.data_dir) as workspace:

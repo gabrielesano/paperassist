@@ -1,18 +1,15 @@
-import _thread
 import io
 import json
 import os
 import tempfile
-import threading
 import unittest
-import urllib.request
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
 from paperassist import paths
-from paperassist.cli import desktop_main, main
-from paperassist.server import LibraryInUse, library_lock, running_url, serve
+from paperassist.cli import main
+from paperassist.workspace import LibraryInUse, library_lock
 
 
 class DataDirectoryTests(unittest.TestCase):
@@ -89,18 +86,10 @@ class SavedLibraryTests(unittest.TestCase):
         library = self.root / 'unplugged'
         paths.save_library(library)
         stderr = io.StringIO()
-        with redirect_stderr(stderr), patch('paperassist.cli._serve') as serve_library:
-            self.assertEqual(main(['serve']), 1)
+        with redirect_stderr(stderr):
             self.assertEqual(main(['import', str(self.root)]), 1)
-        serve_library.assert_not_called()
         self.assertFalse(library.exists())
         self.assertIn('missing', stderr.getvalue())
-
-    def test_desktop_also_refuses_a_missing_chosen_library(self):
-        paths.save_library(self.root / 'unplugged')
-        with redirect_stderr(io.StringIO()), patch('paperassist.cli._desktop') as desktop:
-            self.assertEqual(main(['desktop']), 1)
-        desktop.assert_not_called()
 
     def test_unreadable_or_relative_choices_are_ignored(self):
         self.assertEqual(paths.locate()[1], 'default')
@@ -116,18 +105,34 @@ class CommandTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.directory = Path(self.tmp.name)
 
-    def test_no_command_serves_default_library_and_opens_browser(self):
-        with patch('paperassist.cli.locate_existing', return_value=(self.directory, 'default')), \
-             patch('paperassist.server.serve') as serve_mock:
-            self.assertEqual(main([]), 0)
-        serve_mock.assert_called_once_with('127.0.0.1', 8765, self.directory, True, 'default')
+    def test_default_and_pdf_arguments_launch_the_native_reader(self):
+        for arguments in ([], ['one.pdf', 'two.pdf', '--data-dir', str(self.directory)],
+                          ['--self-test', 'one.pdf'], ['--self-test-ocr', 'scan.pdf'], ['--help'], ['--version']):
+            with self.subTest(arguments=arguments), \
+                    patch('paperassist.native.__main__.main', return_value=0) as native:
+                self.assertEqual(main(arguments), 0)
+                native.assert_called_once_with(arguments)
 
-    def test_serve_keeps_flags_and_does_not_open_browser_by_default(self):
-        with patch('paperassist.server.serve') as serve_mock:
-            main(['serve', '--port', '9000', '--data-dir', str(self.directory)])
-            main(['serve', '--open', '--data-dir', str(self.directory)])
-        self.assertEqual(serve_mock.call_args_list[0].args, ('127.0.0.1', 9000, self.directory, False, 'option'))
-        self.assertEqual(serve_mock.call_args_list[1].args, ('127.0.0.1', 8765, self.directory, True, 'option'))
+    def test_desktop_alias_launches_native_without_mutating_arguments(self):
+        arguments = ['desktop', '--data-dir', str(self.directory)]
+        with patch('paperassist.native.__main__.main', return_value=0) as native:
+            self.assertEqual(main(arguments), 0)
+        native.assert_called_once_with(arguments[1:])
+        self.assertEqual(arguments[0], 'desktop')
+
+    def test_console_entry_uses_process_arguments(self):
+        with patch('sys.argv', ['paperassist', 'one.pdf']), \
+                patch('paperassist.native.__main__.main', return_value=0) as native:
+            self.assertEqual(main(), 0)
+        native.assert_called_once_with(['one.pdf'])
+
+    def test_retired_serve_command_explains_the_native_replacement(self):
+        output = io.StringIO()
+        with redirect_stderr(output), patch('paperassist.native.__main__.main') as native:
+            self.assertEqual(main(['serve', '--open']), 1)
+        native.assert_not_called()
+        self.assertIn('web reader has been retired', output.getvalue())
+        self.assertIn('Run paperassist', output.getvalue())
 
     def test_import_uses_data_dir_option(self):
         with patch('paperassist.library.Library.import_paths', return_value={'imported': 0}) as importer, \
@@ -136,35 +141,27 @@ class CommandTests(unittest.TestCase):
         importer.assert_called_once_with(['a.pdf'])
         self.assertTrue((self.directory / 'library.sqlite3').exists())
 
-    def test_desktop_uses_the_resolved_library_and_explicit_port(self):
-        with patch('paperassist.cli._desktop', return_value=0) as desktop:
-            self.assertEqual(main(['desktop', '--data-dir', str(self.directory), '--port', '9000']), 0)
-        desktop.assert_called_once_with(self.directory, 'option', 9000)
+    def test_import_refuses_a_library_owned_by_a_reader(self):
+        output = io.StringIO()
+        with library_lock(self.directory), redirect_stderr(output):
+            self.assertEqual(main(['import', 'a.pdf', '--data-dir', str(self.directory)]), 1)
+        self.assertIn('Library is in use', output.getvalue())
+        self.assertFalse((self.directory / 'library.sqlite3').exists())
 
-    def test_desktop_entry_point_uses_the_same_command_path(self):
-        with patch('paperassist.cli._desktop', return_value=0) as desktop, \
-             patch('paperassist.cli.locate_existing', return_value=(self.directory, 'default')):
-            self.assertEqual(desktop_main([]), 0)
-        desktop.assert_called_once_with(self.directory, 'default', 8765)
-
-    def test_desktop_returns_the_runtime_exit_code(self):
-        with patch('paperassist.desktop.run', return_value=1):
-            self.assertEqual(main(['desktop', '--data-dir', str(self.directory)]), 1)
-
-    def test_running_server_is_reported_and_reused(self):
-        (self.directory / '.server.json').write_text(json.dumps({'url': 'http://127.0.0.1:8765'}), encoding='utf-8')
-        message = io.StringIO()
-        with library_lock(self.directory), redirect_stderr(message), patch('paperassist.cli.webbrowser.open') as opened:
-            self.assertEqual(main(['serve', '--data-dir', str(self.directory)]), 1)
-            opened.assert_not_called()
-            with patch('paperassist.cli.locate_existing', return_value=(self.directory, 'default')):
-                self.assertEqual(main([]), 0)
-            opened.assert_called_once_with('http://127.0.0.1:8765')
-        self.assertIn('already open in a running PaperAssist server', message.getvalue())
-        self.assertIn('http://127.0.0.1:8765', message.getvalue())
+    def test_reimport_deduplicates_and_preserves_source_bytes(self):
+        from paperassist.library import Library
+        from tests.test_library import pdf
+        original = self.directory / 'source.pdf'
+        original.write_bytes(pdf())
+        library = self.directory / 'library'
+        with patch('sys.stdout', new=io.StringIO()):
+            for _ in range(2):
+                self.assertEqual(main(['import', str(original), '--data-dir', str(library)]), 0)
+        self.assertEqual(len(Library(library).list_documents()), 1)
+        self.assertEqual(original.read_bytes(), pdf())
 
 
-class LockAndServeTests(unittest.TestCase):
+class LockTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -187,42 +184,10 @@ class LockAndServeTests(unittest.TestCase):
                 if cls.locked:
                     raise OSError('locked')
                 cls.locked = True
-        with patch('paperassist.server.sys.platform', 'win32'), patch.dict('sys.modules', {'msvcrt': Msvcrt}):
+        with patch('paperassist.workspace.sys.platform', 'win32'), patch.dict('sys.modules', {'msvcrt': Msvcrt}):
             with library_lock(self.directory), self.assertRaises(LibraryInUse):
                 with library_lock(self.directory):
                     pass
-
-    def test_missing_marker_gives_no_url(self):
-        self.assertIsNone(running_url(self.directory))
-
-    def test_serve_opens_browser_once_listening_and_cleans_up(self):
-        opened = []
-        def fake_open(url):
-            opened.append(url)
-            def visit_then_stop():
-                # The page must already be reachable when the browser is asked to open it.
-                urllib.request.urlopen(url + '/api/config').close()
-                _thread.interrupt_main()
-            threading.Thread(target=visit_then_stop, daemon=True).start()
-        with patch('paperassist.server.webbrowser.open', fake_open), patch('sys.stdout', new=io.StringIO()) as out:
-            # Port 0 asks the OS for a free port.
-            serve('127.0.0.1', 0, self.directory, open_browser=True)
-        self.assertRegex(opened[0], r'^http://127\.0\.0\.1:\d+$')
-        self.assertIn(str(self.directory.resolve()), out.getvalue())
-        self.assertFalse((self.directory / '.server.json').exists())
-
-    def test_port_in_use_is_explained(self):
-        with patch('sys.stdout', new=io.StringIO()):
-            import socket
-            with socket.socket() as busy:
-                busy.bind(('127.0.0.1', 0))
-                busy.listen()
-                with self.assertRaisesRegex(RuntimeError, '--port'):
-                    serve('127.0.0.1', busy.getsockname()[1], self.directory)
-
-    def test_non_loopback_host_is_refused(self):
-        with self.assertRaises(ValueError):
-            serve('0.0.0.0', 0, self.directory)
 
 
 if __name__ == '__main__':

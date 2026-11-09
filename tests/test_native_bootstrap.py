@@ -43,8 +43,7 @@ class NativeBootstrapTests(unittest.TestCase):
                         entry.main()
                 self.assertEqual(result.exception.code, 1)
                 self.assertIn(missing, output.getvalue())
-                self.assertIn('python -m pip install -e ".[native]"', output.getvalue())
-                self.assertIn("paperassist serve --open", output.getvalue())
+                self.assertIn('python -m pip install -e .', output.getvalue())
                 self.assertNotIn("Traceback", output.getvalue())
 
     def test_native_library_load_errors_have_a_clean_diagnostic(self):
@@ -94,28 +93,34 @@ runpy.run_module('paperassist.native', run_name='__main__')
 '''], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 1)
         self.assertIn("PySide6", result.stderr)
-        self.assertIn('python -m pip install -e ".[native]"', result.stderr)
+        self.assertIn('python -m pip install -e .', result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
-    def test_browser_cli_and_http_backend_work_when_native_packages_are_unavailable(self):
+    def test_cli_import_works_without_native_or_retired_web_packages(self):
         result = subprocess.run([sys.executable, "-c", BLOCK_NATIVE + '''
+class BlockWeb(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('flask', 'werkzeug', 'webview', 'qtpy', 'PyQt5', 'PyQt6'):
+            raise ModuleNotFoundError(fullname)
+sys.meta_path.insert(0, BlockWeb())
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 from paperassist.cli import main
-from paperassist.server import create_app
+from tests.test_library import pdf
+from paperassist.library import Library
 try:
-    main(['serve', '--help'])
+    main(['import', '--help'])
 except SystemExit as error:
     assert error.code == 0
 with tempfile.TemporaryDirectory() as folder:
     root = Path(folder)
     with patch('paperassist.paths.config_file', return_value=root / 'config.json'):
-        app = create_app(root / 'library')
-        try:
-            assert app.test_client().get('/api/config').status_code == 200
-        finally:
-            app.extensions['paperassist_shutdown']()
+        original = root / 'source.pdf'
+        original.write_bytes(pdf())
+        assert main(['import', str(original), '--data-dir', str(root / 'library')]) == 0
+        assert len(Library(root / 'library').list_documents()) == 1
+        assert original.read_bytes() == pdf()
 '''], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage:", result.stdout)

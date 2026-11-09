@@ -236,8 +236,9 @@ or access to a development checkout on supported systems (`glibc >= 2.42`).
 
 ## Subsequent work
 
-- Retire the transitional web interface, HTTP server and pywebview host through
-  a deliberate migration; preserve required library/import commands and data.
+- Completed after native parity: retire the transitional web interface, HTTP
+  server and pywebview host; preserve CLI import, library data and the existing
+  process lock. Source launches now default to the native reader.
 - Set up an automated containerized build environment (e.g., Ubuntu 22.04 / `glibc 2.35`)
   to produce and verify portable installer packages for older Linux distributions.
 - Extend standalone release verification to Windows/macOS, including installers,

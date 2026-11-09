@@ -1,11 +1,14 @@
 import argparse
 import gc
+import hashlib
 import os
 import signal
 import socket
 import sqlite3
 import sys
+import tempfile
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QSocketNotifier, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -65,6 +68,30 @@ def self_test(path):
 
 class LibraryMissing(RuntimeError):
     pass
+
+
+def ocr_self_test(path):
+    """Exercise the bundled engine and English model through the real spawned OCR worker."""
+    from paperassist import ocr
+    from paperassist.metadata import extract_ocr_metadata
+    info = ocr.capabilities()
+    if not info.get('available'):
+        print('OCR self-test failed: ' + info.get('message', 'Bundled OCR is required.'))
+        return False
+    if not info.get('bundled'):
+        print('OCR self-test failed: build the bundled OCR runtime first.')
+        return False
+    with Path(path).open('rb') as source:
+        fingerprint = hashlib.file_digest(source, 'sha256').hexdigest()
+    with tempfile.TemporaryDirectory(prefix='paperassist-ocr-test-') as cache:
+        import threading
+        report = ocr.recover(path, cache, fingerprint, threading.Event())
+    words = sum(len(page['words']) for page in report['pages'])
+    ok = report['status'] == 'completed' and words > 0
+    metadata = extract_ocr_metadata(report)
+    print(f"OCR self-test {'ok' if ok else 'failed'}: bundled Tesseract {info['engine_version']}, {words} words; "
+          f"title={metadata.get('title', '')}; authors={metadata.get('authors', '')}; {report['message']}")
+    return ok
 
 
 @contextmanager
@@ -131,16 +158,21 @@ def termination_requests(app):
 
 
 def run(argv=None):
-    parser = argparse.ArgumentParser(prog="paperassist.native", description="PaperAssist native reader")
+    parser = argparse.ArgumentParser(prog="paperassist", description="PaperAssist native reader. "
+                                    "Use 'paperassist import --help' for command-line library import.")
     parser.add_argument("-v", "--version", action="version", version=f"PaperAssist {paperassist.__version__}")
     parser.add_argument("pdfs", nargs="*", help="PDF files to open, one tab each; without any, the library opens")
     parser.add_argument("--data-dir", help="library directory (default: PAPERASSIST_DATA_DIR, the folder chosen in the app, "
                                            "or the per-user data directory)")
-    parser.add_argument("--self-test", metavar="FILE.pdf", help="render page 1 of FILE.pdf without a window and exit 0 or 1")
+    checks = parser.add_mutually_exclusive_group()
+    checks.add_argument("--self-test", metavar="FILE.pdf", help="render page 1 of FILE.pdf without a window and exit 0 or 1")
+    checks.add_argument("--self-test-ocr", metavar="FILE.pdf", help="recognize FILE.pdf using bundled offline OCR and exit 0 or 1")
     args = parser.parse_args(argv)
     hold_installation_mutex()
     if args.self_test:
         return 0 if self_test(args.self_test) else 1
+    if args.self_test_ocr:
+        return 0 if ocr_self_test(args.self_test_ocr) else 1
     install_wayland_warning_filter()
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("PaperAssist")
@@ -158,7 +190,7 @@ def _run_sessions(app, args):
             try:
                 workspace = session.enter_context(open_workspace(data_dir)) if not args.pdfs else None
             except (LibraryInUse, LibraryMissing, OSError, sqlite3.Error) as error:
-                message = ("This library is open in another PaperAssist window or the browser; close it first."
+                message = ("This library is open in another PaperAssist window; close it first."
                            if isinstance(error, LibraryInUse) else f"Could not open the library:\n{error}")
                 if previous_library is None:
                     QMessageBox.warning(None, "PaperAssist", message)

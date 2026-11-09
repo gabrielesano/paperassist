@@ -1,5 +1,8 @@
 # Desktop preview verification
 
+Historical record: this WebView preview has been retired after native parity.
+Current application verification uses the native Qt/PDFium reader.
+
 Linux x86_64, Python 3.14.7, pywebview 6.2.1, Qt 6.12.0 and QtWebEngine Chromium
 140. Tests use generated PDFs, temporary libraries and private temporary profiles.
 Windows/macOS remain unverified.

@@ -17,8 +17,8 @@ try:
 except ImportError:
     PySide6 = None
 
-needs_pdf = unittest.skipUnless(pdf_available, "PDFium is not installed (pip install -e '.[native]')")
-needs_qt = unittest.skipUnless(pdf_available and PySide6, "PySide6 or PDFium is not installed (pip install -e '.[native]')")
+needs_pdf = unittest.skipUnless(pdf_available, "PDFium is not installed (pip install -e '.')")
+needs_qt = unittest.skipUnless(pdf_available and PySide6, "PySide6 or PDFium is not installed (pip install -e '.')")
 
 BODY = "Coronal loops are heated by nanoflares and observed in the extreme ultraviolet. " * 8
 

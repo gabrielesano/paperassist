@@ -14,10 +14,12 @@ notarization service; creating the DMG does not supply either of those.
 
 ## Build on Apple Silicon
 
-From the repository root, with the native dependencies and PyInstaller installed:
+From the repository root, with the native dependencies, PyInstaller, CMake and
+the Xcode command-line C/C++ tools installed:
 
 ```sh
 python packaging/desktop/generate_icons.py --output-dir build/icons --icns build/icons/PaperAssist.icns
+python packaging/ocr/build_ocr.py
 pyinstaller packaging/paperassist.spec --noconfirm --distpath dist --workpath build
 python packaging/macos/build_dmg.py
 python -m unittest tests.test_macos_bundle -v

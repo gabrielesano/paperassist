@@ -467,7 +467,7 @@ def _get_dist_license(dist_name: str) -> str:
     return ""
 
 
-def generate_notices(output_path: Path | None = None) -> str:
+def generate_notices(output_path: Path | None = None, *, ocr_runtime: Path | None = None) -> str:
     """Generate the complete THIRD-PARTY-NOTICES.txt content."""
     sections = []
 
@@ -702,6 +702,19 @@ ensure standalone execution across diverse Linux distributions:
 """
     sections.append(system_notices)
 
+    if ocr_runtime is not None:
+        manifest = json.loads((ocr_runtime / 'manifest.json').read_text(encoding='utf-8'))
+        for name, license_name, license_id in (
+            ('tesseract', 'LICENSE.tesseract', 'Apache-2.0'),
+            ('leptonica', 'LICENSE.leptonica', 'BSD-2-Clause'),
+            ('tessdata_fast', 'LICENSE.tessdata_fast', 'Apache-2.0'),
+        ):
+            source = manifest['sources'][name]
+            sections.append(
+                f"\nBundled OCR: {name} {source['version']}\nLicense: {license_id}\n"
+                f"Source: {source['url']}\nSource SHA-256: {source['sha256']}\n\n"
+                + (ocr_runtime / license_name).read_text(encoding='utf-8')
+            )
     content = "\n".join(sections)
     if output_path is not None:
         out = Path(output_path)
