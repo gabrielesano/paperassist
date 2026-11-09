@@ -329,12 +329,10 @@ class TestInstalledFrozenExecutableAcceptance(unittest.TestCase):
         raise TimeoutError(f"Window containing {substring!r} not found within {timeout}s. Current windows: {last_names}")
 
     def _open_document_from_library_dialog(self, lib_win: str):
-        """Click row 0 in LibraryDialog and click Open button, then dismiss acquisition dialog."""
+        """Move from the initial search field to the first paper and activate it."""
         subprocess.run(["xdotool", "windowfocus", "--sync", lib_win], env=self.env)
         time.sleep(0.2)
-        subprocess.run(["xdotool", "mousemove", "--window", lib_win, "122", "139", "click", "1"], env=self.env)
-        time.sleep(0.2)
-        subprocess.run(["xdotool", "mousemove", "--window", lib_win, "890", "547", "click", "1"], env=self.env)
+        subprocess.run(["xdotool", "key", "--window", lib_win, "Tab", "Tab", "Home", "space", "Return"], env=self.env)
         time.sleep(1.0)
         try:
             acq_win = self._find_window_by_title_substring("Acquire", timeout=1.0)
@@ -774,8 +772,8 @@ class TestInstalledFrozenExecutableAcceptance(unittest.TestCase):
             subprocess.run(["xdotool", "mouseup", "1"], env=self.env)
             time.sleep(0.5)
 
-            # Trigger close prompt via Ctrl+W
-            subprocess.run(["xdotool", "key", "--window", main_win, "ctrl+w"], env=self.env)
+            # Ask the application close guard, independent of a headless WM's shortcut focus.
+            app_proc.send_signal(signal.SIGTERM)
             time.sleep(0.8)
 
             # Modal dialog "Unsaved changes" must appear
@@ -796,7 +794,7 @@ class TestInstalledFrozenExecutableAcceptance(unittest.TestCase):
             # 2. Test DISCARD
             # ----------------------------------------------------
             subprocess.run(["xdotool", "windowfocus", "--sync", main_win], env=self.env)
-            subprocess.run(["xdotool", "key", "--window", main_win, "ctrl+w"], env=self.env)
+            app_proc.send_signal(signal.SIGTERM)
             time.sleep(0.8)
             dialog_win2 = self._find_window_by_title_substring("Unsaved changes", timeout=4.0)
             subprocess.run(["xdotool", "windowfocus", "--sync", dialog_win2], env=self.env)
@@ -835,7 +833,7 @@ class TestInstalledFrozenExecutableAcceptance(unittest.TestCase):
             subprocess.run(["xdotool", "mouseup", "1"], env=self.env)
             time.sleep(0.5)
 
-            subprocess.run(["xdotool", "key", "--window", main_win3, "ctrl+w"], env=self.env)
+            app_proc_save.send_signal(signal.SIGTERM)
             time.sleep(0.8)
             dialog_win3 = self._find_window_by_title_substring("Unsaved changes", timeout=4.0)
             subprocess.run(["xdotool", "windowfocus", "--sync", dialog_win3], env=self.env)
@@ -1120,6 +1118,92 @@ class TestInstalledFrozenExecutableAcceptance(unittest.TestCase):
         # Populated user data 100% intact
         self.assertEqual(record_tree_hashes(lib_dir), lib_digests)
         self.assertEqual(record_tree_hashes(pa_config), cfg_digests)
+
+    @unittest.skipUnless(shutil.which('gio'), 'GIO desktop launching is unavailable')
+    def test_13_pdf_open_with_preserves_dirty_owner_and_system_defaults(self):
+        """Execute the installed desktop entry with real PDF arguments and explicit Save."""
+        defaults = self.clean_home / '.config/mimeapps.list'
+        defaults.parent.mkdir(parents=True)
+        default_bytes = b'[Default Applications]\napplication/pdf=other-reader.desktop;\n'
+        defaults.write_bytes(default_bytes)
+        application = self.clean_home / 'Programs with spaces 100%/PaperAssist'
+        subprocess.run(['sh', str(REAL_INSTALLER), '--install-dir', str(application)],
+                       env=self.env, check=True, capture_output=True)
+        desktop = self.clean_home / '.local/share/applications/paperassist.desktop'
+        launcher = self.clean_home / '.local/bin/paperassist'
+        first, original = create_scientific_citation_pdf(self.tmp_dir / 'First è % paper.pdf', pages=3)
+        second, second_bytes = create_scientific_citation_pdf(self.tmp_dir / 'Second paper.pdf', pages=4)
+        library = self.clean_home / '.local/share/paperassist'
+        owner = subprocess.Popen([str(launcher), str(first)], env=self.env)
+        try:
+            window = self._find_window_by_title_substring('— PaperAssist')
+            subprocess.run(['xdotool', 'windowfocus', '--sync', window], env=self.env, check=True)
+            subprocess.run(['xdotool', 'windowmove', window, '0', '0'], env=self.env, check=True)
+            subprocess.run(['xdotool', 'windowsize', window, '1400', '900'], env=self.env, check=True)
+            time.sleep(.5)
+            try:
+                acquisition = self._find_window_by_title_substring('Acquire', timeout=1)
+                subprocess.run(['xdotool', 'windowclose', acquisition], env=self.env, check=True)
+            except TimeoutError:
+                pass
+            subprocess.run(['xdotool', 'windowfocus', '--sync', window], env=self.env, check=True)
+            subprocess.run(['xdotool', 'key', '--window', window, 'd'], env=self.env, check=True)
+            subprocess.run(['xdotool', 'mousemove', '500', '350', 'mousedown', '1'], env=self.env, check=True)
+            time.sleep(.05)
+            subprocess.run(['xdotool', 'mousemove', '550', '400'], env=self.env, check=True)
+            time.sleep(.05)
+            subprocess.run(['xdotool', 'mouseup', '1'], env=self.env, check=True)
+
+            def title():
+                return subprocess.run(['xdotool', 'getwindowname', window], env=self.env,
+                                      check=True, capture_output=True, text=True).stdout.strip()
+
+            time.sleep(.3)
+            self.assertTrue(title().startswith('●'))
+            subprocess.run(['gio', 'launch', str(desktop), str(first), str(second)], env=self.env,
+                           check=True, capture_output=True, timeout=15)
+            deadline = time.monotonic() + 15
+            count = 0
+            while time.monotonic() < deadline:
+                with sqlite3.connect(library / 'library.sqlite3') as db:
+                    count = db.execute('SELECT COUNT(*) FROM documents').fetchone()[0]
+                if count == 2:
+                    break
+                time.sleep(.1)
+            self.assertEqual(count, 2)
+            subprocess.run(['gio', 'launch', str(desktop), str(first)], env=self.env,
+                           check=True, capture_output=True, timeout=15)
+            deadline = time.monotonic() + 10
+            while not title().startswith('●') and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.assertTrue(title().startswith('●'), 'Open with must select the existing unsaved document')
+            self.assertIsNone(owner.poll())
+            self.assertEqual(list((library / 'working').glob('*.pdf')), [])
+            self.assertEqual(first.read_bytes(), original)
+            self.assertEqual(second.read_bytes(), second_bytes)
+            subprocess.run(['xdotool', 'key', '--window', window, 'ctrl+s'], env=self.env, check=True)
+            deadline = time.monotonic() + 10
+            while title().startswith('●') and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.assertFalse(title().startswith('●'))
+            revisions = list((library / 'working').glob('*.pdf'))
+            self.assertEqual(len(revisions), 1)
+            self.assertTrue(PdfReader(revisions[0]).pages[0].get('/Annots'))
+        finally:
+            owner.send_signal(signal.SIGTERM)
+            try:
+                owner.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                owner.kill()
+                owner.wait(timeout=5)
+        self.assertEqual(owner.returncode, 0)
+        self.assertEqual(defaults.read_bytes(), default_bytes)
+        before = record_tree_hashes(library)
+        subprocess.run([str(application / 'uninstall.sh')], env=self.env, check=True, capture_output=True)
+        self.assertEqual(record_tree_hashes(library), before)
+        self.assertEqual(defaults.read_bytes(), default_bytes)
+        self.assertEqual(first.read_bytes(), original)
+        self.assertEqual(second.read_bytes(), second_bytes)
 
     def test_12_installed_frozen_runtime_measurements(self):
         """Measure cold/warm self-test, startup, and memory footprint of the real installed frozen binary."""

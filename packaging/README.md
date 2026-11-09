@@ -33,6 +33,8 @@ dist/PaperAssist/PaperAssist --self-test some.pdf   # exit code 0 = ok
 `--self-test FILE.pdf` opens the file, draws page 1 through the render process with Qt's offscreen platform, and checks that the page is not blank. It runs completely headless without an active display server.
 
 The manual CI workflow (`.github/workflows/build.yml`) runs this self-test on Linux, Windows, and macOS and uploads the resulting bundle artifacts.
+Its optional `platform` input can rebuild one host without repeating the other
+packages; for example, `gh workflow run build.yml -f platform=windows-latest`.
 
 ### Included offline OCR
 

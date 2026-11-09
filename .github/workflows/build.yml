@@ -1,20 +1,25 @@
 name: Build
 
 # Manual only: a full bundle takes minutes and the artifacts are large.
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Package target (choose one when retrying a host)
+        type: choice
+        default: all
+        options:
+          - all
+          - ubuntu-22.04
+          - windows-latest
+          - macos-latest
 
 jobs:
   bundle:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            name: Linux
-          - os: windows-latest
-            name: Windows
-          - os: macos-latest
-            name: macOS
+        os: ${{ fromJSON(inputs.platform == 'all' && '["ubuntu-22.04","windows-latest","macos-latest"]' || format('["{0}"]', inputs.platform)) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
