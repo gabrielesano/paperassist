@@ -4,7 +4,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QMenu, QProgressBar, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
-from paperassist.library import pdf_files
+from paperassist.library import manual_fields, pdf_files
 
 from .jobs import JobWatcher
 from .library_source import display_title
@@ -69,18 +69,19 @@ class LibraryDialog(QDialog):
         self.edit_button.setToolTip("Correct the title, authors, year or DOI (F2)")
         self.selection_hint = QLabel("Select papers with Ctrl-click or Shift-click.", objectName="muted-note")
         self.refresh_button = QPushButton("Refresh metadata")
-        self.refresh_button.setToolTip("Recover metadata locally from the PDF, with optional online verification. Manual corrections are preserved.")
+        self.refresh_button.setToolTip("Recover metadata locally from the PDF, with optional online verification. Fields you corrected are preserved.")
         menu = QMenu(self.refresh_button)
         menu.setToolTipsVisible(True)
         self.refresh_selected = menu.addAction("Refresh selected papers")
         self.refresh_review = menu.addAction("Refresh papers that need review")
-        self.refresh_review.setToolTip("Skips verified and manually corrected papers, and ignores the current search.")
+        self.refresh_review.setToolTip("Skips papers that are verified or corrected by you, and ignores the current search. "
+                                      "Use Refresh selected papers to recheck those.")
         self.recover_selected = menu.addAction("Recover selected papers with OCR")
         self.recover_selected.setToolTip(OCR_TIP + " Runs on every selected paper, including ones with a text layer.")
         menu.addSeparator()
         self.refresh_all = menu.addAction("Force refresh entire library")
         self.refresh_all.setToolTip("Also rechecks verified papers; online verification may update their values. "
-                                    "Manual corrections are always preserved.")
+                                    "Fields you corrected are always preserved.")
         menu.addSeparator()
         self.online_metadata = menu.addAction("Look up metadata online (arXiv, Crossref)")
         self.online_metadata.setCheckable(True)
@@ -208,15 +209,16 @@ class LibraryDialog(QDialog):
             metadata = document["metadata"]
             provider = (metadata.get("verified") or {}).get("provider")
             provider = {"arxiv": "arXiv", "crossref": "Crossref"}.get(str(provider).lower(), provider)
-            note = metadata.get("refresh", {}).get("message") or (
-                "Manually corrected; automatic refresh preserves these values." if document["metadata_status"] == "corrected" else
+            corrected = "Corrected by you; refresh keeps those fields and can still fill the others."
+            note = "\n".join(filter(None, [metadata.get("refresh", {}).get("message"),
+                                           corrected if manual_fields(document) else ""])) or (
                 f"Verified using {provider}." if verified and provider else
                 "Extracted locally; not yet verified. Refresh metadata can recover more data from the PDF or online sources.")
             item.setToolTip(METADATA, note)
             for field, column in (("title", TITLE), ("authors", AUTHORS), ("year", YEAR)):
                 source = metadata.get("sources", {}).get(field)
                 if source:
-                    source = {"pdf_info": "PDF properties", "xmp": "XMP properties", "filename": "Filename",
+                    source = {"manual": "Corrected by you", "pdf_info": "PDF properties", "xmp": "XMP properties", "filename": "Filename",
                               "arxiv": "arXiv", "crossref": "Crossref",
                               "arxiv_submission_date": "Printed arXiv submission date (preprint year)",
                               "first_page_typography": "First-page title typography (provisional)",
@@ -315,7 +317,7 @@ class LibraryDialog(QDialog):
         self.watcher.progress.connect(self._progress)
         self.watcher.finished.connect(self._metadata_refreshed)
         self._importing(True)
-        self.message.setText("Refreshing metadata… Manual corrections are preserved.")
+        self.message.setText("Refreshing metadata… Fields you corrected are preserved.")
 
     def _metadata_refreshed(self, job):
         self.watcher.deleteLater()
@@ -328,7 +330,7 @@ class LibraryDialog(QDialog):
         else:
             review = sum(doc["metadata_status"] in NEEDS_REVIEW for doc in result.get("documents", []))
             text = (f"{len(result.get('documents', []))} checked, {result.get('local', 0)} improved locally, "
-                    f"{result.get('verified', 0)} verified online, {result.get('preserved', 0)} manual corrections preserved, "
+                    f"{result.get('verified', 0)} verified online, {result.get('preserved', 0)} with your corrections kept, "
                     f"{review} need review, {len(result.get('errors', []))} failed")
             if result.get("ocr"):
                 text += f", {result['ocr']} recovered with OCR"

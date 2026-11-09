@@ -262,6 +262,30 @@ class ReferenceTests(unittest.TestCase):
             with patch('paperassist.references.PdfReader', return_value=Reader()):
                 self.assertEqual(get(library, 1)['references'][0]['local_document_id'], 2)
 
+    def test_only_authors_the_user_typed_outrank_the_printed_header(self):
+        class Page:
+            def extract_text(self):
+                return ('The Astrophysical Journal, 745:152 (21pp), 2012 February 1\n'
+                        'A PAPER TITLE\nP. Antolin1, and L. Rouppe van der Voort')
+        class Reader:
+            pages = [Page()]
+        class Library:
+            def __init__(self, path, metadata):
+                self.db_path, self.metadata = path, metadata
+            def list_documents(self):
+                return [{'id': 2, 'sha256': 'paper', 'authors': 'IOP Publishing', 'metadata_status': 'corrected',
+                         'metadata': self.metadata}]
+            def get_path(self, document_id, annotated=False):
+                return 'paper.pdf'
+        ref = {'id': '0', 'raw': 'Antolin, P., & Rouppe van der Voort, L. 2012, ApJ, 745, 152', 'authors': 'Antolin', 'year': '2012'}
+        for manual, expected in ((['title'], 2), (['authors'], None)):
+            with self.subTest(manual=manual), TemporaryDirectory() as directory:
+                library = Library(Path(directory) / 'library.sqlite', {'manual': manual})
+                _save(library, 1, {'references': [dict(ref)], 'status': 'partial',
+                                   'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
+                with patch('paperassist.references.PdfReader', return_value=Reader()):
+                    self.assertEqual(get(library, 1)['references'][0]['local_document_id'], expected)
+
     def test_manual_links_shared_only_when_reference_and_target_are_unique(self):
         class Library:
             def __init__(self, path):

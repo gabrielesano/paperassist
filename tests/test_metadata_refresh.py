@@ -12,6 +12,7 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from paperassist import metadata_refresh
 from paperassist.workspace import Workspace
+from test_library import confirm
 from test_metadata import body_lines, line, page_report
 from test_ocr import needs_ocr, scan_pdf
 
@@ -62,7 +63,7 @@ class MetadataRefreshTests(unittest.TestCase):
         self.library.save_notes(doc["id"], [{"text": "Keep this note"}])
         self.library.save_view(doc["id"], {"page": 1, "scale": "page-width"})
         with patch("paperassist.retrieval.crossref_metadata") as lookup:
-            done = self.finish(self.workspace.refresh_metadata())
+            done = self.finish(self.workspace.refresh_metadata(online=False))
         lookup.assert_not_called()
         again = self.library.get_document(doc["id"])
         for key in ("title", "authors", "year", "doi", "metadata_status", "work_id"):
@@ -72,6 +73,43 @@ class MetadataRefreshTests(unittest.TestCase):
         self.assertEqual(self.library.get_notes(doc["id"]), [{"text": "Keep this note"}])
         self.assertEqual(self.library.get_view(doc["id"]), {"page": 1, "scale": "page-width"})
         self.assertEqual(done["result"]["preserved"], 1)
+
+    def test_a_corrected_paper_that_is_corroborated_becomes_verified_and_keeps_its_corrections(self):
+        doc = self.add()
+        self.library.update_metadata(doc["id"], {"title": "My title for the loops paper"})
+        # The PDF's own title stays a candidate, so the provider's record still agrees with the paper.
+        extracted = self.extracted(doc, candidates={"doi": ["10.1234/loops"], "title": ["The cooling of coronal loops"]})
+        with patch("paperassist.library.extract_metadata", return_value=extracted):
+            with patch("paperassist.retrieval.crossref_metadata", return_value=self.record()) as lookup:
+                done = self.finish(self.workspace.refresh_metadata([doc["id"]]))
+        lookup.assert_called_once()
+        again = self.library.get_document(doc["id"])
+        self.assertEqual((again["title"], again["year"], again["doi"], again["metadata_status"]),
+                         ("My title for the loops paper", 2021, "10.1234/loops", "verified"))
+        self.assertEqual(again["metadata"]["manual"], ["title"])
+        self.assertEqual(again["metadata"]["refresh"]["message"], "Verified using Crossref; your corrected title was kept.")
+        self.assertEqual((done["result"]["verified"], done["result"]["preserved"]), (1, 1))
+
+    def test_a_corrected_paper_without_a_match_stays_corrected_and_says_what_was_kept(self):
+        doc = self.add()
+        self.library.update_metadata(doc["id"], {"title": "My title for the loops paper", "year": 2019})
+        done = self.finish(self.workspace.refresh_metadata([doc["id"]]))
+        again = self.library.get_document(doc["id"])
+        self.assertEqual(again["metadata_status"], "corrected")
+        self.assertTrue(again["metadata"]["refresh"]["message"].endswith("Your corrected title and year were kept."))
+        self.assertEqual(done["result"]["preserved"], 1)
+
+    def test_a_legacy_corrected_paper_with_only_automatic_values_is_verified_like_a_fresh_import(self):
+        doc = self.add()
+        with self.library._connect() as db:  # corrected by the old rename bug, values untouched
+            db.execute("UPDATE documents SET metadata_status = 'corrected' WHERE id = ?", (doc["id"],))
+        extracted = self.extracted(doc, authors="Ada Lovelace")
+        with patch("paperassist.library.extract_metadata", return_value=extracted):
+            with patch("paperassist.retrieval.crossref_metadata", return_value=self.record()):
+                self.finish(self.workspace.refresh_metadata([doc["id"]]))
+        again = self.library.get_document(doc["id"])
+        self.assertEqual((again["metadata_status"], again["year"], again["doi"]), ("verified", 2021, "10.1234/loops"))
+        self.assertEqual(again["metadata"]["refresh"]["message"], "Verified using Crossref.")
 
     def test_selected_ids_are_deduplicated_and_offline_refresh_rereads_candidates(self):
         first, second = self.add(), self.add("Another paper title")
@@ -273,17 +311,27 @@ class MetadataRefreshTests(unittest.TestCase):
 
     def test_force_runs_ocr_but_native_corrected_and_verified_values_win(self):
         native, corrected, verified = self.add(), self.add_scan("a.pdf", 301), self.add_scan("b.pdf", 302)
-        self.library.update_metadata(corrected["id"], {"title": "My correction"})
-        self.library.update_metadata(verified["id"], {"title": "Verified title", "authors": "Verified Author"}, status="verified")
+        self.library.update_metadata(corrected["id"], {"title": "My correction", "authors": "My Author"})
+        confirm(self.library, verified["id"], "verified", title="Verified title", authors="Verified Author")
         with patch("paperassist.metadata_refresh.ocr.recover", return_value=self.recognised()) as recover:
             done = self.refresh(online=False, ocr="force")
-        self.assertEqual(recover.call_count, 2)  # a manual correction is never read again
+        self.assertEqual(recover.call_count, 2)  # OCR has nothing to fill once title and authors are the user's
         self.assertEqual(self.library.get_document(native["id"])["title"], "The cooling of coronal loops")
         self.assertEqual(self.library.get_document(corrected["id"])["title"], "My correction")
         confirmed = self.library.get_document(verified["id"])
         self.assertEqual((confirmed["title"], confirmed["authors"], confirmed["metadata_status"]),
                          ("Verified title", "Verified Author", "verified"))
         self.assertEqual(done["result"]["ocr"], 0)
+
+    def test_ocr_still_fills_what_the_user_left_alone(self):
+        scan = self.add_scan()
+        self.library.update_metadata(scan["id"], {"title": "My title for the scan"})
+        with patch("paperassist.metadata_refresh.ocr.recover", return_value=self.recognised()) as recover:
+            self.refresh(online=False)
+        recover.assert_called_once()
+        done = self.library.get_document(scan["id"])
+        self.assertEqual((done["title"], done["authors"], done["metadata_status"]),
+                         ("My title for the scan", "Ada Lovelace", "corrected"))
 
     def test_ocr_comes_before_the_online_lookup_so_its_candidates_can_be_corroborated(self):
         doc = self.add_scan()

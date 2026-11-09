@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, Fit, NameObject
+from test_library import confirm
 from test_native_support import make_pdf, needs_qt, pdf_available
 
 if pdf_available:
@@ -368,7 +369,7 @@ class OcrControlTests(LibraryWindowCase):
 
     def set_statuses(self, *statuses):
         for document, status in zip(self.docs, statuses):
-            self.workspace.library.update_metadata(document["id"], {"title": f"Paper {document['id']}"}, status=status)
+            confirm(self.workspace.library, document["id"], status, title=f"Paper {document['id']}")
         self.dialog.refresh()
         self.review = [document["id"] for document, status in zip(self.docs, statuses) if status in ("needs_review", "incomplete")]
 
@@ -471,6 +472,18 @@ class OcrControlTests(LibraryWindowCase):
         self.start_fake_job(self.dialog.refresh_all.trigger)
         self.finish(local=1, ocr=0)
         self.assertNotIn("OCR", self.dialog.message.text())
+
+    def test_a_corrected_paper_explains_that_refresh_keeps_only_the_corrected_fields(self):
+        document = self.docs[0]
+        self.workspace.library.update_metadata(document["id"], {"title": "My own title"})
+        self.dialog.refresh()
+        item = next(self.dialog.table.topLevelItem(i) for i in range(self.dialog.table.topLevelItemCount())
+                    if self.dialog.table.topLevelItem(i).data(0, Qt.UserRole) == document["id"])
+        self.assertIn("refresh keeps those fields and can still fill the others", item.toolTip(4))
+        self.assertIn("Source: Corrected by you", item.toolTip(0))
+        self.assertNotIn("Corrected by you", item.toolTip(2))
+        self.assertIn("verified or corrected by you", self.dialog.refresh_review.toolTip())
+        self.assertIn("Refresh selected papers", self.dialog.refresh_review.toolTip())
 
     def test_ocr_sources_are_labelled_as_provisional(self):
         listing = self.workspace.library.list_documents

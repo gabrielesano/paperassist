@@ -247,7 +247,7 @@ class InboxTests(unittest.TestCase):
         self.reference({**REF, 'identity': {'provider': 'crossref', 'doi': DOI, 'title': TITLE, 'first_author': 'Rappazzo', 'year': 2013}})
         data = text_pdf(FILLER, f'Rappazzo doi:{DOI}')
         existing = self.library.import_stream(BytesIO(data), 'mine.pdf')
-        self.library.update_metadata(existing['id'], {'title': 'My own title'}, status='corrected')
+        self.library.update_metadata(existing['id'], {'title': 'My own title'})
         self.put('copy.pdf', data)
         result = self.check()
         document = self.library.get_document(existing['id'])

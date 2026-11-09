@@ -205,9 +205,16 @@ class CrossrefMetadataTests(unittest.TestCase):
         self.assertEqual(doi.call_count, 2)
         get.assert_not_called()
 
-    def test_source_controls_manual_corrections_and_cancellation_never_query(self):
-        for status, enabled, cancelled in (("corrected", True, False), ("needs_review", False, False),
-                                           ("needs_review", True, True)):
+    def test_a_corrected_paper_is_searched_with_its_current_values(self):
+        self.doc.update(metadata_status="corrected", title="The cooling of coronal loops revisited")
+        self.doc["metadata"]["manual"] = ["title"]
+        self.doc["metadata"]["candidates"]["title"] = ["The cooling of coronal loops"]
+        result, get = self.search(self.item())
+        self.assertEqual(result["doi"], "10.1234/loops")
+        self.assertEqual(parse_qs(urlsplit(get.call_args.args[0]).query)["query.bibliographic"], [self.doc["title"]])
+
+    def test_source_controls_and_cancellation_never_query(self):
+        for status, enabled, cancelled in (("needs_review", False, False), ("needs_review", True, True)):
             self.doc["metadata_status"] = status
             cfg = Settings({"enabled": {"crossref": enabled}})
             if cancelled:

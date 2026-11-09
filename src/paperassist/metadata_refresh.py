@@ -1,6 +1,7 @@
 """Local metadata recovery with optional, corroborated online enrichment."""
 
 from . import arxiv_metadata, crossref_metadata, ocr
+from .library import manual_fields
 from .metadata import extract_ocr_metadata, useful
 
 OCR_MODES = ("off", "auto", "force")
@@ -31,8 +32,18 @@ def _lookup(document, cfg, cancel, progress):
     return None, errors
 
 
+def _kept(document):
+    """Name the corrections that survived, e.g. 'your corrected title and DOI were kept'."""
+    names = [{"doi": "DOI"}.get(key, key) for key in manual_fields(document)]
+    if not names:
+        return ""
+    listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return f"your corrected {listed} {'was' if len(names) == 1 else 'were'} kept"
+
+
 def _local_message(document):
-    missing = [key for key in ("title", "authors", "year") if not document.get(key)]
+    manual = manual_fields(document)
+    missing = [key for key in ("title", "authors", "year") if not document.get(key) and key not in manual]
     if not useful(document["title"]) or document["metadata"].get("sources", {}).get("title") == "arxiv_id":
         missing = list(dict.fromkeys(["title", *missing]))
     return "Local extraction: missing " + ", ".join(missing) + "." if missing else "Local metadata extracted."
@@ -41,7 +52,8 @@ def _local_message(document):
 def _wants_ocr(document, mode):
     """Auto mode spends OCR time only where native extraction cannot have worked."""
     status = document["metadata_status"]
-    if mode == "off" or status == "corrected":
+    # Nothing is left for OCR to fill once the user has typed both fields it recovers.
+    if mode == "off" or {"title", "authors"} <= set(manual_fields(document)):
         return False
     if mode == "force":
         return True
@@ -96,9 +108,8 @@ def refresh(library, document_ids, cfg, online, job, cancel, ocr_mode="auto"):
             improved = any(document[key] != before[key] for key in ("title", "authors", "year", "doi"))
             result["local"] += improved
             status, message = "local", " ".join(filter(None, [_local_message(document), ocr_note]))
-            if document["metadata_status"] == "corrected":
-                message = "Manual corrections preserved."
-            elif not online:
+            kept = _kept(document)
+            if not online:
                 message += " Online lookup is off; extracted values remain reviewable."
             elif not any(cfg.enabled(name) for name in ("arxiv", "crossref")):
                 message += " Online metadata sources are disabled."
@@ -110,17 +121,17 @@ def refresh(library, document_ids, cfg, online, job, cancel, ocr_mode="auto"):
                     result["verified"] += document["metadata_status"] == "verified"
                     status = "verified"
                     provider = "arXiv" if record["provider"].lower() == "arxiv" else "Crossref"
-                    message = f"Verified using {provider}."
+                    message = f"Verified using {provider}" + (f"; {kept}." if kept else ".")
                 elif errors and not cancel.is_set():
                     status, message = "failed", "Local data kept. " + "; ".join(errors)
                     result["errors"].append({"document_id": document_id, "error": "; ".join(errors)})
                 else:
                     message += " No unique online record could be corroborated; review the extracted values."
-            if cancel.is_set() and document["metadata_status"] != "corrected":
+            if cancel.is_set():
                 status, message = "cancelled", "Local data kept; online lookup was cancelled."
-            if document["metadata_status"] == "corrected":
-                result["preserved"] += 1
-                status, message = "preserved", "Manual corrections preserved."
+            if status != "verified" and kept:
+                message += f" {kept[0].upper() + kept[1:]}."
+            result["preserved"] += bool(manual_fields(document))
             document = library.record_metadata_refresh(document_id, status, message)
         except Exception as error:
             result["errors"].append({"document_id": document_id, "error": str(error)})

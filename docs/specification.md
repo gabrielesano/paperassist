@@ -158,7 +158,8 @@ Allow selecting multiple papers and explicitly refreshing their metadata or the
 entire library, including papers hidden by a search. Run refreshes in cancellable
 background jobs with progress and per-paper failures. Jobs keep running when a
 paper is opened or the Library window is hidden or closed. Reread immutable
-originals, preserve manual corrections, notes, reading positions and saved PDF revisions,
+originals, preserve the fields the user corrected (each field separately, so a refresh may still
+fill the others), notes, reading positions and saved PDF revisions,
 and optionally fetch fresh arXiv or Crossref metadata using the configured source
 switches. Use explicit identifiers first, then bounded title/author searches with
 independent corroboration. Provider failures must not prevent a successful

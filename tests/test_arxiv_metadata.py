@@ -84,10 +84,13 @@ class ArxivMetadataTests(unittest.TestCase):
         get.assert_called_once()
         self.assertEqual(parse_qs(urlsplit(get.call_args.args[0]).query)["id_list"], ["2610.12345v1,2610.12346"])
 
-    def test_disabled_corrected_cancelled_and_unsearchable_papers_make_no_requests(self):
+    def test_a_corrected_paper_is_looked_up_with_its_current_values(self):
+        record, _ = self.lookup(self.document(metadata_status="corrected"), feed(entry()))
+        self.assertEqual(record["arxiv_id"], "2610.12345v1")
+
+    def test_disabled_cancelled_and_unsearchable_papers_make_no_requests(self):
         cancel = threading.Event()
         for document, cfg in ((self.document(), Settings({"enabled": {"arxiv": False}})),
-                              (self.document(metadata_status="corrected"), Settings()),
                               (self.document(identifiers=(), authors=""), Settings()),
                               (self.document(identifiers=tuple(f"2610.{n:05}" for n in range(6))), Settings())):
             with patch("paperassist.arxiv_metadata.retrieval._get") as get:

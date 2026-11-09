@@ -11,6 +11,7 @@ import sqlite3
 from pypdf import PdfReader
 
 from paperassist.citation import SURNAME, describe, fold, pdf_name, publication as _publication, surnames
+from paperassist.library import manual_fields
 from paperassist.retrieval import identify, search_urls
 
 DOI = re.compile(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', re.I)
@@ -569,7 +570,8 @@ def _resolve(library, document_id, payload, documents):
                     continue
                 authors = fold(d.get('authors') or '')
                 in_metadata = re.search(r'(?<!\w)' + re.escape(author) + r'(?!\w)', authors)
-                if d.get('metadata_status') == 'corrected' and authors and not in_metadata:
+                # Authors the user typed outrank the printed header; extracted ones do not.
+                if 'authors' in manual_fields(d) and authors and not in_metadata:
                     continue
                 if d.get('year') and str(d['year']) != fingerprint[3]:
                     continue

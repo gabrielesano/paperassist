@@ -65,7 +65,7 @@ def _queries(document, titles, printed):
 
 def lookup(document, cfg, cancel, fresh=True):
     """Return one corroborated record; a title search alone never verifies identity."""
-    if not cfg.enabled("crossref") or document.get("metadata_status") == "corrected" or cancel.is_set():
+    if not cfg.enabled("crossref") or cancel.is_set():
         return None
     titles = _titles(document)
     printed = document.get("metadata", {}).get("candidates", {}).get("publication", [])

@@ -10,7 +10,7 @@ from unittest import mock
 
 from pypdf import PdfWriter
 
-from paperassist.library import Library, safe_filename
+from paperassist.library import Library, manual_fields, safe_filename
 from paperassist.metadata import PARSER_VERSION
 
 
@@ -20,6 +20,14 @@ def pdf():
     stream = io.BytesIO()
     writer.write(stream)
     return stream.getvalue()
+
+
+def confirm(library, document_id, status, **values):
+    """Put a paper in a status without recording a user correction."""
+    values = {**values, 'metadata_status': status}
+    with library._connect() as db:
+        db.execute('UPDATE documents SET ' + ', '.join(f'{key} = ?' for key in values) + ' WHERE id = ?',
+                   (*values.values(), document_id))
 
 
 class LibraryTests(unittest.TestCase):
@@ -54,7 +62,7 @@ class LibraryTests(unittest.TestCase):
     def test_search_matches_displayed_review_labels_and_preserves_raw_status_queries(self):
         doc = self.library.import_stream(io.BytesIO(self.payload), 'unidentified.pdf')
         for status in ('needs_review', 'incomplete', 'corrected', 'verified'):
-            self.library.update_metadata(doc['id'], {'title': 'Unidentified paper'}, status=status)
+            confirm(self.library, doc['id'], status, title='Unidentified paper')
             with self.subTest(status=status):
                 for query in ('Needs review', 'Metadata needs review', '  NEEDS REVIEW  '):
                     expected = [doc['id']] if status in ('needs_review', 'incomplete') else []
@@ -208,14 +216,16 @@ class VerifiedMetadataTests(unittest.TestCase):
         self.assertEqual(duplicate['metadata']['verified'], doc['metadata']['verified'])
         self.assertEqual(duplicate['metadata']['sources'], doc['metadata']['sources'])
 
-    def test_duplicate_download_keeps_user_corrections(self):
+    def test_duplicate_download_keeps_user_corrections_and_fills_the_rest(self):
         first = self.library.import_stream(io.BytesIO(self.payload), 'mine.pdf')
         self.library.update_metadata(first['id'], {'title': 'My title', 'year': 2020})
         duplicate = self.library.import_stream(io.BytesIO(self.payload), 'Rappazzo_2013_ApJ_771_76.pdf')
         self.assertTrue(duplicate['duplicate'])
         document = self.library.apply_verified(duplicate['id'], self.record, 'Rappazzo_2013_ApJ_771_76.pdf')
-        self.assertEqual((document['title'], document['year'], document['doi'], document['filename'], document['metadata_status']),
-                         ('My title', 2020, None, 'mine.pdf', 'corrected'))
+        self.assertEqual((document['title'], document['year'], document['filename'], document['metadata_status']),
+                         ('My title', 2020, 'mine.pdf', 'verified'))
+        self.assertEqual((document['authors'], document['doi']), (self.record['authors'], self.record['doi']))
+        self.assertEqual(document['metadata']['manual'], ['title', 'year'])
 
     def test_verified_record_replaces_extracted_pdf_properties(self):
         writer = PdfWriter()
@@ -340,7 +350,7 @@ class ReadableNameTests(unittest.TestCase):
             doc = self.library.apply_verified(doc['id'], self.record)
         self.assertEqual((doc['stored_name'], doc['metadata_status']), (old, 'verified'))
         self.assertEqual(self.library.get_path(doc['id'], False).read_bytes(), self.payload)
-        self.library.update_metadata(doc['id'], {'title': 'Nanoflares'}, status='corrected')
+        self.library.update_metadata(doc['id'], {'title': 'Nanoflares'})
         self.assertEqual(self.library.get_document(doc['id'])['stored_name'], 'Rappazzo_2013_ApJ_771_76.pdf')
 
     def test_failed_database_update_puts_the_file_back(self):
@@ -470,7 +480,10 @@ class OcrMetadataTests(unittest.TestCase):
         for status in ('corrected', 'verified'):
             with self.subTest(status=status):
                 other = self.library.import_stream(io.BytesIO(pdf() + status.encode()), status + '.pdf')
-                self.library.update_metadata(other['id'], {'title': 'Confirmed title', 'authors': 'Confirmed Author'}, status=status)
+                if status == 'corrected':
+                    self.library.update_metadata(other['id'], {'title': 'Confirmed title', 'authors': 'Confirmed Author'})
+                else:
+                    confirm(self.library, other['id'], status, title='Confirmed title', authors='Confirmed Author')
                 kept = self.library.apply_ocr_metadata(other['id'], self.EXTRACTED, self.REPORT)
                 self.assertEqual((kept['title'], kept['authors'], kept['metadata_status']),
                                  ('Confirmed title', 'Confirmed Author', status))
@@ -490,3 +503,131 @@ class OcrMetadataTests(unittest.TestCase):
         self.assertEqual(original.read_bytes(), before)
         self.assertEqual(done['revision'], 0)
 
+
+
+class ManualFieldTests(unittest.TestCase):
+    """The user's corrections protect only the fields they changed."""
+    EXTRACTED = {'title': 'Fresh extracted title', 'authors': 'Fresh Author', 'year': 2012}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.library = Library(Path(self.tmp.name) / 'library')
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.add_metadata({'/Title': 'Original title', '/Author': 'Original Author'})
+        stream = io.BytesIO()
+        writer.write(stream)
+        self.doc = self.library.import_stream(io.BytesIO(stream.getvalue()), 'paper.pdf')
+        self.record = {'provider': 'crossref', 'title': 'Provider title', 'authors': 'Provider Author',
+                       'year': 2013, 'doi': '10.1234/provider', 'first_author': 'Author'}
+
+    def reread(self, document_id=None):
+        with mock.patch('paperassist.library.extract_metadata', return_value={**self.library.get_document(self.doc['id'])['metadata'], **self.EXTRACTED}):
+            return self.library.refresh_metadata(document_id or self.doc['id'])
+
+    def test_saving_unchanged_values_records_nothing(self):
+        form = {key: self.doc[key] for key in ('title', 'authors', 'year', 'doi')}
+        done = self.library.update_metadata(self.doc['id'], form)
+        self.assertEqual((done['metadata_status'], done['stored_name']), ('needs_review', self.doc['stored_name']))
+        self.assertNotIn('manual', done['metadata'])
+        self.assertEqual(done['metadata']['sources'], self.doc['metadata']['sources'])
+        # Whitespace and an empty year or DOI are not changes either.
+        done = self.library.update_metadata(self.doc['id'], {**form, 'title': ' Original title ', 'year': '', 'doi': ''})
+        self.assertEqual(done['metadata_status'], 'needs_review')
+
+    def test_only_changed_fields_become_manual_and_accumulate(self):
+        form = {key: self.doc[key] for key in ('title', 'authors', 'year', 'doi')}
+        done = self.library.update_metadata(self.doc['id'], {**form, 'title': 'My title'})
+        self.assertEqual((done['metadata_status'], done['metadata']['manual']), ('corrected', ['title']))
+        self.assertEqual(done['metadata']['sources']['title'], 'manual')
+        self.assertEqual(done['metadata']['sources']['authors'], 'pdf_info')
+        done = self.library.update_metadata(self.doc['id'], {**form, 'title': 'My title', 'year': '2020'})
+        self.assertEqual((done['metadata']['manual'], done['year']), (['title', 'year'], 2020))
+
+    def test_clearing_a_field_is_a_correction_that_stays_empty(self):
+        self.library.update_metadata(self.doc['id'], {'doi': '10.1234/wrong'})
+        done = self.library.update_metadata(self.doc['id'], {'doi': ''})
+        self.assertEqual((done['doi'], done['work_id'], done['metadata']['manual']), (None, None, ['doi']))
+        done = self.library.apply_verified(self.doc['id'], self.record, refresh=True)
+        self.assertIsNone(done['doi'])
+        self.assertEqual((done['title'], done['metadata_status']), ('Provider title', 'verified'))
+
+    def test_legacy_corrections_are_inferred_from_what_automatic_evidence_cannot_explain(self):
+        metadata = {'title': 'Extracted', 'authors': 'Extracted Author', 'year': 2012,
+                    'verified': {'provider': 'crossref', 'doi': '10.1234/x'}}
+        def legacy(**values):
+            return {'metadata_status': 'corrected', 'metadata': metadata,
+                    **{'title': 'Extracted', 'authors': 'Extracted Author', 'year': 2012, 'doi': '10.1234/x'}, **values}
+        self.assertEqual(manual_fields(legacy()), [])
+        self.assertEqual(manual_fields(legacy(title='Typed', year=None, doi=None)), ['title'])
+        self.assertEqual(manual_fields(legacy(authors='Typed', year=1999, doi='10.1234/y')), ['authors', 'year', 'doi'])
+        self.assertEqual(manual_fields(legacy(authors='')), [])  # a gap is not a correction
+        self.assertEqual(manual_fields({**legacy(title='Typed'), 'metadata_status': 'needs_review'}), [])
+        self.assertEqual(manual_fields({**legacy(), 'metadata': {**metadata, 'manual': ['year']}}), ['year'])
+
+    def make_legacy(self, **values):
+        """A corrected paper saved before fields were recorded."""
+        values = {**values, 'metadata_status': 'corrected'}
+        with self.library._connect() as db:
+            db.execute('UPDATE documents SET ' + ', '.join(f'{key} = ?' for key in values) + ' WHERE id = ?',
+                       (*values.values(), self.doc['id']))
+
+    def test_legacy_inference_is_persisted_before_a_reread_replaces_its_evidence(self):
+        self.make_legacy(title='Typed title')
+        done = self.reread()
+        self.assertEqual((done['title'], done['authors'], done['year']), ('Typed title', 'Fresh Author', 2012))
+        self.assertEqual((done['metadata_status'], done['metadata']['manual']), ('corrected', ['title']))
+        self.assertEqual(done['metadata']['title'], 'Fresh extracted title')
+        again = self.reread()
+        self.assertEqual((again['title'], again['metadata']['manual']), ('Typed title', ['title']))
+
+    def test_a_legacy_paper_without_unexplained_values_returns_to_review_and_is_refreshed(self):
+        self.make_legacy()  # title and authors still equal the PDF properties
+        done = self.reread()
+        self.assertEqual((done['metadata_status'], done['title'], done['authors']),
+                         ('needs_review', 'Fresh extracted title', 'Fresh Author'))
+        self.assertEqual(done['metadata'].get('manual', []), [])
+
+    def test_a_reread_replaces_only_unprotected_fields_and_a_cleared_year_stays_cleared(self):
+        self.library.update_metadata(self.doc['id'], {'title': 'My title', 'year': 2000})
+        self.library.update_metadata(self.doc['id'], {'year': ''})
+        done = self.reread()
+        self.assertEqual((done['title'], done['authors'], done['year']), ('My title', 'Fresh Author', None))
+        self.assertEqual((done['metadata_status'], done['metadata']['sources']['title']), ('corrected', 'manual'))
+
+    def test_ocr_fills_gaps_but_never_the_users_fields(self):
+        extracted = {'title': 'OCR title', 'authors': 'OCR Author', 'year': 2005, 'sources': {}, 'header_text': 'x'}
+        scan = self.library.import_stream(io.BytesIO(pdf()), 'scan.pdf')
+        self.library.update_metadata(scan['id'], {'title': 'My title', 'authors': 'Typed Author'})
+        self.library.update_metadata(scan['id'], {'authors': ''})
+        done = self.library.apply_ocr_metadata(scan['id'], extracted, {'status': 'completed'})
+        self.assertEqual((done['title'], done['authors'], done['year']), ('My title', '', 2005))
+        self.assertEqual(done['metadata']['manual'], ['title', 'authors'])
+
+    def test_a_verified_record_fills_only_unprotected_fields_and_keeps_the_record_of_corrections(self):
+        self.library.update_metadata(self.doc['id'], {'title': 'My title'})
+        done = self.library.apply_verified(self.doc['id'], self.record, refresh=True)
+        self.assertEqual((done['title'], done['authors'], done['year'], done['doi'], done['metadata_status']),
+                         ('My title', 'Provider Author', 2013, '10.1234/provider', 'verified'))
+        self.assertEqual(done['metadata']['manual'], ['title'])
+        self.assertEqual((done['metadata']['sources']['title'], done['metadata']['sources']['doi']), ('manual', 'crossref'))
+        self.assertEqual(self.library.find_by_doi('10.1234/provider')[0]['id'], done['id'])
+        # A protected DOI is not replaced, and the work stays the one the user chose.
+        self.library.update_metadata(self.doc['id'], {'doi': '10.1234/mine'})
+        done = self.library.apply_verified(self.doc['id'], self.record, refresh=True)
+        self.assertEqual(done['doi'], '10.1234/mine')
+        self.assertEqual(self.library.find_by_doi('10.1234/mine')[0]['id'], done['id'])
+
+    def test_an_unprotected_doi_change_moves_the_paper_to_the_new_work(self):
+        self.library.apply_verified(self.doc['id'], self.record)
+        first = self.library.get_document(self.doc['id'])['work_id']
+        done = self.library.apply_verified(self.doc['id'], {**self.record, 'doi': '10.1234/newer'}, refresh=True)
+        self.assertNotEqual(done['work_id'], first)
+        self.assertEqual([d['id'] for d in self.library.find_by_doi('10.1234/newer')], [done['id']])
+        self.assertEqual(self.library.find_by_doi('10.1234/provider'), [])
+
+    def test_the_readable_name_prefers_typed_authors_to_the_providers_first_author(self):
+        self.library.update_metadata(self.doc['id'], {'authors': 'Typed Surname'})
+        done = self.library.apply_verified(self.doc['id'], self.record, refresh=True)
+        self.assertTrue(done['stored_name'].startswith('Surname_2013'), done['stored_name'])

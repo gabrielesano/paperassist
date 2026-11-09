@@ -126,7 +126,7 @@ def lookup(document, cfg, cancel, *, fresh=True):
     identifiers need a matching title and available author evidence. A search
     without identifiers always needs both title and first-author agreement.
     """
-    if not cfg.enabled("arxiv") or document.get("metadata_status") == "corrected" or cancel.is_set():
+    if not cfg.enabled("arxiv") or cancel.is_set():
         return None
     metadata = document.get("metadata", {})
     candidates = metadata.get("candidates", {})
