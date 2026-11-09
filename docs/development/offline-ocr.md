@@ -150,14 +150,18 @@ Automated (Linux, Python 3.14, Tesseract 5.5.3 with `eng` and `ita`):
 timeouts, cache reuse and invalidation, missing engine/language, TSV
 validation, rotated page, spaces and Unicode in paths, unchanged source hash,
 and mock probe coverage verifying 4.1.1, 5.x, and 6.0 are accepted and
-cacheable while 4.0 and 3.05 are rejected; 4.1 verification is through the test
-fakes unless a 4.1 binary is installed),
+cacheable while 4.0 and 3.05 are rejected),
 `tests/test_metadata.py` (title/author/year/DOI rules), `tests/test_library.py`
 (provenance, protection of corrected/verified values) and
 `tests/test_metadata_refresh.py` (modes, ordering, no HTTP, failures, cancel).
 Tests that need Tesseract skip when it is missing. Full suite: 824 tests, OK
 (8 skipped, none of them OCR tests on this host); `node --test`: 61 passed.
 The OCR tests take about 7 s.
+
+Tesseract 4.1.1 (2026-11-09): the stock `tesseract-ocr` package of an Ubuntu 22.04
+container, invoked through a `PATH` wrapper by `ocr.recover` from a Linux source
+checkout, was reported as ready (version 4.1.1 with `eng` listed) and recovered the title and both authors of a 1982 ADS page scan
+from a path containing a space in 2.6 s.
 
 Real scans (ADS page scans from a private library, copied read-only to a
 disposable library; nothing committed), `refresh_metadata(online=False, ocr="auto")`:

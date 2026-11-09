@@ -17,6 +17,14 @@ readiness still requires the checks below.
 2. Extend standalone builds and PDF associations to further OS/architecture
    targets. Retire the web interface, HTTP server and pywebview host through a
    deliberate transition ([desktop plan](development/desktop-plan.md)).
+3. Bundle a minimal Tesseract 5 so [offline OCR](development/offline-ocr.md) works
+   without external dependencies. Build only what PaperAssist uses: the engine
+   reading the grayscale PGM pages it renders and writing TSV, Leptonica without
+   optional image codecs, and the English LSTM model. Build it from source on each
+   release host (the Linux baseline, Ubuntu 22.04, ships only 4.1), add its
+   licenses to the third-party notices, and prefer the bundled engine over a system
+   one. Record the size added per platform, and accept it only after a frozen
+   bundle recovers a scan on clean hosts without a system Tesseract.
 
 ## Regression acceptance sequence
 
@@ -31,7 +39,7 @@ readiness still requires the checks below.
 
 ## Later extensions
 
-OCR, external-file indexing, broader citation-format coverage, advanced search,
+An OCR text layer for search and selection, external-file indexing, broader citation-format coverage, advanced search,
 annotation export and bibliographic integrations follow actual observed needs.
 A Rust implementation stays deferred; see the [native stack decision](development/native-stack.md).
 LLMs are not used for importing or organizing the local collection.
