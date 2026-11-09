@@ -8,15 +8,20 @@ from urllib.parse import unquote
 
 from pypdf import PdfReader
 
+from .citation import printed_references
+
 DOI = re.compile(r"10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+", re.I)
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 ARXIV_ID = r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?"
 ARXIV = re.compile(rf"(?:\barxiv\s*:\s*|https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/)({ARXIV_ID})", re.I)
 GENERIC = re.compile(r"(?:download|document|file|untitled|unknown)(?:[\s_()-]*\d+[\s_()-]*)?|[\d_.-]+(?:v\d+)?|[a-f\d]{16,}", re.I)
 BOILERPLATE = re.compile(
     r"arxiv|doi\s*:|https?://|abstract|journal|copyright|©|typeset|latex|preprint|received|accepted|"
     r"university|università|department|institute|laboratory|college|conference|proceedings|"
-    r"correspondence|contribut(?:ed|ion)|project page|\b20\d{2}\b", re.I)
+    r"correspondence|contribut(?:ed|ion)|project page|rights reserved|printed in|\b20\d{2}\b", re.I)
+# Values that PDF producers put in the Author field instead of a person.
+NOT_A_PERSON = re.compile(r"publish|elsevier|springer|\b(?:ieee|ltd|llc|admin|user|owner|unknown|pdf)\b|copyright|journal|"
+                          r"administrator|microsoft|adobe|latex|acrobat", re.I)
 PERSON = re.compile(r"(?:[A-Z][a-z]+|[A-Z]\.)(?:\s+(?:[A-Z][a-z]+|[A-Z]\.)){1,3}")
 
 
@@ -24,6 +29,17 @@ def useful(value: str) -> bool:
     value = value.strip()
     return bool(value and len(value) >= 4 and not GENERIC.fullmatch(value) and not re.fullmatch(
         r"(?:untitled|unknown|none|microsoft word.*|document\d*|[^ ]+\.(?:pdf|e?ps|dvi|tex|docx?)|\d{4}[A-Za-z&.]{3,}\d.*)", value, re.I))
+
+
+def _personal_names(value):
+    """Drop timestamps, paths, e-mail addresses, publishers and a lone lowercase login name.
+
+    An empty author lets the lookups fall back on the first-page header instead of
+    comparing a record's author with text that was never a name.
+    """
+    first = re.split(r"[,;&]|\band\b", value, maxsplit=1, flags=re.I)[0].strip()
+    junk = re.search(r"[\d@/\\:]", value) or NOT_A_PERSON.search(value) or not first or (" " not in first and first.islower())
+    return "" if junk else value
 
 
 def _header(text):
@@ -111,6 +127,8 @@ def _header_authors(lines, title):
         if not parts or any(not 2 <= len(part.split()) <= 5 or
                             any(not name.fullmatch(word) for word in part.split()) or
                             not any(char.isupper() for char in part) or re.search(r"\b[A-Z]\.$", part)
+                            # Capitals without an initial are the next line of a title set in capitals.
+                            or part.isupper() and not re.search(r"\b[A-Z]\.", part)
                             for part in parts if part):
             continue
         # Every non-particle word starts with a capital; this excludes ordinary body prose.
@@ -253,7 +271,11 @@ def extract_metadata(path: Path, filename: str) -> dict:
     title = str(info.title or "").strip() if info else ""
     authors = str(info.author or "").strip() if info else ""
     title = title if useful(title) else ""
-    authors = authors if useful(authors) else ""
+    # A stamp in the Author field leaves authors empty, and the header is not parsed for them:
+    # a partial parse of a damaged author block can name the wrong first author, while an
+    # empty field lets the lookups read the header themselves.
+    stamped = bool(authors) and useful(authors) and not _personal_names(authors)
+    authors = "" if stamped else authors if useful(authors) else ""
     sources = {"title": "pdf_info" if title else "filename", "authors": "pdf_info" if authors else None}
     identifier_sources = {"doi": {}, "arxiv": {}}
 
@@ -288,12 +310,14 @@ def extract_metadata(path: Path, filename: str) -> dict:
                 else:
                     title = ""
             if not authors and xmp.dc_creator:
-                authors = ", ".join(xmp.dc_creator)
-                sources["authors"] = "xmp"
+                authors = ", ".join(xmp.dc_creator).strip(" ,")
+                if authors and not _personal_names(authors):
+                    authors, stamped = "", True
+                sources["authors"] = "xmp" if authors else None
     except Exception:
         pass
     identifiers(Path(filename).stem, "filename", bare=True)
-    candidates = {"doi": [], "arxiv": [], "title": [], "year": []}
+    candidates = {"doi": [], "arxiv": [], "title": [], "year": [], "publication": []}
     text_status = "unavailable"
     header_text = ""
     year = None
@@ -319,7 +343,7 @@ def extract_metadata(path: Path, filename: str) -> dict:
             if not title and GENERIC.fullmatch(Path(filename).stem) and prominent:
                 title, sources["title"] = prominent, "first_page_typography"
             identifiers(text, "first_page")
-            if not authors:
+            if not authors and not stamped:
                 authors = _header_authors(lines, title or prominent)
                 if authors:
                     sources["authors"] = "first_page_authors"
@@ -329,6 +353,7 @@ def extract_metadata(path: Path, filename: str) -> dict:
             candidates = {
                 "doi": [], "arxiv": [],
                 "title": title_lines[:3],
+                "publication": printed_references(lines[:8]),
                 "year": sorted({int(y) for y in re.findall(r"\b(?:19|20)\d{2}\b", text[:10000])}),
             }
             text_status = "extracted"

@@ -75,6 +75,90 @@ class CrossrefMetadataTests(unittest.TestCase):
         self.doc["metadata"]["header_text"] = self.doc["title"]
         self.assertIsNone(self.search(self.item())[0])
 
+    def test_author_formats_with_initials_match_the_first_author_surname(self):
+        for authors, family in (("Kohutova P., Verwichte E.", "Kohutova"), ("S.P. Moschou et al.", "Moschou"),
+                                ("Jerčić V., Keppens R.", "Jerčić"), ("van der Voort L. R.", "van der Voort"),
+                                ("van der Voort L. R.", "Voort"), ("P. Antolin, K. Shibata", "Antolin")):
+            with self.subTest(authors=authors):
+                self.doc["authors"] = authors
+                self.assertIsNotNone(self.search(self.item(author=[{"given": "X", "family": family}]))[0])
+        self.doc["authors"] = "Kohutova P., Verwichte E."
+        for family in ("Verwichte", "Smith", "Kohut"):
+            with self.subTest(family=family):
+                self.assertIsNone(self.search(self.item(author=[{"given": "X", "family": family}]))[0])
+
+    def test_header_author_survives_title_candidates_that_include_the_author_line(self):
+        author_line = "Patrick Antolin,1 Paolo Pagano,1 Ineke De Moortel,1 and Valery Nakariakov2"
+        self.doc["authors"] = ""
+        self.doc["metadata"].update(header_text=f"{self.doc['title']}\n{author_line}\nSchool of Mathematics")
+        self.doc["metadata"]["candidates"]["title"] = [author_line]
+        antolin = {"author": [{"given": "Patrick", "family": "Antolin"}]}
+        self.assertIsNotNone(self.search(self.item(**antolin))[0])
+        self.assertIsNone(self.search(self.item(author=[{"given": "Grace", "family": "Hopper"}]))[0])
+
+    def test_title_split_across_lines_or_glued_matches_only_with_the_author_and_a_long_enough_title(self):
+        record = "The evaporation of spherical clouds in a hot gas. I - Classical and saturated mass loss rates"
+        self.doc.update(title="THE EVAPORATION OF SPHERICAL CLOUDS IN A HOT GAS. I.", authors="Lennox L. Cowie; Christopher F. McKee")
+        self.doc["metadata"].update(header_text="THE EVAPORATION OF SPHERICAL CLOUDS IN A HOT GAS. I.\nCLASSICAL AND SATURATED MASS LOSS RATES\n"
+                                                "Lennox L. Cowie")
+        cowie = self.item(DOI="10.1086/154911", title=[record], author=[{"given": "Lennox", "family": "Cowie"}])
+        part_two = self.item(DOI="10.1086/155350", title=["The evaporation of spherical clouds in a hot gas. II. Effects of radiation"],
+                             author=[{"given": "Christopher", "family": "McKee"}])
+        self.assertEqual(self.search(part_two, cowie)[0]["doi"], "10.1086/154911")
+        self.assertIsNone(self.search(part_two)[0])
+        self.assertIsNone(self.search(self.item(**{**cowie, "author": [{"given": "Bob", "family": "Smith"}]}))[0])
+        glued = dict(authors="", title="aspectsofcoronalheating. P h i l .T r a n s")
+        self.doc.update(glued)
+        self.doc["metadata"]["header_text"] = "Citethisarticle: KlimchukJA.2015Key\naspectsofcoronalheating.\nJamesA.Klimchuk"
+        self.doc["metadata"]["candidates"]["title"] = ["We highlight 10 key aspects of coronal heating that"]
+        klimchuk = self.item(title=["Key aspects of coronal heating"], author=[{"given": "James", "family": "Klimchuk"}])
+        self.assertIsNotNone(self.search(klimchuk)[0])
+        self.assertIsNone(self.search(self.item(title=["Key aspects of coronal heating"], author=[{"given": "A", "family": "Other"}]))[0])
+        self.doc["metadata"]["header_text"] = "Thermal instability\nGeorge B. Field"  # 18 squashed characters
+        short = self.item(title=["Thermal instability"], author=[{"given": "George", "family": "Field"}])
+        self.doc.update(title="A long unrelated working title here", authors="")
+        self.assertIsNone(self.search(short)[0])
+
+    def test_a_title_ending_in_a_numeral_does_not_match_inside_the_next_part_of_a_series(self):
+        self.doc.update(title="CORONAL CLOSED STRUCTURES. IV. HYDRODYNAMICAL STABILITY", authors="")
+        self.doc["metadata"]["header_text"] = "CORONAL CLOSED STRUCTURES. IV. HYDRODYNAMICAL STABILITY\nG. Peres"
+        peres = {"author": [{"given": "G.", "family": "Peres"}]}
+        self.assertIsNone(self.search(self.item(title=["Coronal closed structures. I"], **peres))[0])
+        self.assertIsNotNone(self.search(self.item(title=["Coronal closed structures. IV. Hydrodynamical stability"], **peres))[0])
+
+    def test_surname_that_is_part_of_an_unlocatable_title_is_not_author_evidence(self):
+        self.doc.update(title="Lovelace engines and the cooling of loops", authors="")
+        self.doc["metadata"]["header_text"] = "Lovelace-engines&the cooling of loops: a review\nAnonymous"
+        self.assertIsNone(self.search(self.item(title=[self.doc["title"]]))[0])
+
+    def reference(self, **changes):
+        return self.item(**{"DOI": "10.1086/161956", "title": ["On coronal oscillations"], "author": [{"given": "B.", "family": "Roberts"}],
+                            "container-title": ["The Astrophysical Journal"], "volume": "279", "page": "857",
+                            "issued": {"date-parts": [[1984]]}, **changes})
+
+    def printed_document(self, header="The Astrophysical Journal, 279:857-865, 1984 April 15\nB. Roberts and P. M. Edwin"):
+        self.doc.update(title="Roberts1984", authors="")
+        self.doc["metadata"].update(header_text=header, candidates={"title": [], "doi": [], "publication": [["APJ", "279", "857", "1984"]]})
+
+    def test_printed_journal_reference_with_the_first_author_identifies_a_paper_without_a_title(self):
+        self.printed_document()
+        result, get = self.search(self.reference())
+        self.assertEqual(result["doi"], "10.1086/161956")
+        query = parse_qs(urlsplit(get.call_args.args[0]).query)
+        self.assertEqual(query["query.bibliographic"], ["Astrophysical Journal 279 857"])
+        self.assertEqual(query["filter"], ["from-pub-date:1983,until-pub-date:1985"])
+
+    def test_printed_journal_reference_never_accepts_a_wrong_page_volume_author_or_journal(self):
+        self.printed_document()
+        for changes in ({"page": "858"}, {"volume": "280"}, {"container-title": ["Monthly Notices of the Royal Astronomical Society"]}):
+            with self.subTest(changes=changes):
+                self.assertIsNone(self.search(self.reference(**changes))[0])
+        self.assertIsNone(self.search(self.reference(author=[{"given": "A", "family": "Hollweg"}]))[0])
+        self.printed_document(header="The Astrophysical Journal, 279:857-865, 1984 April 15\nDepartment of Applied Mathematics")
+        self.assertIsNone(self.search(self.reference())[0])
+        self.printed_document(header="")
+        self.assertIsNone(self.search(self.reference())[0])
+
     def test_series_numbers_and_ambiguous_identifiers_are_rejected(self):
         self.doc["title"] += " II"
         self.assertIsNone(self.search(self.item(title=["The cooling of coronal loops I"]))[0])

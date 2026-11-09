@@ -1,6 +1,7 @@
 import unittest
 
-from paperassist.citation import describe, generic_publication, journal_code, pdf_name, publication, same_surname, surnames
+from paperassist.citation import (describe, first_surname, generic_publication, journal_code, pdf_name, printed_references,
+                                  publication, same_surname, surnames)
 
 
 class CitationTests(unittest.TestCase):
@@ -48,6 +49,32 @@ class CitationTests(unittest.TestCase):
         self.assertFalse(same_surname('Reale', 'Real'))
         self.assertEqual(surnames('Török, T., Kliem, B., & Van der Linden, R. A. M. 2004, A&A'),
                          ['Török', 'Kliem', 'Van der Linden'])
+
+    def test_first_surname_reads_every_common_author_format(self):
+        cases = {
+            'Kohutova P., Verwichte E.': 'Kohutova', 'Dere K. P., Landi E., Mason H. E.': 'Dere',
+            'S.P. Moschou et al.': 'Moschou', 'Kohutova, P., Verwichte, E.': 'Kohutova',
+            'Lennox L. Cowie; Christopher F. McKee': 'Cowie', 'P. M. EDWIN; B. ROBERTS': 'EDWIN',
+            'Jerčić V., Keppens R.': 'Jerčić', 'van der Voort L. R.': 'van der Voort',
+            'Aaron van den Oord, Oriol Vinyals': 'van den Oord', 'Müller D. A. N., Peter H.': 'Müller',
+            'Aaron Lou, Chenlin Meng': 'Lou', 'J.-L. Lions and R. Temam': 'Lions', 'Andrade Jr., J. S.': 'Andrade', '': '',
+        }
+        for authors, expected in cases.items():
+            with self.subTest(authors=authors):
+                self.assertEqual(first_surname(authors), expected)
+        self.assertTrue(same_surname('Kohutova', first_surname('Kohutova P., Verwichte E.')))
+        self.assertTrue(same_surname('Voort', first_surname('van der Voort L. R.')))
+        self.assertFalse(same_surname('Kohutova', first_surname('Verwichte E., Kohutova P.')))
+
+    def test_printed_references_need_journal_volume_and_first_page(self):
+        lines = ['1984ApJ. . .279. .857R', 'The Astrophysical Journal, 279:857-865, 1984 April 15', '19 91MNRAS.251. .379R',
+                 'Mon. Not. R. astr. Soc. (1991) 251, 379-390', '2013ApJ...771L..29F', 'THE ASTROPHYSICAL JOURNAL, 512:985\u00a8991, 1999 February 20']
+        self.assertEqual(printed_references(lines), [['APJ', '279', '857', '1984'], ['MNRAS', '251', '379', '1991'],
+                                                     ['APJL', '771', 'L29', '2013'], ['APJ', '512', '985', '1999']])
+        for line in ('The Astrophysical Journal, 1984 April 15', 'Received 1983 July 19; accepted 1983 October 5',
+                     '2015Key aspectsofcoronalheating', '1984Foo. . .279. .857R', 'Astrophysical Journal 1984'):
+            with self.subTest(line=line):
+                self.assertEqual(printed_references([line]), [])
 
     def test_pdf_names_are_ascii_and_fall_back_to_author_year(self):
         fingerprint = ['APJ', '771', '76', '2013']

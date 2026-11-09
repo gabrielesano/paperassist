@@ -14,7 +14,7 @@ JOURNALS = {
     'ApJS': ['ApJS', 'ApJ Suppl', 'Astrophys J Suppl', 'Astrophysical Journal Supplement',
              'Astrophysical Journal Supplement Series'],
     'AJ': ['AJ', 'Astron J', 'Astronomical Journal'],
-    'MNRAS': ['MNRAS', 'Mon Not R Astron Soc', 'Monthly Notices of the Royal Astronomical Society'],
+    'MNRAS': ['MNRAS', 'Mon Not R Astron Soc', 'Mon Not R astr Soc', 'Monthly Notices of the Royal Astronomical Society'],
     'SoPh': ['SoPh', 'Sol Phys', 'Solar Physics'],
     'Natur': ['Natur', 'Nature'],
     'Sci': ['Sci', 'Science'],
@@ -110,6 +110,27 @@ def generic_publication(text):
         return year, volume, page.upper(), journal.strip()
 
 
+# ADS bibcode, e.g. 1984ApJ...279..857R: journal and page are padded with dots, and scans
+# often print the dots with spaces ("1984ApJ. . .279. .857R"). Spaces are removed first.
+BIBCODE = re.compile(r'(?<!\d)((?:19|20)\d{2})([A-Za-z&]+?)\.+(\d+)([L]?)\.*(\d+)[A-Z]')
+
+
+def printed_references(lines):
+    """Fingerprints of the paper's own reference as a page header prints it, in order of appearance.
+
+    Only a complete journal, volume and first page count; a year alone or a journal name never does.
+    """
+    found = []
+    for line in lines:
+        line = unicodedata.normalize('NFKC', line)
+        candidates = [publication(line)]
+        if match := BIBCODE.search(line.replace(' ', '')):
+            year, journal, volume, letter, page = match.groups()
+            candidates.append(fingerprint(journal_code(journal), volume, letter + page, year))
+        found += [value for value in candidates if value and value not in found]
+    return found
+
+
 def journal_name(code):
     """Display code (an ADS bibstem) for a fingerprint journal."""
     return _DISPLAY[code]
@@ -130,6 +151,19 @@ def same_surname(a, b):
     """Equal surnames, tolerating a particle ("van", "De") kept by only one source."""
     a, b = fold(a), fold(b)
     return bool(a and b) and (a == b or a.endswith(' ' + b) or b.endswith(' ' + a))
+
+
+PARTICLES = {'van', 'von', 'de', 'der', 'den', 'del', 'della', 'di', 'da', 'du', 'dos', 'das', 'le', 'la', 'ter', 'ten', 'bin'}
+# A dotted run of initials ("P.", "K.P.", "J.-L.") not glued to a longer word.
+INITIALS = re.compile(r'(?<![^\W\d_])[^\W\d_]\.(?:-?[^\W\d_]\.)*')
+
+
+def first_surname(authors):
+    """Surname of the first author of "Surname I.", "I. Surname", "Surname, I." or "First Last" lists."""
+    first = re.split(r'[,;&]|\band\b', re.sub(r'\bet\s+al\b\.?', '', authors or '', flags=re.I), maxsplit=1, flags=re.I)[0]
+    words = [word for word in INITIALS.sub(' ', first).split() if not (len(word) == 1 and word.isupper() or word.lower() in ('jr', 'jr.', 'sr', 'sr.'))]
+    start = next((i for i, word in enumerate(words) if word.lower() in PARTICLES), len(words) - 1)
+    return ' '.join(words[start:])
 
 
 def surnames(raw):

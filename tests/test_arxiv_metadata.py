@@ -167,6 +167,30 @@ class ArxivMetadataTests(unittest.TestCase):
             record, _ = self.lookup(document, feed(entry(title=document["title"])))
             self.assertIsNone(record)
 
+    def test_author_formats_with_initials_and_surname_search_use_the_surname(self):
+        for authors, name in (("Lovelace A., Hopper G.", "Ada Lovelace"), ("A. Lovelace et al.", "Ada Lovelace"),
+                              ("van der Voort L. R.", "Luc Rouppe van der Voort"), ("Jerčić V.", "Vedad Jerčić")):
+            with self.subTest(authors=authors):
+                record, _ = self.lookup(self.document(authors=authors), feed(entry(author=name)))
+                self.assertIsNotNone(record)
+        record, _ = self.lookup(self.document(authors="Hopper G., Lovelace A."), feed(entry()))
+        self.assertIsNone(record)
+        record, get = self.lookup(self.document(identifiers=(), authors="Lovelace A."), feed(entry()))
+        self.assertIn('au:"Lovelace"', parse_qs(urlsplit(get.call_args.args[0]).query)["search_query"][0])
+
+    def test_header_author_survives_title_candidates_that_include_the_author_line(self):
+        author_line = "Ada Lovelace1, Grace Hopper1 and Alan Turing2"
+        document = self.document(authors="")
+        document["metadata"].update(header_text=f"Parallel models for text generation\n{author_line}",
+                                    candidates={"arxiv": ["2610.12345v1"], "title": [author_line]})
+        self.assertIsNotNone(self.lookup(document, feed(entry()))[0])
+        self.assertIsNone(self.lookup(document, feed(entry(author="Edsger Dijkstra")))[0])
+
+    def test_short_titles_are_not_matched_by_squashed_header_text(self):
+        document = self.document(title="download", authors="")
+        document["metadata"].update(sources={"title": "filename"}, header_text="Parallel models\nAda Lovelace")
+        self.assertIsNone(self.lookup(document, feed(entry(title="Parallel models")))[0])
+
     def test_fallback_skips_one_missing_page_and_never_requests_more_than_two(self):
         document = self.document(identifiers=("2610.12344", "2610.12345"))
         html = b'''<meta name="citation_title" content="Parallel models for text generation">

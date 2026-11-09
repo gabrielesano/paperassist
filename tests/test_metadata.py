@@ -215,6 +215,48 @@ class MetadataTests(unittest.TestCase):
             result = self.extract('\n'.join(lines), spans=spans)
             self.assertEqual(result['title'], first + ' ' + second)
 
+    def test_author_field_that_is_not_a_person_is_left_empty_and_the_header_is_not_guessed(self):
+        lines = ['Coronal rain as a marker for heating', 'P. Antolin, K. Shibata, and G. Vissers', 'Abstract']
+        for author in ('IOP Publishing 2010 May 14:0:0', 'spiro@bandit, /usrb/spiro/papers/new', 'cxia', 'bareford,,,',
+                       'C:\\Users\\someone', 'Windows User'):
+            with self.subTest(author=author):
+                info = SimpleNamespace(title='Coronal rain as a marker for heating', author=author, get={}.get)
+                result = self.extract('\n'.join(lines), info=info)
+                self.assertEqual(result['authors'], '')
+                self.assertIsNone(result['sources']['authors'])
+        xmp = SimpleNamespace(dc_identifier=[], dc_title={}, dc_creator=['jklimchuk'])
+        self.assertEqual(self.extract('\n'.join(lines), xmp=xmp)['authors'], '')
+
+    def test_real_author_fields_are_kept(self):
+        for author in ('Jerčić V., Jenkins J. M., Keppens R.', 'van der Voort L. R.', 'Reale F.', 'Klimchuk', 'P. M. EDWIN; B. ROBERTS'):
+            with self.subTest(author=author):
+                info = SimpleNamespace(title='A title of some length', author=author, get={}.get)
+                self.assertEqual(self.extract('', info=info)['authors'], author)
+
+    def test_title_lines_set_in_capitals_are_not_taken_for_authors(self):
+        lines = ['THREE-DIMENSIONAL MHD SIMULATIONS OF PROMINENCE OSCILLATIONS IN', 'A MAGNETIC FLUX ROPE',
+                 'Yu-Hao Zhou, C. Xia, R. Keppens and P. F. Chen', 'Abstract']
+        spans = [(lines[0], 720, 18), (lines[1], 699, 18), (lines[2], 665, 12), (lines[3], 640, 10)]
+        self.assertEqual(self.extract('\n'.join(lines), spans=spans)['authors'], 'Yu-Hao Zhou; C. Xia; R. Keppens; P. F. Chen')
+        lines = ['CORONAL CLOSED STRUCTURES. IV. HYDRODYNAMICAL STABILITY AND RESPONSE', 'TO HEATING PERTURBATIONS',
+                 'G. Peres, R. Rosner, S. Serio and G. S. Vaiana', 'Abstract']
+        spans = [(lines[0], 720, 18), (lines[1], 699, 18), (lines[2], 665, 12), (lines[3], 640, 10)]
+        self.assertEqual(self.extract('\n'.join(lines), spans=spans)['authors'], 'G. Peres; R. Rosner; S. Serio; G. S. Vaiana')
+
+    def test_printed_journal_reference_becomes_a_candidate_only_when_complete(self):
+        text = '1984ApJ. . .279. .857R\nThe Astrophysical Journal, 279:857-865, 1984 April 15\nON CORONAL OSCILLATIONS'
+        self.assertEqual(self.extract(text)['candidates']['publication'], [['APJ', '279', '857', '1984']])
+        reale = '19 91MNRAS.251. .379R\nMon. Not. R. astr. Soc. (1991) 251, 379-390'
+        self.assertEqual(self.extract(reale)['candidates']['publication'], [['MNRAS', '251', '379', '1991']])
+        for text in ('The Astrophysical Journal, 1984 April 15', 'Received 1983 July 19; accepted 1983 October 5',
+                     'Astrophysical Journal Letters, vol. 279'):
+            with self.subTest(text=text):
+                self.assertEqual(self.extract(text)['candidates']['publication'], [])
+
+    def test_copyright_lines_are_not_title_candidates(self):
+        text = '1999. The American Astronomical Society. All rights reserved. Printed in U.S.A.\nTHE DYNAMIC FORMATION OF CONDENSATIONS'
+        self.assertEqual(self.extract(text)['candidates']['title'], ['THE DYNAMIC FORMATION OF CONDENSATIONS'])
+
     def test_later_arxiv_revision_date_is_not_the_original_paper_year(self):
         for stamp, expected in [('arXiv:1312.3005v3 [cs.CL] 4 Mar 2014', None),
                                  ('arXiv:1312.3005v1 [cs.CL] 4 Dec 2013', 2013),

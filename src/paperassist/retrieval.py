@@ -265,6 +265,47 @@ def same_title(a, b):
     return min(map(len, heads)) >= 4 and _similar(*heads)
 
 
+MIN_SQUASHED_TITLE = 20
+
+
+def title_in_header(title, header):
+    """A title that line breaks or typesetting split differently still reads the same once spacing,
+    case and punctuation are dropped. Short titles are too generic to find that way."""
+    squashed = _squash(title)
+    if len(squashed) < MIN_SQUASHED_TITLE:
+        return False
+    # "... gas. I" must not match inside "... gas. II": a title ending in a numeral or a letter
+    # may not run on into one.
+    open_end = re.search(r'(?:^|[^a-z0-9])(?:[ivx]+|\d+|[a-z])\W*$', fold(_text(title)))
+    return re.search(re.escape(squashed) + (r'(?![ivx0-9])' if open_end else ''), _squash(header)) is not None
+
+
+def title_agrees(record_title, candidates, header):
+    return any(same_title(candidate, record_title) for candidate in candidates) or title_in_header(record_title, header)
+
+
+def surname_in_header(surname, header, title):
+    """The surname as a whole word of the first-page header, outside the record's own title.
+
+    Only the record's title is removed: the candidate title lines often include the author line.
+    A surname that is also a word of a title that cannot be located cleanly proves nothing.
+    Small-caps author names often extract as "H ANSTEEN", so the glued reading is tried as well.
+    """
+    words = lambda value: ' ' + ' '.join(re.findall(r'[^\W\d_]+', fold(value))) + ' '
+    name, own_title = words(surname), words(title)
+    if not name.strip():
+        return False
+    for text in (header, re.sub(r'\b([A-Z]) (?=[A-Z]{2,}\b)', r'\1', header)):
+        text = words(text)
+        if own_title.strip() and own_title in text:
+            text = text.replace(own_title, ' ')
+        elif name in own_title:
+            continue
+        if name in text:
+            return True
+    return False
+
+
 def _all_caps(text):
     letters = [c for c in text if c.isalpha()]
     return len(letters) >= 4 and not any(c.islower() for c in letters)

@@ -7,7 +7,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 
 from . import retrieval
-from .citation import fold, same_surname
+from .citation import first_surname, same_surname
 
 ID = re.compile(r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z]{2})?/\d{7})(?:v\d+)?", re.I)
 NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
@@ -89,28 +89,13 @@ def _titles(document):
 
 
 def _title_agrees(record, document, titles):
-    if any(retrieval.same_title(title, record["title"]) for title in titles):
-        return True
-    # Line breaks and typesetting often split a title differently from the provider.
-    squash = lambda value: re.sub(r"[\W_]+", "", fold(value))
-    title, header = squash(record["title"]), squash(document.get("metadata", {}).get("header_text", ""))
-    return len(title) >= 16 and title in header
+    return retrieval.title_agrees(record["title"], titles, document.get("metadata", {}).get("header_text", ""))
 
 
 def _author_agrees(record, document):
-    author = _first_author(document)
-    if author:
-        return same_surname(record["first_author"], author)
-    words = lambda value: " ".join(re.findall(r"[^\W\d_]+", fold(value)))
-    header = words(document.get("metadata", {}).get("header_text", ""))
-    for title in [record["title"], *_titles(document)]:
-        header = header.replace(words(title), " ")
-    surname = fold(record["first_author"])
-    return bool(surname and re.search(r"(?<!\w)" + re.escape(surname) + r"(?!\w)", header))
-
-
-def _first_author(document):
-    return re.split(r"[,;&]|\band\b", document.get("authors") or "", maxsplit=1, flags=re.I)[0].strip()
+    if document.get("authors"):
+        return same_surname(record["first_author"], first_surname(document["authors"]))
+    return retrieval.surname_in_header(record["first_author"], document.get("metadata", {}).get("header_text", ""), record["title"])
 
 
 def _identifiers(values, sources):
@@ -153,14 +138,14 @@ def lookup(document, cfg, cancel, *, fresh=True):
     if identifiers:
         params = {"id_list": ",".join(identifiers), "max_results": len(identifiers)}
     else:
-        author = _first_author(document)
+        author = first_surname(document.get("authors"))
         if not titles or not author:
             return None
         words = sorted({word for word in retrieval._words(titles[0]) if len(word) > 3 and word.isascii()},
                        key=lambda word: (-len(word), word))[:6]
         if len(words) < 2:
             return None
-        surname = re.sub(r'[^\w -]', "", author.split()[-1])
+        surname = re.sub(r'[^\w -]', "", author)
         params = {"search_query": " AND ".join([f'au:"{surname}"', *(f"ti:{word}" for word in words)]),
                   "max_results": 10}
     try:
