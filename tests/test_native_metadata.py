@@ -87,7 +87,14 @@ class CorrectionTests(MetadataCase):
     def test_fields_have_accessible_names(self):
         document, _ = self.add("a.pdf", 3)
         dialog = MetadataDialog(self.library, document)
-        self.assertEqual([f.accessibleName() for f in dialog.fields.values()], ["Title", "Authors", "Year", "DOI"])
+        self.assertEqual([f.accessibleName() for f in dialog.fields.values()], ["Title", "Tab name", "Authors", "Year", "DOI"])
+
+    def test_tab_name_can_be_edited_and_saved(self):
+        document, _ = self.add("a.pdf", 3)
+        dialog = MetadataDialog(self.library, document)
+        dialog.fields["label"].setText("My Nickname")
+        dialog.save()
+        self.assertEqual(self.library.get_document(document["id"])["label"], "My Nickname")
 
 
 class LibraryDialogTests(MetadataCase):

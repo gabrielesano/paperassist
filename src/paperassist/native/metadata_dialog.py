@@ -4,9 +4,11 @@ import re
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
 
+from paperassist.library import MAX_LABEL
+
 from .theme import APP_STYLE, ERROR_INK, serif_heading_font
 
-FIELDS = (("title", "Title"), ("authors", "Authors"), ("year", "Year"), ("doi", "DOI"))
+FIELDS = (("title", "Title"), ("label", "Tab name"), ("authors", "Authors"), ("year", "Year"), ("doi", "DOI"))
 
 
 class MetadataDialog(QDialog):
@@ -55,7 +57,12 @@ class MetadataDialog(QDialog):
         try:
             if values["year"] and not re.fullmatch(r"\d{1,4}", values["year"]):
                 raise ValueError("Year must be a number such as 2015")
+            if len(values.get("label", "")) > MAX_LABEL:
+                raise ValueError(f"Tab name cannot be longer than {MAX_LABEL} characters")
+            label = values.pop("label", None)
             document = self.library.update_metadata(self.document_id, values)
+            if label is not None:
+                document = self.library.set_label(self.document_id, label)
         except ValueError as error:
             self.error.setText(str(error))
             self.error.show()
