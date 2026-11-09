@@ -162,6 +162,14 @@ class WindowsInstallerTests(unittest.TestCase):
         pe = struct.unpack_from("<I", data, 0x3C)[0]
         self.assertEqual(struct.unpack_from("<H", data, pe + 24 + 68)[0], 2, "GUI app must not open a console")
         subprocess.run([str(self.binary), "--self-test", str(self.pdf)], env=self.env, cwd=self.root, check=True, timeout=70)
+        from tests.test_ocr import scan_pdf
+        scan = scan_pdf(self.root / 'Scanned paper è.pdf')
+        scan_before = scan.read_bytes()
+        ocr_env = {**self.env, 'PATH': '', 'TESSDATA_PREFIX': str(self.root / 'absent-models')}
+        subprocess.run([str(self.binary), '--self-test-ocr', str(scan)], env=ocr_env,
+                       cwd=self.root, check=True, timeout=90)
+        self.assertEqual(scan.read_bytes(), scan_before)
+        self.assert_data_preserved()
         proc = subprocess.Popen([str(self.binary), str(self.pdf)], env=self.env, cwd=self.root)
         try:
             deadline = time.monotonic() + 20

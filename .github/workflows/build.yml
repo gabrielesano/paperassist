@@ -71,6 +71,8 @@ jobs:
           HOME=/tmp/ci-install-test sh dist/PaperAssist-*-linux-x86_64.sh
           /tmp/ci-install-test/.local/bin/paperassist --version
           /tmp/ci-install-test/.local/bin/paperassist --self-test tests/fixtures/pdfjs-annotations.pdf
+          python -c "from pathlib import Path; from tests.test_ocr import scan_pdf; scan_pdf(Path('/tmp/ci-install-test/scan.pdf'))"
+          env PATH=/nonexistent TESSDATA_PREFIX=/nonexistent /tmp/ci-install-test/.local/bin/paperassist --self-test-ocr /tmp/ci-install-test/scan.pdf
           /tmp/ci-install-test/.local/share/paperassist-app/uninstall.sh
 
       - name: Run frozen bundle and installer test suite

@@ -112,6 +112,14 @@ class MacOSBundleTests(unittest.TestCase):
             pdf.write_bytes(original)
             self.assertIn(__version__, command(str(binary), "--version", env=env, cwd=root).stdout)
             self.assertIn("self-test ok", command(str(binary), "--self-test", str(pdf), env=env, cwd=root).stdout)
+            from tests.test_ocr import scan_pdf
+            scan = scan_pdf(root / 'Scanned paper è.pdf')
+            scan_before = scan.read_bytes()
+            ocr_env = {**env, 'PATH': '', 'TESSDATA_PREFIX': str(root / 'absent-models')}
+            recognized = command(str(binary), '--self-test-ocr', str(scan), env=ocr_env, cwd=root)
+            self.assertIn('OCR self-test ok: bundled Tesseract', recognized.stdout)
+            self.assertIn('Adiabatic Heating of Coronal Loops', recognized.stdout)
+            self.assertEqual(scan.read_bytes(), scan_before)
 
             swift = root / "launch.swift"
             swift.write_text(LAUNCHER)
