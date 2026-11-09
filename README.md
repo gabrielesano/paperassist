@@ -4,27 +4,9 @@ Reading a research paper is rarely linear. Half the time you are scrolling to th
 
 **PaperAssist** is a calm, local reading desk and shared library for scientific PDFs. It runs as a self-contained native desktop application built with Qt Widgets and PDFium, with no PaperAssist account, cloud sync, background web server, telemetry, or large language models. Reading and local import work offline; optional online reference actions use external services only when requested. A library can reuse the same PDF across multiple source papers; it is not a cloud collaboration service.
 
-> **Project status:** Alpha (`0.2.0a1` candidate). Reading, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
+> **Project status:** Alpha (`0.2.0a1`). Reading, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
 
-**Current development, not yet released:** The native reader is now the default
-source entry point; the Flask/PDF.js/pywebview stack and Node toolchain have been
-retired. New standalone builds include minimal offline OCR with Tesseract 5.5.4,
-Leptonica and the English LSTM model. Hosted Ubuntu 22.04, Windows and Apple
-Silicon macOS builds have passed copied-bundle and installed-package OCR checks,
-along with the platform installer/native-window tests.
-Runtime inputs occupy about 5.36 MiB on Ubuntu, 8.16 MiB on Windows and 5.50 MiB
-on macOS; see [host acceptance](docs/development/host-acceptance.md) for exact
-run scope and remaining manual checks.
-The existing `0.1.0a4` downloads predate bundled OCR. See the
-[web retirement](docs/development/web-retirement.md) and
-[bundled OCR verification](docs/development/bundled-ocr.md) records.
-
-The 0.2.0a1 candidate also imports external PDFs as managed library copies,
-delivers repeated launches to the existing library window, and offers OS PDF
-Open with registrations. Unsaved reader edits and external originals are kept;
-see [file-opening acceptance](docs/development/file-opening.md).
-
-The screenshots below show the native reader on Linux with synthetic papers and a disposable library. The library screenshot reflects `0.1.0a4`; reader views were captured under `0.1.0a3`. System fonts and window appearance vary by platform.
+The screenshots below show the application on Linux with synthetic papers and a disposable library. System fonts and window appearance vary by platform.
 
 ![PaperAssist workspace showing the document outline on the left, a main paper with a cited paper open in Quick view below it, and ranked references on the right](docs/screenshots/workspace-split-view.png)
 
@@ -32,9 +14,9 @@ The screenshots below show the native reader on Linux with synthetic papers and 
 
 ## Installation & Quick Start
 
-PaperAssist can be installed as a standalone desktop application (with Python, Qt, and PDFium bundled inside—no Python setup required) or run directly from a source checkout.
+PaperAssist can be installed as a standalone desktop application (with Python, Qt, PDFium, and offline OCR bundled inside—no Python setup required) or run directly from a source checkout.
 
-The next alpha is **0.2.0a1**, a version step for the native-only application, bundled OCR and managed PDF opening. Its packages are being verified before publication. Download published installers and matching `.sha256` files from [GitHub releases](https://github.com/gabrielesano/paperassist/releases). The existing 0.1.0a4 release lacks these changes; the package names below describe 0.2.0a1. Platform provenance, third-party notices, and a combined checksum manifest are attached there too. These files require repository access while the repository is private.
+Download installers and their matching `.sha256` files from the [0.2.0a1 alpha release](https://github.com/gabrielesano/paperassist/releases/tag/v0.2.0a1). Platform provenance, third-party notices, and a combined checksum manifest (`SHA256SUMS`) are attached alongside the packages.
 
 ### Linux (`x86_64`) — Standalone Installer
 
@@ -88,7 +70,7 @@ On Windows PowerShell, replace `.venv/bin/python` in both commands with `.venv\S
 
 ### Command-line usage
 
-Both the standalone application and the source console command open the native reader. From source, `python -m paperassist` uses the same entry point; `python -m paperassist.native` remains available. Command-line import is available in source installations:
+Both the standalone application and the source console command open the reader. From source, `python -m paperassist` uses the same entry point. Command-line import is available in source installations:
 
 | Command | What it does |
 | --- | --- |
@@ -99,7 +81,7 @@ Both the standalone application and the source console command open the native r
 
 Only one instance accesses a library at a time (protected by a lock file inside the library folder). While the app is open, import new papers from the **Library** window (`L`) rather than running CLI imports against the same library in parallel.
 
-**Managed PDF opening (0.2.0a1):** PDF arguments, **Open** (`Ctrl+O`), Quick view and operating-system file events import copies into the active library. Identical content reuses the same paper and its latest saved revision. **Save** writes a library revision and leaves the external original unchanged. A second launch selects the existing window for that library and preserves unsaved annotations and comment drafts; `--data-dir` selects a different library. Files managed by another library must be opened through that library. Linux and macOS offer PaperAssist in **Open with**; Windows setup offers an optional registration. Select a default reader through your system settings if desired. See [desktop integration](docs/development/desktop-plan.md).
+**Managed PDF opening:** PDF arguments, **Open** (`Ctrl+O`), Quick view and operating-system file events import copies into the active library. Identical content reuses the same paper and its latest saved revision. **Save** writes a library revision and leaves the external original unchanged. A second launch selects the existing window for that library and preserves unsaved annotations and comment drafts; `--data-dir` selects a different library. Files managed by another library must be opened through that library. Linux and macOS offer PaperAssist in **Open with**; Windows setup offers an optional registration. Select a default reader through your system settings if desired. See [desktop integration](docs/development/desktop-plan.md).
 
 ---
 
@@ -246,23 +228,20 @@ Source availability, authentication rules, and quotas are controlled by each pro
 - **Separate rendering process:** PDFium renders whole-page bitmaps in a worker process with a bounded page cache; it does not use tile rendering. Memory and latency vary with documents, zoom, open panes, and platform. See the scoped measurements in [native stack notes](docs/development/native-stack.md), rather than treating them as a fixed memory guarantee or a security sandbox.
 - **No AI guesswork:** Importing, metadata extraction, and citation matching are 100% deterministic.
 - **Citation detection is partial:** PaperAssist recognizes author-year and bracketed numeric citations, abstaining when entries cannot be disambiguated. A six-paper tuning benchmark reported about 96% recall at the reference/page level, not exact sentence-level accuracy or a guarantee on new papers. The private benchmark is not reproducible from this repository; see [accuracy notes](docs/development/citation-accuracy.md). OCR errors, superscripts, and unusual styles can cause missed citations.
-- **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer (PaperAssist does not write an OCR text layer into PDFs). For scanned papers lacking extractable text, **Refresh metadata** can optionally invoke a local **Tesseract** (`eng`) worker in an isolated background process to recover provisional titles and authors (reading page 1, and falling back to page 2 only if no title is recognized on page 1). New standalone builds include a minimal Tesseract engine and English model; it requires no separate Tesseract installation. A missing or damaged bundled runtime is reported without affecting normal metadata extraction.
+- **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer (PaperAssist does not write an OCR text layer into PDFs). For scanned papers lacking extractable text, **Refresh metadata** can optionally invoke a local **Tesseract** (`eng`) worker in an isolated background process to recover provisional titles and authors (reading page 1, and falling back to page 2 only if no title is recognized on page 1). Standalone builds include a minimal Tesseract engine and English model; it requires no separate Tesseract installation. A missing or damaged bundled runtime is reported without affecting normal metadata extraction.
 - **Packaged OCR verification:** The bundled engine has been tested on Linux from a copied standalone app with an empty `PATH` and in an offline Fedora 43 container without system Tesseract or language data. Hosted builds have also passed OCR from the installed Linux launcher, Windows setup installation and macOS app copied from its DMG, plus the Ubuntu GLIBC_2.35 gate and platform installer/native-window checks. The full native Cocoa test suite also passes. Interactive desktop and hardware coverage remain follow-up work. See [host acceptance](docs/development/host-acceptance.md).
 
 ---
 
 ## Offline OCR
 
-New standalone builds include a minimal **Tesseract 5.5.4** engine, Leptonica and the
+Standalone builds include a minimal **Tesseract 5.5.4** engine, Leptonica and the
 English LSTM model. No separate OCR installation, model download or network
 connection is needed. The engine runs in PaperAssist's isolated background OCR
 worker and reads the grayscale pages rendered by PDFium. Only metadata recovery
 uses OCR; it does not add a searchable text layer to the PDF.
 
-This feature is available in the current source and newly built bundles; the
-published `0.1.0a4` installers have not been replaced.
-
-For development from source, compile the same private runtime once using CMake
+For development from source, compile the bundled runtime once using CMake
 and a C/C++ compiler:
 
 ```bash
@@ -300,7 +279,7 @@ To build the standalone application bundle and Linux installer locally:
 For architecture, packaging, and verification details, see:
 
 - [Product specification](docs/specification.md) & [Implementation roadmap](docs/roadmap.md)
-- [Native migration parity matrix](docs/development/native-migration.md) & [Native stack measurements](docs/development/native-stack.md)
+- [Native stack measurements](docs/development/native-stack.md)
 - [Offline OCR metadata recovery notes](docs/development/offline-ocr.md) & [Citation accuracy notes](docs/development/citation-accuracy.md)
 - [Linux & bundle packaging guide](packaging/README.md), [Windows packaging guide](packaging/windows/README.md), and [macOS packaging guide](packaging/macos/README.md)
 
@@ -310,8 +289,8 @@ For architecture, packaging, and verification details, see:
 
 PaperAssist is free software licensed under the **GNU General Public License v3.0 or later** (see [`LICENSE`](LICENSE)).
 
-The native reader uses [Qt / PySide6](https://wiki.qt.io/Qt_for_Python), [PDFium](https://pdfium.googlesource.com/pdfium/) through [pypdfium2](https://github.com/pypdfium2-team/pypdfium2), and [pypdf](https://github.com/py-pdf/pypdf). These components retain their own licenses; standalone builds include `THIRD-PARTY-NOTICES.txt` and bundled dependency license files.
+The reader uses [Qt / PySide6](https://wiki.qt.io/Qt_for_Python), [PDFium](https://pdfium.googlesource.com/pdfium/) through [pypdfium2](https://github.com/pypdfium2-team/pypdfium2), and [pypdf](https://github.com/py-pdf/pypdf). These components retain their own licenses; standalone builds include `THIRD-PARTY-NOTICES.txt` and bundled dependency license files.
 
-New OCR-enabled bundles also include Tesseract and the English `tessdata_fast`
+Bundled releases also include Tesseract and the English `tessdata_fast`
 model under Apache-2.0, and Leptonica under BSD-2-Clause. Their full license texts
 and pinned source URLs are included in the bundle's third-party notices.
