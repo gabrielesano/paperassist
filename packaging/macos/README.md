@@ -35,6 +35,9 @@ The Build workflow creates crisp 16–1024 pixel icon representations, builds on
 the arm64 app, creates a compressed read-only disk image, and emits a detached
 SHA-256 file. The `PaperAssist-macOS` workflow artifact contains the DMG, checksum,
 notices, and provenance.
+It also runs the full native source suite with Cocoa before packaging, so release
+verification includes keyboard, focus and file-delivery regressions even when
+the separate weekly macOS workflow cannot obtain a runner.
 
 ## Verification and limits
 
