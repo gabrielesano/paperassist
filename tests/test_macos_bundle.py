@@ -164,7 +164,7 @@ class MacOSBundleTests(unittest.TestCase):
 
             # Exercise cold Finder events and a normal application launch, then
             # send warm Finder events to the exact same running application.
-            for index, arguments in enumerate((('files', str(copied), str(cold)), (str(copied),)):
+            for index, arguments in enumerate((('files', str(copied), str(cold)), (str(copied),))):
                 with self.subTest(arguments=arguments):
                     second = root / f'Warm {index} è % paper.pdf'
                     second_bytes = original + f'\n%Warm Finder PDF {index}\n'.encode()
