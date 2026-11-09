@@ -39,7 +39,9 @@ class QuickViewTests(LibraryWindowCase):
     def test_side_by_side_a_quick_view_fits_its_half_until_the_user_zooms(self):
         self.workspace.save_view(self.docs[1]["id"], {"page": 2, "scale": "1.5"})
         window = self.window()
+        window.set_columns(outline=False, details=False)
         tab = self.open_document(window, self.docs[0])
+        self.pump(lambda: tab.width() >= 720)
         quick = window.open_library_document_in_quick_view(self.docs[1]["id"])
         view = quick.view
         self.pump(lambda: current_page(view) == 1)
@@ -57,7 +59,9 @@ class QuickViewTests(LibraryWindowCase):
         settings.update_preferences({"quick_view_layout": "side"})
         self.workspace.save_view(self.docs[1]["id"], {"page": 2, "scale": "2"})
         window = self.window()
-        self.open_document(window, self.docs[0])
+        window.set_columns(outline=False, details=False)
+        tab = self.open_document(window, self.docs[0])
+        self.pump(lambda: tab.width() >= 720)
         view = window.open_library_document_in_quick_view(self.docs[1]["id"]).view
         self.pump(lambda: current_page(view) == 1)
         self.assertTrue(view.fit)

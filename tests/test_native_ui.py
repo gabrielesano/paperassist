@@ -645,7 +645,9 @@ class WindowTests(unittest.TestCase):
         QTest.mousePress(handle, Qt.LeftButton, Qt.NoModifier, centre)
         QTest.mouseMove(handle, QPoint(centre.x(), centre.y() + tab.height()))
         QTest.mouseRelease(handle, Qt.LeftButton, Qt.NoModifier, QPoint(centre.x(), centre.y() + tab.height()))
-        self.assertAlmostEqual(tab.quick_share, 0.2, places=2)
+        # Native desktops can constrain the window height; the pane's pixel minimum still applies.
+        smallest = max(0.2, tab.quick.minimumHeight() / sum(tab.sizes()))
+        self.assertAlmostEqual(tab.quick_share, smallest, places=2)
 
     def test_the_quick_view_title_never_overlaps_its_buttons(self):
         self.open("title-main")

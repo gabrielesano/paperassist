@@ -257,7 +257,7 @@ class NativePreferencesTests(unittest.TestCase):
         window = self.make_window()
         bar = self.main_toolbar(window)
         initial_height = bar.height()
-        initial_font = window.app_menu_button.font().pointSizeF()
+        base_font = window.preferences_dialog.base_font.pointSizeF()
 
         window.show_preferences()
         self.pump()
@@ -266,12 +266,12 @@ class NativePreferencesTests(unittest.TestCase):
 
         self.assertEqual(settings.preferences(), {"ui_zoom": 1.25})
         self.assertGreater(bar.height(), initial_height)
-        self.assertAlmostEqual(window.app_menu_button.font().pointSizeF(), initial_font * 1.25, places=3)
+        self.assertAlmostEqual(window.app_menu_button.font().pointSizeF(), base_font * 1.25, places=3)
 
         restarted = self.make_window()
         self.assertEqual(restarted.preferences_dialog.zoom_value, 1.25)
         self.assertEqual(restarted.preferences_dialog.size_combo.currentData(), 1.25)
-        self.assertAlmostEqual(restarted.app_menu_button.font().pointSizeF(), initial_font * 1.25, places=3)
+        self.assertAlmostEqual(restarted.app_menu_button.font().pointSizeF(), base_font * 1.25, places=3)
 
     def test_parse_zoom_rejects_unlisted_and_boolean_values(self):
         for valid in (0.8, 0.9, 1, 1.0, 1.1, 1.25, 1.5):

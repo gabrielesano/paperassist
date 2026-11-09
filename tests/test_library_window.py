@@ -615,7 +615,7 @@ class ColumnTests(LibraryWindowCase):
         tab = self.open_document(window, self.docs[0])
         self.assertTrue(tab.side_by_side)
         quick = window.open_library_document_in_quick_view(self.docs[1]["id"])
-        quick.layout_button.click()
+        window.toggle_quick_layout()  # Preference persistence also applies when a narrow screen disables the button.
         self.assertEqual(settings.preferences()["quick_view_layout"], "stacked")
         window.details_column.hide_requested.emit()
         self.assertEqual(settings.preferences()["details_expanded"], False)
