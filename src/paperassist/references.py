@@ -35,7 +35,7 @@ SECOND_AUTHOR = rf"(?:[^\W\d_]+\s+(?={PARTICLE}\s))?(?:{PARTICLE}\s+)*[^\W\d_]+(
 AFTER_NAME = re.compile(r'[^\W\d_]{2}\s*(?:&|\band)\s+$', re.I)
 SPACING_ACCENT = re.compile(r'\s*([´¨˜ˆˇ˚¸])\s*([A-Za-zı])')
 COMBINING = {'´': '\u0301', '¨': '\u0308', '˜': '\u0303', 'ˆ': '\u0302', 'ˇ': '\u030c', '˚': '\u030a', '¸': '\u0327'}
-DESTINATION_VERSION = 4
+DESTINATION_VERSION = 5
 # Sections printed after the references. Bare words must fill the line, so a wrapped title such as
 # "Table of integrals" stays in its entry.
 END_HEADING = re.compile(
@@ -364,7 +364,7 @@ def _normalize(text):
 
 
 def map_destinations(reader, pages, refs):
-    """Match named bibliography destinations to unique author-year entries."""
+    """Match bibliography destinations by geometry, entry text and optional numeric label."""
     for ref in refs:
         ref['destinations'] = []
     heading = next((i for i, page in enumerate(pages) if HEADING.search(page)), None)
@@ -398,9 +398,13 @@ def map_destinations(reader, pages, refs):
                 baseline = nearby[0][0]
                 fragments = sorted((x, text) for x, y, _, text in lines
                                    if abs(y - baseline) < 0.5 and left - 3 <= x < left + 240)
-                line = _normalize(''.join(text for _, text in fragments))
+                line = ''.join(text for _, text in fragments)
+                numbered = ENTRY.match(line)
+                label = (numbered[1] or numbered[2]) if numbered else None
+                line = _normalize(numbered[3] if numbered else line)
                 # A short line could start several entries; a short complete entry cannot.
-                matches = [ref for raw, ref in entries if raw.startswith(line) and (len(line) >= 20 or raw == line)]
+                matches = [ref for raw, ref in entries if raw.startswith(line) and (len(line) >= 20 or raw == line)
+                           and (label is None or str(ref.get('label')) == label)]
                 if len(matches) == 1:
                     matches[0]['destinations'].append(name)
 

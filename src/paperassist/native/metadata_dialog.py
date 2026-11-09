@@ -44,6 +44,8 @@ class MetadataDialog(QDialog):
         column.setSpacing(10)
         column.addWidget(heading)
         column.addLayout(form)
+        if note := document.get("metadata", {}).get("refresh", {}).get("message"):
+            column.addWidget(QLabel(note, objectName="muted-note", wordWrap=True))
         column.addWidget(self.error)
         column.addWidget(buttons)
         self.fields["title"].setFocus()

@@ -182,11 +182,29 @@ class MainWindow(QMainWindow):
         self.welcome = WelcomeView(self)
         self.reader_stack.addWidget(self.welcome)
         self.reader_stack.addWidget(self.tabs)
-        for widget in (self.outline_column, self.reader_stack, self.details_column):
+        reader_workspace = QWidget()
+        row = QHBoxLayout(reader_workspace)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        self.outline_show_button = QToolButton(toolTip="Show Outline", accessibleName="Show Outline")
+        self.details_show_button = QToolButton(toolTip="Show References / Comments", accessibleName="Show References / Comments")
+        for button in (self.outline_show_button, self.details_show_button):
+            button.setIcon(icon("plus", INK, 14))
+        self.outline_show_button.clicked.connect(lambda: self.set_columns(outline=True))
+        self.details_show_button.clicked.connect(lambda: self.set_columns(details=True))
+        row.addWidget(self.outline_show_button, 0, Qt.AlignTop)
+        row.addWidget(self.reader_stack, 1)
+        row.addWidget(self.details_show_button, 0, Qt.AlignTop)
+        for widget in (self.outline_column, reader_workspace, self.details_column):
             splitter.addWidget(widget)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([230, 840, 330])
         self.setCentralWidget(splitter)
+        self._sync_column_buttons()
+
+    def _sync_column_buttons(self):
+        self.outline_show_button.setVisible(self.outline_column.isHidden())
+        self.details_show_button.setVisible(self.details_column.isHidden())
 
     def set_columns(self, outline=None, details=None):
         changes = {}
@@ -196,6 +214,7 @@ class MainWindow(QMainWindow):
                 column.setVisible(visible)
                 changes[name] = visible
         self._remember(**changes)
+        self._sync_column_buttons()
         self._update_columns()
 
     def toggle_columns(self):

@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from unittest import mock
 from pypdf import PdfWriter
 
 from paperassist.library import Library, safe_filename
+from paperassist.metadata import PARSER_VERSION
 
 
 def pdf():
@@ -103,7 +105,7 @@ class LibraryTests(unittest.TestCase):
         result = self.library.import_stream(io.BytesIO(self.payload), 'renamed.pdf')
         self.assertEqual(result['title'], 'My correction')
         self.assertEqual(result['revision'], 1)
-        self.assertEqual(result['metadata']['parser_version'], 3)
+        self.assertEqual(result['metadata']['parser_version'], PARSER_VERSION)
         self.assertEqual(self.library.get_path(doc['id']).read_bytes(), self.payload)
 
     def test_label_is_a_nickname_that_leaves_the_catalogue_alone(self):
@@ -187,6 +189,18 @@ class VerifiedMetadataTests(unittest.TestCase):
         self.assertEqual(document['metadata_status'], 'verified')
         self.assertEqual(document['metadata']['sources']['title'], 'crossref')
         self.assertEqual(self.library.find_by_doi(self.record['doi'])[0]['id'], document['id'])
+
+    def test_parser_upgrade_keeps_verified_metadata_and_provenance(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'download.pdf')
+        doc = self.library.apply_verified(doc['id'], self.record)
+        metadata = {**doc['metadata'], 'parser_version': 0}
+        with self.library._connect() as db:
+            db.execute('UPDATE documents SET extracted = ? WHERE id = ?', (json.dumps(metadata), doc['id']))
+        duplicate = self.library.import_stream(io.BytesIO(self.payload), 'again.pdf')
+        for key in ('title', 'authors', 'year', 'doi', 'metadata_status', 'work_id'):
+            self.assertEqual(duplicate[key], doc[key], key)
+        self.assertEqual(duplicate['metadata']['verified'], doc['metadata']['verified'])
+        self.assertEqual(duplicate['metadata']['sources'], doc['metadata']['sources'])
 
     def test_duplicate_download_keeps_user_corrections(self):
         first = self.library.import_stream(io.BytesIO(self.payload), 'mine.pdf')

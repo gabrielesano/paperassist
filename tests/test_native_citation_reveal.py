@@ -10,7 +10,7 @@ from test_native_support import PySide6, needs_qt, pdf_available
 
 if pdf_available and PySide6:
     from pypdf import PdfWriter
-    from pypdf.generic import ArrayObject, DictionaryObject, FloatObject, NameObject, TextStringObject
+    from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, TextStringObject
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QPushButton
@@ -62,6 +62,74 @@ class CitationRevealTests(unittest.TestCase):
             panel._follow_citation(first)
             self.assertEqual(revealed.call_count, 6)
         panel.deleteLater()
+
+    def test_number_only_link_migrates_numbered_bibliography_and_follows_then_reveals(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            writer = PdfWriter()
+            font = writer._add_object(DictionaryObject({NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"), NameObject("/BaseFont"): NameObject("/Courier")}))
+            for content in ("BT /F1 11 Tf 40 430 Td ([) Tj 8 0 Td (1) Tj 8 0 Td (]) Tj ET",
+                            "BT /F1 11 Tf 40 430 Td (References) Tj 0 -30 Td "
+                            "([1] Ada Lovelace. A study of coronal loops. 2024.) Tj ET"):
+                page = writer.add_blank_page(400, 500)
+                page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})})
+                stream = DecodedStreamObject()
+                stream.set_data(content.encode("ascii"))
+                page[NameObject("/Contents")] = writer._add_object(stream)
+            writer.add_named_destination_array(TextStringObject("cite.loops"), ArrayObject([
+                writer.pages[1].indirect_reference, NameObject("/XYZ"), FloatObject(40), FloatObject(413), FloatObject(0)]))
+            writer.add_annotation(0, DictionaryObject({NameObject("/Subtype"): NameObject("/Link"),
+                NameObject("/Rect"): ArrayObject(FloatObject(v) for v in (48, 428, 55, 440)),
+                NameObject("/Dest"): TextStringObject("cite.loops")}))
+            output = io.BytesIO()
+            writer.write(output)
+            with patch("paperassist.paths.config_file", return_value=root / "config.json"):
+                workspace = Workspace(root / "library")
+                window = None
+                try:
+                    main = workspace.library.import_stream(io.BytesIO(output.getvalue()), "numbered.pdf")
+                    path = cited_pdf(root / "other.pdf", pages=3)
+                    other = workspace.library.import_stream(io.BytesIO(path.read_bytes()), "other.pdf")
+                    payload = references.analyze(workspace.library, main["id"])
+                    ref = payload["references"][0]
+                    self.assertEqual(ref["destinations"], ["cite.loops"])
+                    references.link(workspace.library, main["id"], ref["id"], other["id"])
+                    payload = references.get(workspace.library, main["id"])
+                    payload["destination_version"] = references.DESTINATION_VERSION - 1
+                    payload["references"][0]["destinations"] = []
+                    references._save(workspace.library, main["id"], payload)
+                    window = MainWindow(self.client, workspace)
+                    window.acquisition.main_opened = lambda *_: None
+                    window.show()
+                    tab = window.open_library_document(main["id"])
+                    view, panel = tab.main.view, window.details
+                    self.assertTrue(self.pump(lambda: panel.list.count() == 1 and view.has_page(0), 10))
+                    self.assertEqual(panel.refs[0]["destinations"], ["cite.loops"])
+                    self.assertTrue(panel.refs[0]["manual_link"])
+                    view._set_zoom(1.2)
+                    view.goto(0)
+                    self.pump()
+                    before = (view.verticalScrollBar().value(), list(view.history))
+                    for click in range(2):
+                        position = view._band(0, view.doc.links(0)[0].rect).center().toPoint()
+                        QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, position)
+                        self.pump()
+                        self.assertEqual(tab.quick.view.doc.source.document_id, other["id"])
+                        self.assertEqual((view.verticalScrollBar().value(), list(view.history)), before)
+                        if click == 0:
+                            quick = tab.quick
+                        else:
+                            self.assertIs(tab.quick, quick)
+                            self.assertEqual(panel.expanded, ref["id"])
+                finally:
+                    if window:
+                        for pane in window.all_panes():
+                            pane.release()
+                        window.close()
+                        window.deleteLater()
+                        self.app.processEvents()
+                    workspace.close()
 
     def test_mouse_click_opens_local_reference_and_reveals_missing_reference(self):
         with tempfile.TemporaryDirectory() as folder:

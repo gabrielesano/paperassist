@@ -385,6 +385,32 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(refs[0]['destinations'], ['bib74'])
         self.assertEqual(refs[1]['destinations'], [])
 
+    def test_numbered_destination_strips_the_printed_label_and_checks_it(self):
+        class Destination:
+            typ, left = '/XYZ', 77
+            def __init__(self, top):
+                self.top = top
+
+        class Page:
+            def extract_text(self, visitor_text):
+                for text, y in [('[1] Ada Lovelace. A study of parallel computation. 2024.', 500),
+                                ('[2] Grace Hopper. A study of compilation. 2023.', 470),
+                                ('[9] Grace Hopper. A study of compilation. 2023.', 440)]:
+                    visitor_text(text, [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 77, y], None, 11)
+
+        class Reader:
+            pages = [Page()]
+            named_destinations = {'cite.parallel': Destination(513), 'cite.compilers': Destination(483),
+                                  'cite.wrong-label': Destination(453)}
+            def get_destination_page_number(self, destination):
+                return 0
+
+        refs = [{'label': '1', 'raw': 'Ada Lovelace. A study of parallel computation. 2024.'},
+                {'label': '2', 'raw': 'Grace Hopper. A study of compilation. 2023.'}]
+        map_destinations(Reader(), ['References'], refs)
+        self.assertEqual(refs[0]['destinations'], ['cite.parallel'])
+        self.assertEqual(refs[1]['destinations'], ['cite.compilers'])
+
     def test_cached_analysis_migrates_once_preserving_manual_link(self):
         class Page:
             def extract_text(self, **kwargs):

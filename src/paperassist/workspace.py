@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from paperassist.library import Library
-from paperassist import inbox, location, paths, references, retrieval, settings
+from paperassist import inbox, location, metadata_refresh, paths, references, retrieval, settings
 
 
 class WorkspaceConflict(ValueError):
@@ -156,6 +156,18 @@ class Workspace:
             raise ValueError('paths must be a list of non-empty strings')
         return self.submit(lambda job, cancel: self.library.import_paths(
             paths, progress=lambda done, total: job.update(progress={'completed': done, 'total': total}), cancel=cancel))
+
+    def refresh_metadata(self, document_ids=None, *, online=True):
+        """Refresh a snapshot of the whole library, or the explicitly selected PDFs."""
+        if document_ids is None:
+            document_ids = [document['id'] for document in self.library.list_documents()]
+        elif (not isinstance(document_ids, list) or not document_ids
+              or any(type(value) is not int or value <= 0 for value in document_ids)):
+            raise ValueError('document_ids must be a non-empty list of positive integers')
+        document_ids = list(dict.fromkeys(document_ids))
+        cfg = self.get_settings()
+        return self.submit(lambda job, cancel: metadata_refresh.refresh(
+            self.library, document_ids, cfg, online, job, cancel))
 
     def import_files(self, streams):
         """Stage (name, binary stream) uploads before returning; the job owns their cleanup."""

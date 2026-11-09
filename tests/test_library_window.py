@@ -260,6 +260,71 @@ class LibraryDialogTests(LibraryWindowCase):
         self.assertEqual(window.tab().main.key, f"library:{wanted}")
         self.assertTrue(window.library_dialog.isHidden())
 
+    def test_opening_papers_and_closing_the_library_leave_metadata_refresh_running(self):
+        window = self.make_window()
+        window.show_library()
+        dialog = window.library_dialog
+        document_id = self.docs[0]["id"]
+        item = next(dialog.table.topLevelItem(i) for i in range(dialog.table.topLevelItemCount())
+                    if dialog.table.topLevelItem(i).data(0, Qt.UserRole) == document_id)
+        dialog.table.setCurrentItem(item)
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        from paperassist.metadata import extract_metadata
+
+        def slow_extract(path, filename):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("Test did not release metadata extraction")
+            extracted = extract_metadata(path, filename)
+            if filename == self.docs[0]["filename"]:
+                extracted["title"] = "Refreshed paper title"
+            return extracted
+
+        with patch("paperassist.library.extract_metadata", side_effect=slow_extract):
+            dialog.online_metadata.setChecked(False)
+            dialog.refresh_all.trigger()
+            self.pump(entered.is_set)
+            watcher = dialog.watcher
+            dialog.open_button.click()
+            self.assertTrue(dialog.isHidden())
+            tab = window.tab()
+            view = tab.main.view
+            self.assertEqual(tab.main.key, f"library:{document_id}")
+            self.pump(lambda: view.has_page(0))
+            view.doc.add_highlight(0, [Rect(20, 50, 120, 65)])
+            view.edited.emit()
+            view.goto(1)
+            self.pump()
+            document = view.doc
+            self.assertTrue(watcher.timer.isActive())
+            self.assertEqual(self.workspace.job_status(watcher.job_id)["status"], "running")
+
+            window.show_library()
+            self.assertIs(dialog.watcher, watcher)
+            self.assertTrue(dialog.progress.isVisible())
+            dialog.quick_button.click()
+            self.assertTrue(dialog.isHidden())
+            self.assertIsNotNone(tab.quick)
+            window.show_library()
+            dialog.close()
+            self.assertTrue(dialog.isHidden())
+            self.assertFalse(self.workspace.cancellations[watcher.job_id].is_set())
+            self.pump()
+            position = view.verticalScrollBar().value()
+            release.set()
+            self.pump(lambda: dialog.watcher is None)
+
+        job = self.workspace.job_status(watcher.job_id)
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(len(job["result"]["documents"]), len(self.docs))
+        self.assertTrue(dialog.isHidden())
+        self.assertEqual(tab.main.title, "Refreshed paper title")
+        self.assertEqual(tab.quick.title, "Refreshed paper title")
+        self.assertIs(view.doc, document)
+        self.assertTrue(view.doc.modified)
+        self.assertEqual(view.verticalScrollBar().value(), position)
+
 
 class PositionTests(LibraryWindowCase):
     def test_pdfjs_scales_map_both_ways(self):
@@ -324,6 +389,26 @@ class PositionTests(LibraryWindowCase):
 
 
 class ColumnTests(LibraryWindowCase):
+    def test_plus_buttons_restore_only_the_corresponding_column(self):
+        settings.update_preferences({"outline_expanded": False, "details_expanded": False})
+        window = self.make_window()
+        left, right = window.outline_show_button, window.details_show_button
+        self.assertTrue(left.isVisible() and right.isVisible())
+        self.assertEqual(left.accessibleName(), "Show Outline")
+        left.click()
+        self.assertTrue(window.outline_column.isVisible())
+        self.assertFalse(window.details_column.isVisible())
+        self.assertFalse(left.isVisible())
+        self.assertTrue(right.isVisible())
+        self.assertEqual((settings.preferences()["outline_expanded"], settings.preferences()["details_expanded"]), (True, False))
+        right.click()
+        self.assertTrue(window.details_column.isVisible())
+        self.assertFalse(right.isVisible())
+        window.outline_column.hide_requested.emit()
+        self.assertTrue(left.isVisible())
+        self.assertFalse(right.isVisible())
+        self.assertTrue(window.details_column.isVisible())
+
     def test_preferences_are_shared_through_the_user_config(self):
         settings.update_preferences({"quick_view_layout": "side", "outline_expanded": False, "details_expanded": True})
         window = self.make_window()

@@ -145,10 +145,10 @@ def _crossref_record(item):
                                        item.get('volume'), pages[0] if pages else '', years[0] if years else '')}
 
 
-def crossref_metadata(doi, cfg=None):
+def crossref_metadata(doi, cfg=None, *, fresh=False):
     """Retrieve metadata only for an explicit DOI, not an unverified search hit."""
     cfg = cfg or Settings()
-    item = json.loads(_get(_crossref_url(cfg, 'works/' + quote(doi, safe='/')), cfg))['message']
+    item = json.loads(_get(_crossref_url(cfg, 'works/' + quote(doi, safe='/')), cfg, fresh=fresh))['message']
     return {**_crossref_record(item), 'provider': 'Crossref'}
 
 

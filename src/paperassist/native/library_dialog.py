@@ -1,8 +1,8 @@
 """The library list: search, open in a tab or quick view, and import PDFs as a background job."""
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout)
+from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+                               QMenu, QProgressBar, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 from paperassist.library import pdf_files
 
@@ -22,6 +22,20 @@ def size_text(size):
         size /= 1024
 
 
+class PaperItem(QTreeWidgetItem):
+    def __lt__(self, other):
+        column = self.treeWidget().sortColumn()
+        left, right = self.text(column), other.text(column)
+        if column == 2:
+            if bool(left) != bool(right):
+                ascending = self.treeWidget().header().sortIndicatorOrder() == Qt.AscendingOrder
+                return bool(left) if ascending else bool(right)
+            left, right = int(left or 0), int(right or 0)
+        else:
+            left, right = left.casefold(), right.casefold()
+        return (left, self.data(0, Qt.UserRole)) < (right, other.data(0, Qt.UserRole))
+
+
 class LibraryDialog(QDialog):
     open_requested = Signal(int)   # document id, to read in a tab
     quick_requested = Signal(int)  # document id, to consult in the quick view
@@ -39,6 +53,10 @@ class LibraryDialog(QDialog):
         self.table = QTreeWidget(objectName="dialog-tree", rootIsDecorated=False, uniformRowHeights=True,
                                  headerLabels=["Title", "Authors", "Year", "Metadata"])
         self.table.setAccessibleName("Papers")
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(0, Qt.AscendingOrder)
+        self.table.header().setToolTip("Click a column to sort; click again to reverse the order.")
         self.table.setColumnWidth(0, 420)
         self.table.setColumnWidth(1, 240)
         self.table.setColumnWidth(2, 70)
@@ -47,6 +65,17 @@ class LibraryDialog(QDialog):
         self.quick_button = QPushButton("Quick view")
         self.edit_button = QPushButton("Edit details…")
         self.edit_button.setToolTip("Correct the title, authors, year or DOI (F2)")
+        self.selection_hint = QLabel("Select papers with Ctrl-click or Shift-click.", objectName="muted-note")
+        self.refresh_button = QPushButton("Refresh metadata")
+        self.refresh_button.setToolTip("Recover metadata locally from the PDF, with optional online verification. Manual corrections are preserved.")
+        menu = QMenu(self.refresh_button)
+        self.refresh_selected = menu.addAction("Refresh selected papers")
+        self.refresh_all = menu.addAction("Refresh entire library")
+        menu.addSeparator()
+        self.online_metadata = menu.addAction("Look up metadata online (arXiv, Crossref)")
+        self.online_metadata.setCheckable(True)
+        self.online_metadata.setChecked(True)
+        self.refresh_button.setMenu(menu)
         self.import_button = QPushButton("Import PDFs…")
         self.folder_button = QPushButton("Import folder…")
         self.cancel_button = QPushButton("Cancel import")
@@ -58,6 +87,8 @@ class LibraryDialog(QDialog):
         self.estimate.setAccessibleName("Import estimate")
         self.start_button = QPushButton("Start import")
         self.start_button.setProperty("primary", True)
+        self.import_open_button = QPushButton("Import && open")
+        self.import_open_button.setToolTip("Import this PDF and open it in a reader tab when ready.")
         self.discard_button = QPushButton("Cancel selection")
         self.message = QLabel(objectName="muted-note", wordWrap=True)
 
@@ -71,12 +102,17 @@ class LibraryDialog(QDialog):
         for widget in (self.import_button, self.folder_button):
             buttons.addWidget(widget)
         buttons.addWidget(self.message, 1)
-        for widget in (self.edit_button, self.quick_button, self.open_button):
+        for widget in (self.quick_button, self.open_button):
             buttons.addWidget(widget)
+
+        metadata_row = QHBoxLayout()
+        metadata_row.addWidget(self.selection_hint, 1)
+        metadata_row.addWidget(self.edit_button)
+        metadata_row.addWidget(self.refresh_button)
 
         self.confirm_row = QHBoxLayout()
         self.confirm_row.setSpacing(8)
-        for widget in (self.estimate, self.start_button, self.discard_button):
+        for widget in (self.estimate, self.start_button, self.import_open_button, self.discard_button):
             self.confirm_row.addWidget(widget, 1 if widget is self.estimate else 0)
 
         column = QVBoxLayout(self)
@@ -84,6 +120,7 @@ class LibraryDialog(QDialog):
         column.setSpacing(10)
         column.addWidget(self.heading)
         column.addWidget(self.search)
+        column.addLayout(metadata_row)
         column.addWidget(self.table, 1)
         column.addWidget(self.hint, 1)
         column.addLayout(self.confirm_row)
@@ -91,6 +128,9 @@ class LibraryDialog(QDialog):
         column.addLayout(buttons)
 
         self.pending = []
+        self.library_count = 0
+        self.single_import = self.open_after_import = False
+        self.job_kind = "import"
         self.typing = QTimer(self, singleShot=True, interval=150, timeout=self.refresh)
         self.search.textChanged.connect(self.typing.start)
         self.table.itemActivated.connect(lambda: self._request(self.open_requested))
@@ -100,7 +140,10 @@ class LibraryDialog(QDialog):
         self.edit_button.clicked.connect(self.edit_metadata)
         self.import_button.clicked.connect(self.import_dialog)
         self.folder_button.clicked.connect(self.import_folder_dialog)
-        self.start_button.clicked.connect(self._confirm_import)
+        self.start_button.clicked.connect(lambda: self._confirm_import())
+        self.import_open_button.clicked.connect(lambda: self._confirm_import(open_after=True))
+        self.refresh_selected.triggered.connect(lambda: self.start_metadata_refresh(self.selected_ids()))
+        self.refresh_all.triggered.connect(lambda: self.start_metadata_refresh())
         self.discard_button.clicked.connect(self._discard_selection)
         self.cancel_button.clicked.connect(lambda: self.watcher.cancel())
         self._importing(False)
@@ -127,21 +170,45 @@ class LibraryDialog(QDialog):
 
     # ---- list -----------------------------------------------------------------------------
     def refresh(self):
-        selected = self.selected_id()
+        selected, current = set(self.selected_ids()), self.selected_id()
         documents = self.workspace.library.list_documents(self.search.text())
+        self.library_count = len(self.workspace.library.list_documents()) if self.search.text() else len(documents)
+        blocker = QSignalBlocker(self.table)
+        self.table.setSortingEnabled(False)
         self.table.clear()
         for document in documents:
             review = document["metadata_status"] in NEEDS_REVIEW
-            item = QTreeWidgetItem([display_title(document), document["authors"] or "", str(document["year"] or ""),
-                                    "Needs review" if review else ""])
+            verified = document["metadata_status"] == "verified"
+            item = PaperItem([display_title(document), document["authors"] or "", str(document["year"] or ""),
+                              "Needs review" if review else "Verified" if verified else ""])
             item.setData(0, Qt.UserRole, document["id"])
             item.setToolTip(0, document["filename"])
             if review:
                 item.setForeground(3, REVIEW)
-                item.setToolTip(3, "The title, authors or year could not be confirmed.")
+            metadata = document["metadata"]
+            provider = (metadata.get("verified") or {}).get("provider")
+            provider = {"arxiv": "arXiv", "crossref": "Crossref"}.get(str(provider).lower(), provider)
+            note = metadata.get("refresh", {}).get("message") or (
+                "Manually corrected; automatic refresh preserves these values." if document["metadata_status"] == "corrected" else
+                f"Verified using {provider}." if verified and provider else
+                "Extracted locally; not yet verified. Refresh metadata can recover more data from the PDF or online sources.")
+            item.setToolTip(3, note)
+            for field, column in (("title", 0), ("authors", 1), ("year", 2)):
+                source = metadata.get("sources", {}).get(field)
+                if source:
+                    source = {"pdf_info": "PDF properties", "xmp": "XMP properties", "filename": "Filename",
+                              "arxiv": "arXiv", "crossref": "Crossref",
+                              "arxiv_submission_date": "Printed arXiv submission date (preprint year)",
+                              "first_page_typography": "First-page title typography (provisional)",
+                              "first_page_authors": "First-page author lines (provisional)"}.get(source, source)
+                    item.setToolTip(column, item.toolTip(column) + ("\n" if item.toolTip(column) else "") + f"Source: {source}")
             self.table.addTopLevelItem(item)
-            if document["id"] == selected:
-                self.table.setCurrentItem(item)
+            if document["id"] in selected:
+                item.setSelected(True)
+            if document["id"] == current:
+                self.table.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
+        self.table.setSortingEnabled(True)
+        blocker.unblock()
         empty = not documents and not self.search.text()
         self.table.setVisible(not empty)
         self.hint.setVisible(empty)
@@ -157,37 +224,88 @@ class LibraryDialog(QDialog):
         item = self.table.currentItem()
         return item.data(0, Qt.UserRole) if item else None
 
+    def selected_ids(self):
+        return [item.data(0, Qt.UserRole) for item in self.table.selectedItems()]
+
     def _enable(self):
+        count = len(self.selected_ids())
         for button in (self.open_button, self.quick_button, self.edit_button):
-            button.setEnabled(self.selected_id() is not None)
+            button.setEnabled(count == 1 and (button is not self.edit_button or not self.watcher))
+        available = not self.watcher and not self.pending
+        self.refresh_selected.setEnabled(count > 0 and available)
+        self.refresh_selected.setText(f"Refresh selected papers ({count})")
+        self.refresh_all.setEnabled(available and self.library_count > 0)
+        self.refresh_all.setText(f"Refresh entire library ({self.library_count})")
+        self.refresh_button.setEnabled(available and self.refresh_all.isEnabled())
+        self.selection_hint.setText(f"{count} selected" if count else "Select papers with Ctrl-click or Shift-click.")
 
     def _request(self, signal):
-        if (document_id := self.selected_id()) is not None:
-            signal.emit(document_id)
+        ids = self.selected_ids()
+        if len(ids) == 1:
+            signal.emit(ids[0])
             self.hide()
 
     # ---- metadata -------------------------------------------------------------------------
     def edit_metadata(self):
-        document_id = self.selected_id()
-        if document_id is None:
+        ids = self.selected_ids()
+        if len(ids) != 1 or self.watcher:
             return
+        document_id = ids[0]
         self.editor = MetadataDialog(self.workspace.library, self.workspace.library.get_document(document_id), self)
         self.editor.saved.connect(self._corrected)
         self.editor.open()
 
     def _corrected(self, document):
         """Bring every place that shows this paper up to date: the list, the tab titles and the references."""
+        self._metadata_changed([document])
+
+    def _metadata_changed(self, documents):
         self.refresh()
         window = self.parent()
         if window is None or not hasattr(window, "all_panes"):  # shown on its own, e.g. in tests
             return
+        titles = {document["id"]: display_title(document) for document in documents}
         for pane in window.all_panes():
             source = pane.view.doc.source
-            if getattr(source, "document_id", None) == document["id"]:
-                source.title = display_title(document)
+            if getattr(source, "document_id", None) in titles:
+                source.title = titles[source.document_id]
         window.refresh()
         # Open tabs may cite the corrected paper, so drop cached resolutions before reloading the active one.
         window.details.library_changed()
+
+    def start_metadata_refresh(self, document_ids=None):
+        if self.watcher or self.pending or document_ids == []:
+            return
+        try:
+            job = self.workspace.refresh_metadata(document_ids, online=self.online_metadata.isChecked())
+        except Exception as error:
+            self.message.setText(f"Could not refresh metadata: {error}")
+            return
+        self.job_kind = "metadata"
+        self.watcher = JobWatcher(self.workspace, job, self)
+        self.watcher.progress.connect(self._progress)
+        self.watcher.finished.connect(self._metadata_refreshed)
+        self._importing(True)
+        self.message.setText("Refreshing metadata… Manual corrections are preserved.")
+
+    def _metadata_refreshed(self, job):
+        self.watcher.deleteLater()
+        self.watcher = None
+        self._importing(False)
+        result = job.get("result", {})
+        self._metadata_changed(result.get("documents", []))
+        if job["status"] == "failed":
+            text = f"Metadata refresh failed: {job['error']}"
+        else:
+            review = sum(doc["metadata_status"] in NEEDS_REVIEW for doc in result.get("documents", []))
+            text = (f"{len(result.get('documents', []))} checked, {result.get('local', 0)} improved locally, "
+                    f"{result.get('verified', 0)} verified online, {result.get('preserved', 0)} manual corrections preserved, "
+                    f"{review} need review, {len(result.get('errors', []))} failed")
+            if result.get("errors"):
+                text += ": " + "; ".join(f"Paper {e['document_id']}: {e['error']}" for e in result["errors"])
+            if job["status"] == "cancelled":
+                text += " (cancelled)"
+        self.message.setText(text)
 
     # ---- import ---------------------------------------------------------------------------
     def import_dialog(self):
@@ -202,6 +320,8 @@ class LibraryDialog(QDialog):
 
     def select_import(self, names):
         """Show what the selection would add and wait for the user to confirm; non-PDF files are ignored."""
+        if self.watcher:
+            return
         errors = []
         files = pdf_files(names, errors)
         if not files:
@@ -223,6 +343,8 @@ class LibraryDialog(QDialog):
                                   "Total storage estimate unavailable because some paths could not be read. "
                                   "Importing copies readable PDFs.")
         self.pending = list(names)
+        self.single_import = len(files) == 1
+        self.start_button.setText("Import only" if self.single_import else "Start import")
         self.message.setText("Could not scan some paths: " + "; ".join(f"{e['path']}: {e['error']}" for e in errors)
                              if errors else "")
         self._show_estimate(True)
@@ -231,24 +353,31 @@ class LibraryDialog(QDialog):
     def _show_estimate(self, shown):
         for widget in (self.estimate, self.start_button, self.discard_button):
             widget.setVisible(shown)
+        self.import_open_button.setVisible(shown and self.single_import)
         self.import_button.setEnabled(not shown and not self.watcher)
         self.folder_button.setEnabled(not shown and not self.watcher)
+        self._enable()
 
-    def _confirm_import(self):
+    def _confirm_import(self, open_after=False):
+        open_after = open_after and self.single_import
         names = self.pending
         self._discard_selection()
-        self.start_import(names)
+        self.start_import(names, open_after=open_after)
 
     def _discard_selection(self):
         self.pending = []
+        self.single_import = False
         self._show_estimate(False)
 
-    def start_import(self, names):
+    def start_import(self, names, *, open_after=False):
+        if self.watcher:
+            return
         try:
             job = self.workspace.import_paths(names)
         except Exception as error:  # too many jobs, or an invalid request
             self.message.setText(f"Could not start the import: {error}")
             return
+        self.job_kind, self.open_after_import = "import", open_after
         self.watcher = JobWatcher(self.workspace, job, self)
         self.watcher.progress.connect(self._progress)
         self.watcher.finished.connect(self._imported)
@@ -260,7 +389,10 @@ class LibraryDialog(QDialog):
         self.progress.setMaximum(done.get("total") or 0)  # 0 keeps the bar busy until the first file is counted
         self.progress.setValue(done.get("completed") or 0)
         if done:
-            self.message.setText(f"Importing {done['completed']} of {done['total']}…")
+            action = "Refreshing metadata" if self.job_kind == "metadata" else "Importing"
+            provider = done.get("provider")
+            source = "arXiv" if provider == "arxiv" else "Crossref"
+            self.message.setText(f"{action} {done['completed']} of {done['total']}…" + (f" ({source})" if provider else ""))
 
     def _imported(self, job):
         self.watcher.deleteLater()
@@ -282,9 +414,16 @@ class LibraryDialog(QDialog):
         window = self.parent()
         if job.get("result", {}).get("imported") and hasattr(window, "details"):
             window.details.library_changed()
+        documents = job.get("result", {}).get("documents", [])
+        open_after, self.open_after_import = self.open_after_import, False
+        if open_after and job["status"] == "completed" and len(documents) == 1:
+            self.open_requested.emit(documents[0]["id"])
+            self.hide()
 
     def _importing(self, running):
         self.import_button.setEnabled(not running)
         self.folder_button.setEnabled(not running)
         self.progress.setVisible(running)
         self.cancel_button.setVisible(running)
+        self.cancel_button.setText("Cancel refresh" if self.job_kind == "metadata" else "Cancel import")
+        self._enable()

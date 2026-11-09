@@ -274,11 +274,14 @@ class Library:
                             db.execute("UPDATE documents SET stored_name = ? WHERE id = ?", (name, row["id"]))
                         result = doc
                         if result["metadata"].get("parser_version", 0) < PARSER_VERSION:
-                            metadata = extract_metadata(dest, filename)
+                            metadata = {**doc["metadata"], **extract_metadata(dest, doc["filename"])}
+                            confirmed = row["metadata_status"] in ("corrected", "verified")
+                            if confirmed:
+                                metadata["sources"] = doc["metadata"].get("sources", {})
                             db.execute("UPDATE documents SET extracted = ? WHERE id = ?", (json.dumps(metadata), row["id"]))
-                            if row["metadata_status"] != "corrected":
-                                db.execute("UPDATE documents SET title = ?, authors = ? WHERE id = ?",
-                                           (metadata["title"], metadata["authors"], row["id"]))
+                            if not confirmed:
+                                db.execute("UPDATE documents SET title = ?, authors = ?, year = COALESCE(year, ?) WHERE id = ?",
+                                           (metadata["title"], metadata["authors"], metadata.get("year"), row["id"]))
                         result = self._document(db.execute("SELECT * FROM documents WHERE id = ?", (row["id"],)).fetchone())
                         result["duplicate"] = True
                         return result
@@ -290,7 +293,7 @@ class Library:
                         (sha256, filename, source_path, size, title, authors, year, doi, pages,
                          metadata_status, extracted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (sha, filename, source_path, size, metadata["title"], metadata["authors"],
-                         None, None, metadata["pages"], "needs_review", json.dumps(metadata)))
+                         metadata.get("year"), None, metadata["pages"], "needs_review", json.dumps(metadata)))
                     document_id = cursor.lastrowid
                     # The row exists first because an unnamed file is called Untitled_<id>.
                     doc = self._document(db.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone())
@@ -390,24 +393,52 @@ class Library:
                 db.execute("UPDATE documents SET label = ? WHERE id = ?", (label, document_id))
         return self.get_document(document_id)
 
-    def apply_verified(self, document_id: int, record: dict, filename: str | None = None) -> dict:
-        """Fill gaps from an identified record without overriding user corrections."""
+    def refresh_metadata(self, document_id: int) -> dict:
+        """Reread the immutable PDF, keeping confirmed values and manual corrections."""
+        doc = self.get_document(document_id)
+        extracted = extract_metadata(self.get_path(document_id, annotated=False), doc["filename"])
+        with self._lock:
+            # A correction made while extraction was running takes precedence.
+            current = self.get_document(document_id)
+            metadata = {**current["metadata"], **extracted}
+            confirmed = current["metadata_status"] in ("corrected", "verified")
+            if confirmed:
+                metadata["sources"] = current["metadata"].get("sources", {})
+            with self._connect() as db:
+                db.execute("UPDATE documents SET extracted = ? WHERE id = ?", (json.dumps(metadata), document_id))
+                if not confirmed:
+                    db.execute("UPDATE documents SET title = ?, authors = ?, year = COALESCE(year, ?), "
+                               "metadata_status = 'needs_review' WHERE id = ?",
+                               (extracted["title"], extracted["authors"], extracted.get("year"), document_id))
+        return self.get_document(document_id)
+
+    def record_metadata_refresh(self, document_id: int, status: str, message: str) -> dict:
+        """Keep the outcome visible so a local reread is not mistaken for online verification."""
+        with self._lock:
+            document = self.get_document(document_id)
+            metadata = {**document["metadata"], "refresh": {"status": status, "message": message}}
+            with self._connect() as db:
+                db.execute("UPDATE documents SET extracted = ? WHERE id = ?", (json.dumps(metadata), document_id))
+        return self.get_document(document_id)
+
+    def apply_verified(self, document_id: int, record: dict, filename: str | None = None, *, refresh=False) -> dict:
+        """Apply an identified record; only explicit refresh replaces confirmed values, never corrections."""
         with self._lock:
             doc = self.get_document(document_id)
             if doc["metadata_status"] == "corrected":
                 return doc
             sources = doc["metadata"].get("sources", {})
             # Extracted PDF properties are only candidates (e.g. "rdbpf_6.eps"), so a record
-            # verified against the citation replaces them; a confirmed year or DOI is kept.
+            # verified against the citation replaces them; a confirmed year or DOI is kept unless explicitly refreshed.
             values = {key: record[key] for key in ("title", "authors", "year", "doi")
-                      if record.get(key) and not (key in ("year", "doi") and doc[key])}
+                      if record.get(key) and (refresh or not (key in ("year", "doi") and doc[key]))}
             rename = bool(filename) and doc["filename"] == "download.pdf"
             if not values and not rename:
                 return doc
             if values:
                 self.update_metadata(document_id, values, status="verified")
             metadata = {**doc["metadata"], "sources": {**sources, **dict.fromkeys(values, record["provider"])},
-                        "verified": {key: record.get(key) for key in ("provider", "doi", "publication", "first_author")}}
+                        "verified": {key: record.get(key) for key in ("provider", "doi", "arxiv_id", "publication", "first_author", "evidence")}}
             with self._connect() as db:
                 db.execute("UPDATE documents SET filename = ?, extracted = ? WHERE id = ?",
                            (Path(filename).name if rename else doc["filename"], json.dumps(metadata), document_id))

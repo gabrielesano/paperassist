@@ -35,6 +35,8 @@ hides both columns when both are visible and otherwise shows both, which also
 brings back a single collapsed column. The states persist per viewer, and the
 toolbar button stays reachable when the columns are collapsed. Toolbar rows
 reflow above the workspace rather than overlapping PDF text.
+Each collapsed side column also has its own plus button at the corresponding
+edge of the reader, restoring only that column and saving its visibility.
 
 The toolbar provides zoom, drawing, text highlighting, and comments. Annotation
 and Save controls target the clearly indicated active document. Main page, find
@@ -124,7 +126,9 @@ Process files incrementally with bounded concurrency. Hash while streaming into
 a unique temporary file; reuse known SHA-256 content and discard only the duplicate
 temporary copy. Validate before publishing into a hash-based managed path. Commit
 each file independently, report progress and per-file failures, and allow cancel.
-Importing does not open documents or trigger bibliography downloads.
+Bulk importing does not open documents or trigger bibliography downloads. For a
+single PDF, offer Import only and Import & open; the latter opens the imported
+file (or its existing duplicate) in a reader tab only after a successful import.
 
 Reimporting the same selection is idempotent. After interruption, completed files
 remain available; reselecting the folders skips completed hashes and retries
@@ -133,7 +137,12 @@ Do not reparse successful metadata for unchanged content/parser versions or
 overwrite manual corrections and preferred-file choices.
 
 Read PDF Info/XMP and explicit identifiers, then bounded first-page text when
-needed. Preserve value, source, and candidate/confirmed status. Filenames are
+needed. Recover provisional multiline titles and author lines from bounded
+first-page typography when embedded properties or filenames are generic. Keep
+the source of each recovered field visible. Explicit arXiv stamp dates can supply
+a preprint year only when they agree with the paper's own identifier; later
+revision dates and unrelated years remain candidates. This local recovery does
+not require network access. Preserve value, source, and candidate/confirmed status. Filenames are
 provisional titles; PDF creation time is not publication year. A DOI anywhere on
 the first page may belong to a citation: do not adopt the first match blindly.
 Exclude bibliography text where recognizable and corroborate identity.
@@ -143,6 +152,19 @@ evidence rather than accepting the first search result or merging on title
 similarity. Scans and unidentified papers remain visible with editable metadata;
 OCR is not required for import. A metadata failure differs from a file failure.
 The library needs basic title/author/year/identifier/status filtering.
+Column headers sort title, authors, year and metadata status in either direction;
+unknown years stay last. Preserve the chosen order and selection on list refresh.
+Allow selecting multiple papers and explicitly refreshing their metadata or the
+entire library, including papers hidden by a search. Run refreshes in cancellable
+background jobs with progress and per-paper failures. Jobs keep running when a
+paper is opened or the Library window is hidden or closed. Reread immutable
+originals, preserve manual corrections, notes, reading positions and saved PDF revisions,
+and optionally fetch fresh arXiv or Crossref metadata using the configured source
+switches. Use explicit identifiers first, then bounded title/author searches with
+independent corroboration. Provider failures must not prevent a successful
+fallback or discard locally recovered data. Ambiguous identities remain candidates
+for review. Distinguish local improvements from online verification in the summary,
+and retain a per-paper reason when metadata remains incomplete or lookup fails.
 
 ## Shared library and data model
 

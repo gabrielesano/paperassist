@@ -256,6 +256,87 @@ class LibraryDialogTests(MetadataCase):
     def test_sizes_read_naturally(self):
         self.assertEqual([size_text(n) for n in (12, 2048, 5 * 1024**2, 3 * 1024**3)], ["12 bytes", "2.0 KB", "5.0 MB", "3.0 GB"])
 
+    def test_single_import_can_open_a_new_or_duplicate_pdf_while_import_only_stays_in_library(self):
+        path = make_pdf(self.dir / "single.pdf", pages=3)
+        opened = []
+        self.dialog.open_requested.connect(opened.append)
+        self.dialog.show()
+        self.dialog.select_import([str(path)])
+        self.assertEqual(self.dialog.start_button.text(), "Import only")
+        self.assertTrue(self.dialog.import_open_button.isVisible())
+        self.dialog.start_button.click()
+        self.pump(lambda: self.dialog.watcher is None)
+        self.assertEqual(opened, [])
+        self.assertTrue(self.dialog.isVisible())
+        self.dialog.select_import([str(path)])
+        self.dialog.import_open_button.click()
+        self.pump(lambda: self.dialog.watcher is None)
+        self.assertEqual(opened, [self.library.list_documents()[0]["id"]])
+        self.assertTrue(self.dialog.isHidden())
+        self.dialog.show()
+        second = make_pdf(self.dir / "second.pdf", pages=4)
+        self.dialog.select_import([str(second)])
+        self.dialog.import_open_button.click()
+        self.pump(lambda: self.dialog.watcher is None)
+        self.assertEqual(len(opened), 2)
+        self.assertNotEqual(*opened)
+
+    def test_batch_and_failed_single_import_do_not_open_papers(self):
+        folder = self.make_files()
+        opened = []
+        self.dialog.open_requested.connect(opened.append)
+        self.dialog.show()
+        self.dialog.select_import([str(folder)])
+        self.assertFalse(self.dialog.import_open_button.isVisible())
+        self.dialog.discard_button.click()
+        bad = self.dir / "bad.pdf"
+        bad.write_bytes(b"not a PDF")
+        self.dialog.select_import([str(bad)])
+        self.dialog.import_open_button.click()
+        self.pump(lambda: self.dialog.watcher is None)
+        self.assertEqual(opened, [])
+        self.assertTrue(self.dialog.isVisible())
+        self.assertIn("1 failed", self.dialog.message.text())
+
+    def test_header_sorting_keeps_selection_and_missing_years_last_after_refresh(self):
+        docs = [self.add(f"{name}.pdf", pages)[0] for name, pages in (("Zeta", 3), ("alpha", 4), ("Beta", 5))]
+        for doc, year in zip(docs[:2], (2023, 1999)):
+            self.library.update_metadata(doc["id"], {"year": year})
+        self.dialog.show()
+        self.assertEqual(self.titles(), ["alpha", "Beta", "Zeta"])
+        self.dialog.table.topLevelItem(0).setSelected(True)
+        self.dialog.table.topLevelItem(2).setSelected(True)
+        selected = set(self.dialog.selected_ids())
+        self.assertEqual(len(selected), 2)
+        self.assertFalse(self.dialog.edit_button.isEnabled())
+        self.assertFalse(self.dialog.open_button.isEnabled())
+        for order, expected in ((Qt.AscendingOrder, ["alpha", "Zeta", "Beta"]),
+                                (Qt.DescendingOrder, ["Zeta", "alpha", "Beta"])):
+            self.dialog.table.sortItems(2, order)
+            self.dialog.refresh()
+            self.assertEqual(self.titles(), expected)
+            self.assertEqual(set(self.dialog.selected_ids()), selected)
+
+    def test_metadata_menu_refreshes_selected_or_all_even_when_search_is_active(self):
+        docs = [self.add(name, pages)[0] for name, pages in (("alpha.pdf", 3), ("Beta.pdf", 4), ("Zeta.pdf", 5))]
+        self.dialog.show()
+        self.dialog.online_metadata.setChecked(False)
+        self.dialog.table.topLevelItem(0).setSelected(True)
+        self.dialog.table.topLevelItem(2).setSelected(True)
+        original = self.library.refresh_metadata
+        with patch.object(self.library, "refresh_metadata", wraps=original) as refresh:
+            self.dialog.refresh_selected.trigger()
+            self.assertFalse(self.dialog.refresh_button.isEnabled())
+            self.pump(lambda: self.dialog.watcher is None)
+            self.assertEqual({call.args[0] for call in refresh.call_args_list}, {docs[0]["id"], docs[2]["id"]})
+        self.dialog.search.setText("alpha")
+        self.dialog.refresh()
+        with patch.object(self.library, "refresh_metadata", wraps=original) as refresh:
+            self.dialog.refresh_all.trigger()
+            self.pump(lambda: self.dialog.watcher is None)
+            self.assertEqual({call.args[0] for call in refresh.call_args_list}, {doc["id"] for doc in docs})
+        self.assertIn("3 checked", self.dialog.message.text())
+
 
 class WindowRefreshTests(MetadataCase):
     @classmethod
