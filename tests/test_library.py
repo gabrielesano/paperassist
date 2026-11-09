@@ -123,6 +123,12 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(again['label'], 'Reale 2016')
         self.assertEqual(self.library.set_label(doc['id'], '   ')['label'], '')
 
+    def test_search_finds_a_paper_by_its_tab_name(self):
+        doc = self.library.import_stream(io.BytesIO(self.payload), 'one.pdf')
+        self.assertEqual(self.library.list_documents('reale2016'), [])
+        self.library.set_label(doc['id'], 'reale2016')
+        self.assertEqual([item['id'] for item in self.library.list_documents(' REALE2016 ')], [doc['id']])
+
     def test_label_does_not_rename_the_stored_file(self):
         doc = self.library.import_stream(io.BytesIO(self.payload), 'one.pdf')
         before = sorted(path.name for path in self.library.originals.iterdir())

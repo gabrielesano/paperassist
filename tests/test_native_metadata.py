@@ -120,7 +120,7 @@ class LibraryDialogTests(MetadataCase):
     def test_search_finds_the_displayed_review_status_and_removes_corrected_papers(self):
         document, _ = self.add("unidentified.pdf", 3)
         self.dialog.show()
-        self.assertEqual(self.dialog.table.topLevelItem(0).text(3), "Needs review")
+        self.assertEqual(self.dialog.table.topLevelItem(0).text(4), "Needs review")
         QTest.keyClicks(self.dialog.search, "Needs review")
         self.pump(lambda: not self.dialog.typing.isActive())
         self.assertEqual(self.titles(), ["unidentified"])
@@ -140,8 +140,8 @@ class LibraryDialogTests(MetadataCase):
         self.dialog.editor.fields["year"].setText("2021")
         self.dialog.editor.save()
         self.assertEqual(self.titles(), ["Loops and arcs"])
-        self.assertEqual(self.dialog.table.topLevelItem(0).text(2), "2021")
-        self.assertEqual(self.dialog.table.topLevelItem(0).text(3), "")  # corrected: no longer needs review
+        self.assertEqual(self.dialog.table.topLevelItem(0).text(3), "2021")
+        self.assertEqual(self.dialog.table.topLevelItem(0).text(4), "")  # corrected: no longer needs review
 
     def test_f2_edits_the_selected_paper(self):
         self.add("a.pdf", 3)
@@ -312,7 +312,7 @@ class LibraryDialogTests(MetadataCase):
         self.assertFalse(self.dialog.open_button.isEnabled())
         for order, expected in ((Qt.AscendingOrder, ["alpha", "Zeta", "Beta"]),
                                 (Qt.DescendingOrder, ["Zeta", "alpha", "Beta"])):
-            self.dialog.table.sortItems(2, order)
+            self.dialog.table.sortItems(3, order)
             self.dialog.refresh()
             self.assertEqual(self.titles(), expected)
             self.assertEqual(set(self.dialog.selected_ids()), selected)

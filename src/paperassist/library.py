@@ -246,7 +246,7 @@ class Library:
         for row in rows:
             doc = self._document(row)
             fields = [str(doc.get(key) or "") for key in
-                      ("title", "authors", "year", "doi", "filename", "metadata_status")]
+                      ("title", "label", "authors", "year", "doi", "filename", "metadata_status")]
             if doc["metadata_status"] in ("needs_review", "incomplete"):
                 fields.append("Metadata needs review")
             if not needle or needle in " ".join(fields).casefold():

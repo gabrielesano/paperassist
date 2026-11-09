@@ -207,10 +207,40 @@ class LibraryDialogTests(LibraryWindowCase):
         self.assertEqual(self.dialog.message.text(), "No paper matches this search.")
         self.dialog.search.setText("")
         self.dialog.refresh()
-        flags = {self.dialog.table.topLevelItem(i).text(0): self.dialog.table.topLevelItem(i).text(3)
+        flags = {self.dialog.table.topLevelItem(i).text(0): self.dialog.table.topLevelItem(i).text(4)
                  for i in range(self.dialog.table.topLevelItemCount())}
         self.assertEqual(flags["Loops and nanoflares"], "")
         self.assertEqual(sorted(flags.values()).count("Needs review"), 2)
+
+    def items(self):
+        table = self.dialog.table
+        return [table.topLevelItem(i) for i in range(table.topLevelItemCount())]
+
+    def test_columns_show_the_title_even_when_a_tab_name_exists(self):
+        header = self.dialog.table.headerItem()
+        self.assertEqual([header.text(i) for i in range(5)], ["Title", "Tab name", "Authors", "Year", "Metadata"])
+        self.workspace.library.set_label(self.docs[1]["id"], "lovelace2019")
+        self.dialog.refresh()
+        row = next(item for item in self.items() if item.data(0, Qt.UserRole) == self.docs[1]["id"])
+        self.assertEqual([row.text(i) for i in range(5)],
+                         ["Loops and nanoflares", "lovelace2019", "Ada Lovelace", "2019", ""])
+        self.assertEqual(sum(bool(item.text(1)) for item in self.items()), 1)
+        self.dialog.search.setText("lovelace2019")  # a paper can be found by its tab name
+        self.dialog.refresh()
+        self.assertEqual(self.titles(), ["Loops and nanoflares"])
+
+    def test_year_sorts_numerically_and_the_review_colour_sits_on_the_metadata_column(self):
+        self.workspace.library.update_metadata(self.docs[0]["id"], {"year": 987})
+        self.dialog.refresh()
+        self.dialog.table.sortItems(3, Qt.AscendingOrder)
+        # 987 < 2019 only as numbers; as text "2019" would come first. Papers without a year come last.
+        self.assertEqual([item.text(3) for item in self.items()], ["987", "2019", ""])
+        self.dialog.table.sortItems(3, Qt.DescendingOrder)
+        self.assertEqual([item.text(3) for item in self.items()], ["2019", "987", ""])
+        for item in self.items():
+            review = item.text(4) == "Needs review"
+            self.assertEqual(item.foreground(4).color().name() == "#a15c00", review)
+            self.assertNotEqual(item.foreground(0).color().name(), "#a15c00")
 
     def test_enter_and_the_buttons_ask_for_a_tab_or_the_quick_view(self):
         tabs, quick = [], []
@@ -324,6 +354,140 @@ class LibraryDialogTests(LibraryWindowCase):
         self.assertIs(view.doc, document)
         self.assertTrue(view.doc.modified)
         self.assertEqual(view.verticalScrollBar().value(), position)
+
+
+class OcrControlTests(LibraryWindowCase):
+    """The refresh menu's OCR choices, against a workspace whose job the test controls."""
+
+    def setUp(self):
+        super().setUp()
+        self.dialog = LibraryDialog(self.workspace)
+        self.addCleanup(self.dialog.deleteLater)
+        self.addCleanup(self.dialog.typing.stop)
+        self.set_statuses("needs_review", "verified", "incomplete")
+
+    def set_statuses(self, *statuses):
+        for document, status in zip(self.docs, statuses):
+            self.workspace.library.update_metadata(document["id"], {"title": f"Paper {document['id']}"}, status=status)
+        self.dialog.refresh()
+        self.review = [document["id"] for document, status in zip(self.docs, statuses) if status in ("needs_review", "incomplete")]
+
+    def start_fake_job(self, trigger):
+        self.record = {"id": "fake", "status": "running"}
+        self.calls = []
+        self.workspace.refresh_metadata = lambda ids=None, **options: self.calls.append((ids, options)) or self.record
+        self.workspace.job_status = lambda job_id: self.record
+        self.workspace.cancel_job = lambda job_id: self.record.update(status="cancelled")
+        trigger()
+        self.dialog.watcher.timer.stop()  # the test drives the polling itself
+
+    def finish(self, **result):
+        self.record.update(status="completed", result={"documents": [], **result})
+        self.dialog.watcher.finished.emit(self.record)
+
+    def test_ocr_choices_map_to_the_refresh_mode(self):
+        dialog = self.dialog
+        self.assertTrue(dialog.ocr_metadata.isChecked())
+        self.assertEqual(dialog.ocr_metadata.text(), "Read scanned PDFs with offline OCR")
+        dialog.table.selectAll()
+        count = len(self.docs)
+        self.assertEqual(dialog.recover_selected.text(), f"Recover selected papers with OCR ({count})")
+        for action, ocr_checked, ids, expected in (
+                (dialog.refresh_selected, True, dialog.selected_ids(), "auto"),
+                (dialog.refresh_review, True, self.review, "auto"),
+                (dialog.refresh_all, True, None, "auto"),
+                (dialog.refresh_selected, False, dialog.selected_ids(), "off"),
+                (dialog.refresh_review, False, self.review, "off"),
+                (dialog.refresh_all, False, None, "off"),
+                (dialog.recover_selected, False, dialog.selected_ids(), "force")):
+            dialog.ocr_metadata.setChecked(ocr_checked)
+            self.start_fake_job(action.trigger)
+            self.assertEqual(self.calls, [(ids, {"online": True, "ocr": expected})])
+            self.finish()
+
+    def test_review_refresh_sends_only_papers_that_need_review(self):
+        dialog = self.dialog
+        self.set_statuses("needs_review", "verified", "corrected")
+        self.assertEqual(dialog.refresh_review.text(), "Refresh papers that need review (1)")
+        self.assertEqual(dialog.refresh_all.text(), f"Force refresh entire library ({len(self.docs)})")
+        self.start_fake_job(dialog.refresh_review.trigger)
+        self.assertEqual(self.calls, [([self.docs[0]["id"]], {"online": True, "ocr": "auto"})])
+
+    def test_review_count_ignores_the_search_filter(self):
+        dialog = self.dialog
+        self.assertEqual(len(self.review), 2)
+        dialog.search.setText("no paper has this text")
+        dialog.refresh()
+        self.assertEqual(dialog.table.topLevelItemCount(), 0)
+        self.assertEqual(dialog.refresh_review.text(), "Refresh papers that need review (2)")
+        self.assertTrue(dialog.refresh_review.isEnabled())
+        self.start_fake_job(dialog.refresh_review.trigger)
+        self.assertEqual(self.calls[0][0], self.review)
+
+    def test_review_refresh_is_disabled_when_nothing_needs_review(self):
+        self.set_statuses("verified", "corrected", "verified")
+        self.assertFalse(self.dialog.refresh_review.isEnabled())
+        self.assertTrue(self.dialog.refresh_all.isEnabled())
+        self.assertTrue(self.dialog.refresh_button.isEnabled())
+
+    def test_ocr_actions_follow_the_selection_and_are_disabled_while_a_job_runs(self):
+        dialog = self.dialog
+        dialog.table.clearSelection()
+        self.assertFalse(dialog.recover_selected.isEnabled())
+        self.assertTrue(dialog.refresh_all.isEnabled())
+        dialog.table.selectAll()
+        self.assertTrue(dialog.recover_selected.isEnabled())
+        self.start_fake_job(dialog.recover_selected.trigger)
+        for action in (dialog.refresh_selected, dialog.refresh_review, dialog.refresh_all, dialog.recover_selected):
+            self.assertFalse(action.isEnabled())
+        self.assertFalse(dialog.refresh_button.isEnabled())
+        dialog.start_metadata_refresh(dialog.selected_ids(), ocr="force")
+        self.assertEqual(len(self.calls), 1)
+        self.finish()
+        self.assertTrue(dialog.recover_selected.isEnabled())
+
+    def test_tooltips_say_that_ocr_is_local_and_provisional(self):
+        for action in (self.dialog.ocr_metadata, self.dialog.recover_selected):
+            for phrase in ("locally", "minute", "never modifies the PDF", "provisional"):
+                self.assertIn(phrase, action.toolTip())
+
+    def test_progress_names_the_ocr_stage_and_keeps_the_online_provider(self):
+        self.dialog.table.selectAll()
+        self.start_fake_job(self.dialog.refresh_selected.trigger)
+        for progress, text in (({"completed": 2, "total": 5, "stage": "ocr", "page": 1}, "Refreshing metadata 2 of 5… (offline OCR, page 1)"),
+                               ({"completed": 2, "total": 5, "stage": "ocr"}, "Refreshing metadata 2 of 5… (offline OCR)"),
+                               ({"completed": 3, "total": 5, "provider": "arxiv"}, "Refreshing metadata 3 of 5… (arXiv)"),
+                               ({"completed": 4, "total": 5, "provider": "crossref"}, "Refreshing metadata 4 of 5… (Crossref)")):
+            self.dialog._progress({"progress": progress})
+            self.assertEqual(self.dialog.message.text(), text)
+        self.dialog.cancel_button.click()  # the existing button stops OCR through the job's cancel event
+        self.assertEqual(self.record["status"], "cancelled")
+
+    def test_summary_counts_papers_recovered_with_ocr_only_when_there_are_some(self):
+        self.start_fake_job(self.dialog.refresh_all.trigger)
+        self.finish(local=1, ocr=2)
+        self.assertIn("1 improved locally", self.dialog.message.text())
+        self.assertTrue(self.dialog.message.text().endswith(", 2 recovered with OCR"), self.dialog.message.text())
+        self.start_fake_job(self.dialog.refresh_all.trigger)
+        self.finish(local=1, ocr=0)
+        self.assertNotIn("OCR", self.dialog.message.text())
+
+    def test_ocr_sources_are_labelled_as_provisional(self):
+        listing = self.workspace.library.list_documents
+
+        def with_sources(*args, **kwargs):
+            documents = listing(*args, **kwargs)
+            for document in documents:
+                document["metadata"]["sources"] = {"title": "ocr_title", "authors": "ocr_authors", "year": "ocr_year"}
+            return documents
+
+        with patch.object(self.workspace.library, "list_documents", with_sources):
+            self.dialog.refresh()
+        item = self.dialog.table.topLevelItem(0)
+        for column, label in ((0, "Offline OCR of the first page (provisional)"),
+                              (2, "Offline OCR author lines (provisional)"), (3, "Offline OCR (provisional)")):
+            self.assertIn(f"Source: {label}", item.toolTip(column))
+        self.assertEqual(item.toolTip(1), "")
 
 
 class PositionTests(LibraryWindowCase):

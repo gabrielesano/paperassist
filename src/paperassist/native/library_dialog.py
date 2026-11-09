@@ -11,8 +11,11 @@ from .library_source import display_title
 from .metadata_dialog import MetadataDialog
 from .theme import APP_STYLE, serif_heading_font
 
+TITLE, TAB_NAME, AUTHORS, YEAR, METADATA = range(5)
 REVIEW = QColor("#a15c00")  # amber: not an error, a paper whose metadata nobody confirmed
 NEEDS_REVIEW = ("needs_review", "incomplete")
+OCR_TIP = ("OCR runs locally and can take up to about a minute per paper. It never modifies the PDF, "
+           "and its results stay provisional until you review them.")
 
 
 def size_text(size):
@@ -26,7 +29,7 @@ class PaperItem(QTreeWidgetItem):
     def __lt__(self, other):
         column = self.treeWidget().sortColumn()
         left, right = self.text(column), other.text(column)
-        if column == 2:
+        if column == YEAR:
             if bool(left) != bool(right):
                 ascending = self.treeWidget().header().sortIndicatorOrder() == Qt.AscendingOrder
                 return bool(left) if ascending else bool(right)
@@ -48,18 +51,17 @@ class LibraryDialog(QDialog):
         self.heading = QLabel("Library")
         self.heading.setProperty("headingScale", "dialog")
         self.heading.setFont(serif_heading_font(self.font()))
-        self.search = QLineEdit(placeholderText="Search title, author, year or DOI", clearButtonEnabled=True)
+        self.search = QLineEdit(placeholderText="Search title, tab name, author, year or DOI", clearButtonEnabled=True)
         self.search.setAccessibleName("Search the library")
         self.table = QTreeWidget(objectName="dialog-tree", rootIsDecorated=False, uniformRowHeights=True,
-                                 headerLabels=["Title", "Authors", "Year", "Metadata"])
+                                 headerLabels=["Title", "Tab name", "Authors", "Year", "Metadata"])
         self.table.setAccessibleName("Papers")
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.AscendingOrder)
         self.table.header().setToolTip("Click a column to sort; click again to reverse the order.")
-        self.table.setColumnWidth(0, 420)
-        self.table.setColumnWidth(1, 240)
-        self.table.setColumnWidth(2, 70)
+        for column, width in ((TITLE, 360), (TAB_NAME, 130), (AUTHORS, 200), (YEAR, 56)):
+            self.table.setColumnWidth(column, width)
         self.open_button = QPushButton("Open")
         self.open_button.setProperty("primary", True)
         self.quick_button = QPushButton("Quick view")
@@ -69,12 +71,24 @@ class LibraryDialog(QDialog):
         self.refresh_button = QPushButton("Refresh metadata")
         self.refresh_button.setToolTip("Recover metadata locally from the PDF, with optional online verification. Manual corrections are preserved.")
         menu = QMenu(self.refresh_button)
+        menu.setToolTipsVisible(True)
         self.refresh_selected = menu.addAction("Refresh selected papers")
-        self.refresh_all = menu.addAction("Refresh entire library")
+        self.refresh_review = menu.addAction("Refresh papers that need review")
+        self.refresh_review.setToolTip("Skips verified and manually corrected papers, and ignores the current search.")
+        self.recover_selected = menu.addAction("Recover selected papers with OCR")
+        self.recover_selected.setToolTip(OCR_TIP + " Runs on every selected paper, including ones with a text layer.")
+        menu.addSeparator()
+        self.refresh_all = menu.addAction("Force refresh entire library")
+        self.refresh_all.setToolTip("Also rechecks verified papers; online verification may update their values. "
+                                    "Manual corrections are always preserved.")
         menu.addSeparator()
         self.online_metadata = menu.addAction("Look up metadata online (arXiv, Crossref)")
         self.online_metadata.setCheckable(True)
         self.online_metadata.setChecked(True)
+        self.ocr_metadata = menu.addAction("Read scanned PDFs with offline OCR")
+        self.ocr_metadata.setCheckable(True)
+        self.ocr_metadata.setChecked(True)
+        self.ocr_metadata.setToolTip(OCR_TIP + " Used only for papers whose text cannot be read.")
         self.refresh_button.setMenu(menu)
         self.import_button = QPushButton("Import PDFs…")
         self.folder_button = QPushButton("Import folder…")
@@ -129,6 +143,7 @@ class LibraryDialog(QDialog):
 
         self.pending = []
         self.library_count = 0
+        self.review_ids = []
         self.single_import = self.open_after_import = False
         self.job_kind = "import"
         self.typing = QTimer(self, singleShot=True, interval=150, timeout=self.refresh)
@@ -143,7 +158,9 @@ class LibraryDialog(QDialog):
         self.start_button.clicked.connect(lambda: self._confirm_import())
         self.import_open_button.clicked.connect(lambda: self._confirm_import(open_after=True))
         self.refresh_selected.triggered.connect(lambda: self.start_metadata_refresh(self.selected_ids()))
+        self.refresh_review.triggered.connect(lambda: self.start_metadata_refresh(self.review_ids))
         self.refresh_all.triggered.connect(lambda: self.start_metadata_refresh())
+        self.recover_selected.triggered.connect(lambda: self.start_metadata_refresh(self.selected_ids(), ocr="force"))
         self.discard_button.clicked.connect(self._discard_selection)
         self.cancel_button.clicked.connect(lambda: self.watcher.cancel())
         self._importing(False)
@@ -172,19 +189,22 @@ class LibraryDialog(QDialog):
     def refresh(self):
         selected, current = set(self.selected_ids()), self.selected_id()
         documents = self.workspace.library.list_documents(self.search.text())
-        self.library_count = len(self.workspace.library.list_documents()) if self.search.text() else len(documents)
+        everyone = self.workspace.library.list_documents() if self.search.text() else documents
+        self.library_count = len(everyone)
+        self.review_ids = [document["id"] for document in everyone if document["metadata_status"] in NEEDS_REVIEW]
         blocker = QSignalBlocker(self.table)
         self.table.setSortingEnabled(False)
         self.table.clear()
         for document in documents:
             review = document["metadata_status"] in NEEDS_REVIEW
             verified = document["metadata_status"] == "verified"
-            item = PaperItem([display_title(document), document["authors"] or "", str(document["year"] or ""),
-                              "Needs review" if review else "Verified" if verified else ""])
+            # The tab nickname has its own column; the title column always names the paper itself.
+            item = PaperItem([document["title"] or document["filename"], document["label"], document["authors"] or "",
+                              str(document["year"] or ""), "Needs review" if review else "Verified" if verified else ""])
             item.setData(0, Qt.UserRole, document["id"])
-            item.setToolTip(0, document["filename"])
+            item.setToolTip(TITLE, document["filename"])
             if review:
-                item.setForeground(3, REVIEW)
+                item.setForeground(METADATA, REVIEW)
             metadata = document["metadata"]
             provider = (metadata.get("verified") or {}).get("provider")
             provider = {"arxiv": "arXiv", "crossref": "Crossref"}.get(str(provider).lower(), provider)
@@ -192,15 +212,19 @@ class LibraryDialog(QDialog):
                 "Manually corrected; automatic refresh preserves these values." if document["metadata_status"] == "corrected" else
                 f"Verified using {provider}." if verified and provider else
                 "Extracted locally; not yet verified. Refresh metadata can recover more data from the PDF or online sources.")
-            item.setToolTip(3, note)
-            for field, column in (("title", 0), ("authors", 1), ("year", 2)):
+            item.setToolTip(METADATA, note)
+            for field, column in (("title", TITLE), ("authors", AUTHORS), ("year", YEAR)):
                 source = metadata.get("sources", {}).get(field)
                 if source:
                     source = {"pdf_info": "PDF properties", "xmp": "XMP properties", "filename": "Filename",
                               "arxiv": "arXiv", "crossref": "Crossref",
                               "arxiv_submission_date": "Printed arXiv submission date (preprint year)",
                               "first_page_typography": "First-page title typography (provisional)",
-                              "first_page_authors": "First-page author lines (provisional)"}.get(source, source)
+                              "first_page_authors": "First-page author lines (provisional)",
+                              "ocr_title": "Offline OCR of the first page (provisional)",
+                              "ocr_authors": "Offline OCR author lines (provisional)"}.get(source, source)
+                    if source.startswith("ocr"):  # any other OCR-derived field
+                        source = "Offline OCR (provisional)"
                     item.setToolTip(column, item.toolTip(column) + ("\n" if item.toolTip(column) else "") + f"Source: {source}")
             self.table.addTopLevelItem(item)
             if document["id"] in selected:
@@ -234,8 +258,12 @@ class LibraryDialog(QDialog):
         available = not self.watcher and not self.pending
         self.refresh_selected.setEnabled(count > 0 and available)
         self.refresh_selected.setText(f"Refresh selected papers ({count})")
+        self.recover_selected.setEnabled(count > 0 and available)
+        self.recover_selected.setText(f"Recover selected papers with OCR ({count})")
+        self.refresh_review.setEnabled(available and bool(self.review_ids))
+        self.refresh_review.setText(f"Refresh papers that need review ({len(self.review_ids)})")
         self.refresh_all.setEnabled(available and self.library_count > 0)
-        self.refresh_all.setText(f"Refresh entire library ({self.library_count})")
+        self.refresh_all.setText(f"Force refresh entire library ({self.library_count})")
         self.refresh_button.setEnabled(available and self.refresh_all.isEnabled())
         self.selection_hint.setText(f"{count} selected" if count else "Select papers with Ctrl-click or Shift-click.")
 
@@ -273,11 +301,12 @@ class LibraryDialog(QDialog):
         # Open tabs may cite the corrected paper, so drop cached resolutions before reloading the active one.
         window.details.library_changed()
 
-    def start_metadata_refresh(self, document_ids=None):
+    def start_metadata_refresh(self, document_ids=None, ocr=None):
         if self.watcher or self.pending or document_ids == []:
             return
+        ocr = ocr or ("auto" if self.ocr_metadata.isChecked() else "off")
         try:
-            job = self.workspace.refresh_metadata(document_ids, online=self.online_metadata.isChecked())
+            job = self.workspace.refresh_metadata(document_ids, online=self.online_metadata.isChecked(), ocr=ocr)
         except Exception as error:
             self.message.setText(f"Could not refresh metadata: {error}")
             return
@@ -301,6 +330,8 @@ class LibraryDialog(QDialog):
             text = (f"{len(result.get('documents', []))} checked, {result.get('local', 0)} improved locally, "
                     f"{result.get('verified', 0)} verified online, {result.get('preserved', 0)} manual corrections preserved, "
                     f"{review} need review, {len(result.get('errors', []))} failed")
+            if result.get("ocr"):
+                text += f", {result['ocr']} recovered with OCR"
             if result.get("errors"):
                 text += ": " + "; ".join(f"Paper {e['document_id']}: {e['error']}" for e in result["errors"])
             if job["status"] == "cancelled":
@@ -391,8 +422,13 @@ class LibraryDialog(QDialog):
         if done:
             action = "Refreshing metadata" if self.job_kind == "metadata" else "Importing"
             provider = done.get("provider")
-            source = "arXiv" if provider == "arxiv" else "Crossref"
-            self.message.setText(f"{action} {done['completed']} of {done['total']}…" + (f" ({source})" if provider else ""))
+            if done.get("stage") == "ocr":
+                detail = "offline OCR" + (f", page {done['page']}" if done.get("page") else "")
+            elif provider:
+                detail = "arXiv" if provider == "arxiv" else "Crossref"
+            else:
+                detail = ""
+            self.message.setText(f"{action} {done['completed']} of {done['total']}…" + (f" ({detail})" if detail else ""))
 
     def _imported(self, job):
         self.watcher.deleteLater()
