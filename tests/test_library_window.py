@@ -256,6 +256,26 @@ class LibraryDialogTests(LibraryWindowCase):
         self.dialog.quick_button.click()
         self.assertEqual(quick, [wanted])
 
+    def test_both_enter_keys_open_once_and_require_one_selected_paper(self):
+        opened = []
+        self.dialog.open_requested.connect(opened.append)
+        for key, modifiers in ((Qt.Key_Return, Qt.NoModifier), (Qt.Key_Enter, Qt.KeypadModifier)):
+            with self.subTest(key=key):
+                self.dialog.show()
+                self.dialog.table.clearSelection()
+                QTest.keyClick(self.dialog.table, key, modifiers)
+                self.assertEqual(opened, [])
+                self.dialog.table.selectAll()
+                QTest.keyClick(self.dialog.table, key, modifiers)
+                self.assertEqual(opened, [])
+                self.dialog.table.clearSelection()
+                item = self.dialog.table.topLevelItem(0)
+                item.setSelected(True)
+                self.dialog.table.setCurrentItem(item)
+                QTest.keyClick(self.dialog.table, key, modifiers)
+                self.assertEqual(opened, [item.data(0, Qt.UserRole)])
+                opened.clear()
+
     def test_import_runs_as_a_job_with_progress_and_updates_the_list(self):
         new = [make_pdf(self.dir / f"new{n}.pdf", pages=n) for n in (6, 7)]
         self.dialog.start_import([str(path) for path in new] + [str(new[0])])
@@ -784,6 +804,16 @@ class ReferenceCardTests(LibraryWindowCase):
         self.assertEqual(len(self.widgets()), 1)
         self.panel.filter.setText("zzz")
         self.assertEqual(self.widgets(), [])
+
+    def test_return_and_keypad_enter_expand_a_reference_once(self):
+        for key, modifiers in ((Qt.Key_Return, Qt.NoModifier), (Qt.Key_Enter, Qt.KeypadModifier)):
+            with self.subTest(key=key):
+                self.panel.list.setCurrentRow(0)
+                with patch.object(self.panel, '_expand', wraps=self.panel._expand) as expand:
+                    QTest.keyClick(self.panel.list, key, modifiers)
+                expand.assert_called_once()
+                self.assertEqual(len(self.widgets()), 1)
+                self.panel._collapse_current()
 
     def test_cards_stay_reachable_openable_and_steppable_from_the_keyboard(self):
         refs = references.get(self.workspace.library, self.docs[0]["id"])["references"]

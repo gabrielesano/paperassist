@@ -56,6 +56,7 @@ class LibraryDialog(QDialog):
         self.table = QTreeWidget(objectName="dialog-tree", rootIsDecorated=False, uniformRowHeights=True,
                                  headerLabels=["Title", "Tab name", "Authors", "Year", "Metadata"])
         self.table.setAccessibleName("Papers")
+        self.table.installEventFilter(self)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.AscendingOrder)
@@ -180,6 +181,15 @@ class LibraryDialog(QDialog):
         if event.key() == Qt.Key_F2:
             return self.edit_metadata()
         super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):
+        # Qt's itemActivated key differs by platform; both Enter keys open the selected paper.
+        if (watched is self.table and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier)):
+            self._request(self.open_requested)
+            return True
+        return super().eventFilter(watched, event)
 
     def showEvent(self, event):
         super().showEvent(event)

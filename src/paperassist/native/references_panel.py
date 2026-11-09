@@ -179,6 +179,7 @@ class ReferencesPanel(QWidget):
                                 verticalScrollMode=QListWidget.ScrollPerPixel)
         self.list.setMouseTracking(True)
         self.list.setAccessibleName("References")
+        self.list.installEventFilter(self)
         self.list.setItemDelegate(CardDelegate(self.list))
         self.expanded = None  # id of the single card that owns widgets
 
@@ -208,6 +209,15 @@ class ReferencesPanel(QWidget):
     def _set_actions_visible(self, visible):
         self.acquire.setVisible(visible)
         self.repair.setVisible(visible)
+
+    def eventFilter(self, watched, event):
+        if (watched is self.list and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier)):
+            if item := self.list.currentItem():
+                self._expand(item, focus=True)
+            return True
+        return super().eventFilter(watched, event)
         self.actions_bar.setVisible(visible)
 
     def minimumSizeHint(self):

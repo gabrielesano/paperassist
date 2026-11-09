@@ -349,6 +349,6 @@ class ShortcutTests(unittest.TestCase):
         for entry in shortcuts.TABLE:
             self.assertIn(entry.label, text)
         self.assertIn("Fit width", text)  # an action the table does not own is listed from the window
-        self.assertIn("Ctrl+0", text)
+        self.assertIn(QKeySequence('Ctrl+0').toString(QKeySequence.NativeText), text)
         dialog.close()
         self.assertIsNotNone(shortcuts.show_help(self.window))  # also callable from the app menu
