@@ -1,5 +1,11 @@
 # First standalone Linux release
 
+Historical release plan: standalone Linux, Windows and Apple Silicon macOS
+packages have since been published. Current work concerns the next alpha with
+bundled OCR and native desktop integration; see [the roadmap](../roadmap.md) and
+[host acceptance](host-acceptance.md). Completion and pending-status statements
+below describe their original workstream, not the current release state.
+
 Follow-up 2026-11-08: **0.1.0a3** addresses the remaining maintenance and ELF
 audit findings. See [current verification](linux-alpha-maintenance.md). The a1/a2
 artifacts are preserved; the a2 workstream records below remain historical.

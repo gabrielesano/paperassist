@@ -9,9 +9,12 @@ Reading a research paper is rarely linear. Half the time you are scrolling to th
 **Current development, not yet released:** The native reader is now the default
 source entry point; the Flask/PDF.js/pywebview stack and Node toolchain have been
 retired. New standalone builds include minimal offline OCR with Tesseract 5.5.4,
-Leptonica and the English LSTM model. The bundled runtime adds 5.26 MiB and has
-passed an offline Linux container test without system Tesseract. Windows/macOS
-and the Ubuntu 22.04 build baseline still need verification for this change.
+Leptonica and the English LSTM model. Hosted Ubuntu 22.04, Windows and Apple
+Silicon macOS builds have passed copied-bundle and installed-package OCR checks,
+along with the platform installer/native-window tests.
+Runtime inputs occupy about 5.36 MiB on Ubuntu, 8.16 MiB on Windows and 5.50 MiB
+on macOS; see [host acceptance](docs/development/host-acceptance.md) for exact
+run scope and remaining manual checks.
 The existing `0.1.0a4` downloads predate bundled OCR. See the
 [web retirement](docs/development/web-retirement.md) and
 [bundled OCR verification](docs/development/bundled-ocr.md) records.
@@ -238,7 +241,7 @@ Source availability, authentication rules, and quotas are controlled by each pro
 - **No AI guesswork:** Importing, metadata extraction, and citation matching are 100% deterministic.
 - **Citation detection is partial:** PaperAssist recognizes author-year and bracketed numeric citations, abstaining when entries cannot be disambiguated. A six-paper tuning benchmark reported about 96% recall at the reference/page level, not exact sentence-level accuracy or a guarantee on new papers. The private benchmark is not reproducible from this repository; see [accuracy notes](docs/development/citation-accuracy.md). OCR errors, superscripts, and unusual styles can cause missed citations.
 - **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer (PaperAssist does not write an OCR text layer into PDFs). For scanned papers lacking extractable text, **Refresh metadata** can optionally invoke a local **Tesseract** (`eng`) worker in an isolated background process to recover provisional titles and authors (reading page 1, and falling back to page 2 only if no title is recognized on page 1). New standalone builds include a minimal Tesseract engine and English model; it requires no separate Tesseract installation. A missing or damaged bundled runtime is reported without affecting normal metadata extraction.
-- **Packaged OCR verification:** The bundled engine has been tested on Linux from a copied standalone app with an empty `PATH` and in an offline Fedora 43 container without system Tesseract or language data. Windows and macOS build/verification steps are configured; execution on those hosts remains pending. See [bundled OCR verification](docs/development/bundled-ocr.md).
+- **Packaged OCR verification:** The bundled engine has been tested on Linux from a copied standalone app with an empty `PATH` and in an offline Fedora 43 container without system Tesseract or language data. Hosted builds have also passed OCR from the installed Linux launcher, Windows setup installation and macOS app copied from its DMG, plus the Ubuntu GLIBC_2.35 gate and platform installer/native-window checks. The full native Cocoa test suite also passes. Interactive desktop and hardware coverage remain follow-up work. See [host acceptance](docs/development/host-acceptance.md).
 
 ---
 

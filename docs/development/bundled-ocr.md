@@ -114,7 +114,14 @@ build manifests after those builds execute.
   Library window leaves it running, metadata updates on completion, and an open
   reader retains its unsaved highlight and original PDF/revision state.
 
-## Remaining release checks
+## Hosted acceptance after the local build
+
+The subsequent [host acceptance record](host-acceptance.md) supersedes the
+pending-build status below: the first hosted Build run passed on Ubuntu 22.04,
+Windows and Apple Silicon macOS, including copied-bundle OCR and platform package
+checks. It records the per-platform sizes and the separate installed-OCR checks.
+
+## Original release limits at local implementation
 
 The local executable is a Fedora-host build. It does not establish compatibility
 with the Ubuntu 22.04 release baseline. The Build workflow compiles the OCR engine
