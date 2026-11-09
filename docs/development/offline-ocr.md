@@ -14,9 +14,10 @@ reviewable, with their source retained in the extraction record.
 ## Runtime dependencies
 
 The native dependency group already provides PDFium for rendering. OCR also
-requires the Tesseract executable and English language data (`eng.traineddata`).
-Tesseract and language data are external runtime dependencies; the current
-PyInstaller specification does not bundle them.
+requires the Tesseract executable (version 4.1 or newer; Ubuntu 22.04 ships 4.1.1)
+and English language data (`eng.traineddata`). Tesseract and language data are
+external runtime dependencies; the current PyInstaller specification does not
+bundle them.
 
 Install the dependencies separately when needed:
 
@@ -33,7 +34,10 @@ brew install tesseract
 
 For Windows, follow the installer links in the
 [Tesseract installation guide](https://tesseract-ocr.github.io/tessdoc/Installation.html)
-and include English language data. The binary must be discoverable by PaperAssist.
+and include English language data. The UB Mannheim Windows installer offers both
+all-users installations (`Program Files`) and "Install just for me", which installs
+to `%LOCALAPPDATA%\Programs\Tesseract-OCR` and does not add itself to `PATH`.
+PaperAssist checks both locations as well as `PATH`.
 The Fedora language package is documented in the
 [Fedora package catalog](https://packages.fedoraproject.org/pkgs/tesseract-tessdata/tesseract-langpack-eng/index.html).
 
@@ -44,10 +48,14 @@ tesseract --version
 tesseract --list-langs
 ```
 
-The language list must include `eng`. A missing binary, missing language model or
-engine failure must produce an actionable per-paper outcome and keep the
-previous metadata intact. Installing a Python wrapper alone does not install the
-Tesseract executable or its models.
+Tesseract 4.1 or newer is supported across common distributions (Ubuntu 22.04 ships 4.1.1,
+Debian 12 ships 5.3.0, and Ubuntu 24.04 ships 5.3.4). In both 4.1 and 5.x, `--version` begins
+with `tesseract X.Y.Z`, TSV output columns match, and `--psm 3` and `--psm 11` operate
+identically. However, 4.1 `--list-langs` outputs `List of available languages (N):` without the
+`in "<dir>"` directory path present in 5.x banners. The language list must include `eng`. A
+missing binary, missing language model or engine failure produces an actionable per-paper
+outcome and keeps the previous metadata intact. Installing a Python wrapper alone does not
+install the Tesseract executable or its models.
 
 ## Process and package constraints
 
@@ -108,8 +116,9 @@ and remaining host-only checks below before declaring OCR release-ready.
 
 - `paperassist.ocr.recover(path, cache_dir, sha256, cancel, ...)` runs in a spawned
   worker (its own session/process group). The worker renders at most two pages
-  with PDFium and runs `tesseract` (TSV, no shell). The second page is read only
-  when the first yields no recognisable title (cover or stamp sheet).
+  with PDFium and runs `tesseract` (TSV, no shell; Tesseract 4.1 or newer is supported).
+  The second page is read only when the first yields no recognisable title (cover
+  or stamp sheet).
 - Bounds: 12 million pixels per page, 2 pages, two attempts per page (200 dpi
   `--psm 3`, then 300 dpi `--psm 11`, the second only if the first is poor),
   20 s per Tesseract run, 60 s per paper, 4000 words and 8 MiB of TSV per page,
@@ -118,6 +127,9 @@ and remaining host-only checks below before declaring OCR release-ready.
   Windows); the staging directory with the page images is always removed.
 - Results are cached in `<library>/cache/ocr/<key>.json`; the key covers the PDF
   SHA-256, Tesseract version, language-model hashes and render configuration.
+  For Tesseract 4.1.x, which does not output the model directory in `tesseract --list-langs`,
+  models are resolved via `TESSDATA_PREFIX`, the engine directory or well-known system
+  paths (`/usr/share/tesseract-ocr/4.00/tessdata`, etc.) so results remain cacheable.
   Only `completed` and `empty` results are cached, so failures retry.
 - `metadata.extract_ocr_metadata` derives a title from stacked confident lines
   that are clearly taller than body text or all capitals (above the abstract),
@@ -136,7 +148,10 @@ and remaining host-only checks below before declaring OCR release-ready.
 Automated (Linux, Python 3.14, Tesseract 5.5.3 with `eng` and `ita`):
 `tests/test_ocr.py` (process-group kill, cancel before/during recognition,
 timeouts, cache reuse and invalidation, missing engine/language, TSV
-validation, rotated page, spaces and Unicode in paths, unchanged source hash),
+validation, rotated page, spaces and Unicode in paths, unchanged source hash,
+and mock probe coverage verifying 4.1.1, 5.x, and 6.0 are accepted and
+cacheable while 4.0 and 3.05 are rejected; 4.1 verification is through the test
+fakes unless a 4.1 binary is installed),
 `tests/test_metadata.py` (title/author/year/DOI rules), `tests/test_library.py`
 (provenance, protection of corrected/verified values) and
 `tests/test_metadata_refresh.py` (modes, ordering, no HTTP, failures, cancel).

@@ -195,7 +195,7 @@ class OcrRecoveryTests(unittest.TestCase):
         with patch.object(ocr, "_engine", return_value=None):
             self.assertFalse(ocr._probe("eng")["available"])
             self.assertIn("not installed", ocr._probe("eng")["message"])
-        gone = {"available": False, "message": "Offline OCR is unavailable: Tesseract 5 is not installed."}
+        gone = {"available": False, "message": "Offline OCR is unavailable: Tesseract is not installed."}
         with patch.object(ocr, "_launch", return_value=gone):
             unavailable = self.recover()
         self.assertEqual((unavailable["status"], unavailable["message"]), ("unavailable", gone["message"]))
@@ -297,6 +297,96 @@ class TsvTests(unittest.TestCase):
         with patch.object(ocr, "MAX_TSV_BYTES", 10):
             with self.assertRaisesRegex(ValueError, "size limit"):
                 self.parse("5\t1\t1\t1\t1\t1\t20\t40\t100\t20\t96.5\tHello\n")
+
+
+class ProbeTests(unittest.TestCase):
+    def fake_runner(self, version_out, langs_out):
+        def fake_run(args, **kwargs):
+            if "--version" in args:
+                return subprocess.CompletedProcess(args, 0, stdout=version_out)
+            if "--list-langs" in args:
+                return subprocess.CompletedProcess(args, 0, stdout=langs_out)
+            raise AssertionError(f"Unexpected arguments: {args}")
+        return fake_run
+
+    def test_version_4_1_is_accepted_and_cacheable_via_fallback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model = Path(folder) / "eng.traineddata"
+            model.write_bytes(b"dummy traineddata 4.1")
+            runner = self.fake_runner(b"tesseract 4.1.1\n leptonica-1.82.0\n",
+                                      b"List of available languages (1):\neng\n")
+            with patch.object(ocr, "_engine", return_value="/usr/bin/tesseract"), \
+                 patch.object(ocr.subprocess, "run", side_effect=runner), \
+                 patch.dict(os.environ, {"TESSDATA_PREFIX": folder}):
+                info = ocr._probe("eng")
+            self.assertTrue(info["available"])
+            self.assertEqual(info["engine_version"], "4.1.1")
+            self.assertEqual(info["languages"], ["eng"])
+            self.assertEqual(info["models"], {"eng": hashlib.sha256(b"dummy traineddata 4.1").hexdigest()})
+            self.assertTrue(info["cacheable"])
+            self.assertEqual(info["message"], "Offline OCR is ready.")
+
+    def test_version_5_is_accepted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model = Path(folder) / "eng.traineddata"
+            model.write_bytes(b"dummy traineddata 5")
+            runner = self.fake_runner(b"tesseract 5.3.0\n leptonica-1.82.0\n",
+                                      f'List of available languages in "{folder}" (1):\neng\n'.encode())
+            with patch.object(ocr, "_engine", return_value="/usr/bin/tesseract"), \
+                 patch.object(ocr.subprocess, "run", side_effect=runner):
+                info = ocr._probe("eng")
+            self.assertTrue(info["available"])
+            self.assertEqual(info["engine_version"], "5.3.0")
+            self.assertEqual(info["models"], {"eng": hashlib.sha256(b"dummy traineddata 5").hexdigest()})
+            self.assertTrue(info["cacheable"])
+            self.assertEqual(info["message"], "Offline OCR is ready.")
+
+    def test_version_6_is_accepted(self):
+        runner = self.fake_runner(b"tesseract 6.0.0\n leptonica-1.85.0\n",
+                                  b"List of available languages (1):\neng\n")
+        with patch.object(ocr, "_engine", return_value="/usr/bin/tesseract"), \
+             patch.object(ocr.subprocess, "run", side_effect=runner):
+            info = ocr._probe("eng")
+        self.assertTrue(info["available"])
+        self.assertEqual(info["engine_version"], "6.0.0")
+        self.assertEqual(info["message"], "Offline OCR is ready.")
+
+    def test_older_versions_are_rejected(self):
+        for raw_version in (b"tesseract 4.0.0\n", b"tesseract 4.0\n", b"tesseract 3.05.02\n", b"tesseract 3.05\n"):
+            with self.subTest(version=raw_version):
+                runner = self.fake_runner(raw_version, b"List of available languages (1):\neng\n")
+                with patch.object(ocr, "_engine", return_value="/usr/bin/tesseract"), \
+                     patch.object(ocr.subprocess, "run", side_effect=runner):
+                    info = ocr._probe("eng")
+                self.assertFalse(info["available"])
+                self.assertEqual(info["message"], "Offline OCR requires Tesseract 4.1 or newer.")
+
+    def test_engine_dir_tessdata_fallback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            tessdata = Path(folder) / "tessdata"
+            tessdata.mkdir()
+            (tessdata / "eng.traineddata").write_bytes(b"engine relative")
+            runner = self.fake_runner(b"tesseract 4.1.1\n", b"List of available languages (1):\neng\n")
+            with patch.object(ocr, "_engine", return_value=str(Path(folder) / "tesseract")), \
+                 patch.object(ocr.subprocess, "run", side_effect=runner), \
+                 patch.dict(os.environ, {}, clear=True):
+                info = ocr._probe("eng")
+            self.assertTrue(info["available"])
+            self.assertEqual(info["models"], {"eng": hashlib.sha256(b"engine relative").hexdigest()})
+            self.assertTrue(info["cacheable"])
+
+    def test_windows_localappdata_engine_discovery(self):
+        fake_local = "/fake/users/me/AppData/Local"
+        target = Path(fake_local) / "Programs" / "Tesseract-OCR" / "tesseract.exe"
+
+        class FakeOs:
+            name = "nt"
+            environ = {"LOCALAPPDATA": fake_local, "ProgramFiles": "", "ProgramFiles(x86)": ""}
+
+        with patch.object(ocr.shutil, "which", return_value=None), \
+             patch.object(ocr, "os", FakeOs), \
+             patch.object(Path, "is_file", autospec=True, side_effect=lambda p: p == target):
+            self.assertEqual(ocr._engine(), str(target))
 
 
 if __name__ == "__main__":

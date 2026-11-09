@@ -73,13 +73,41 @@ def _engine():
     if os.name == "nt":
         candidates = [Path(os.environ.get(name, "")) / "Tesseract-OCR" / "tesseract.exe"
                       for name in ("ProgramFiles", "ProgramFiles(x86)")]
+        if local := os.environ.get("LOCALAPPDATA"):
+            candidates.append(Path(local) / "Programs" / "Tesseract-OCR" / "tesseract.exe")
     return next((str(path) for path in candidates if path.is_file()), None)
+
+
+def _tessdata_dir(engine, listed, names):
+    # Tesseract 4.1 does not report the directory in `tesseract --list-langs`,
+    # so probe candidate locations to keep results cacheable.
+    candidates = []
+    if match := re.search(r'in "([^"]+)"', listed):
+        candidates.append(Path(match[1]))
+    if prefix := os.environ.get("TESSDATA_PREFIX"):
+        candidates.extend([Path(prefix), Path(prefix) / "tessdata"])
+    candidates.append(Path(engine).parent / "tessdata")
+    candidates.extend(Path(path) for path in (
+        "/usr/share/tesseract-ocr/4.00/tessdata",
+        "/usr/share/tesseract-ocr/5/tessdata",
+        "/usr/share/tesseract/tessdata",
+        "/usr/share/tessdata",
+        "/usr/local/share/tessdata",
+        "/opt/homebrew/share/tessdata",
+    ))
+    for candidate in candidates:
+        try:
+            if all((candidate / f"{name}.traineddata").is_file() for name in names):
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def _probe(language):
     engine = _engine()
     if not engine:
-        return {"available": False, "message": "Offline OCR is unavailable: Tesseract 5 is not installed.", "languages": []}
+        return {"available": False, "message": "Offline OCR is unavailable: Tesseract is not installed.", "languages": []}
     try:
         with _external_dlls():
             version = subprocess.run([engine, "--version"], capture_output=True, timeout=3,
@@ -88,26 +116,31 @@ def _probe(language):
                                     env=_environment(), check=True).stdout.decode("utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError) as error:
         return {"available": False, "message": f"Offline OCR could not start Tesseract: {error}", "languages": []}
-    match = re.search(r"tesseract\s+(\d+\.\d+(?:\.\d+)?)", version, re.I)
-    if not match or int(match[1].split(".")[0]) != 5:
-        return {"available": False, "message": "Offline OCR requires Tesseract 5.", "languages": []}
+    match = re.search(r"tesseract\s+v?(\d+(?:\.\d+)*)", version, re.I)
+    if not match:
+        return {"available": False, "message": "Offline OCR requires Tesseract 4.1 or newer.", "languages": []}
+    parts = [int(part) for part in match[1].split(".")]
+    if (parts[0], parts[1] if len(parts) > 1 else 0) < (4, 1):
+        return {"available": False, "message": "Offline OCR requires Tesseract 4.1 or newer.", "languages": []}
     languages = [line.strip() for line in listed.splitlines() if re.fullmatch(r"[A-Za-z][\w/-]*", line.strip())]
     missing = [name for name in language.split("+") if name not in languages]
     if missing:
         return {"available": False, "message": "Offline OCR language is not installed: " + ", ".join(missing),
                 "engine_version": match[1], "languages": languages}
-    directory = re.search(r'in "([^"]+)"', listed)
+    names = language.split("+")
+    directory = _tessdata_dir(engine, listed, names)
     models = {}
     if directory:
-        for name in language.split("+"):
-            path = Path(directory[1]) / (name + ".traineddata")
-            if not path.is_file():
+        for name in names:
+            path = directory / f"{name}.traineddata"
+            try:
+                with path.open("rb") as source:
+                    models[name] = hashlib.file_digest(source, "sha256").hexdigest()
+            except OSError:
                 break
-            with path.open("rb") as source:
-                models[name] = hashlib.file_digest(source, "sha256").hexdigest()
     return {"available": True, "message": "Offline OCR is ready.", "engine": engine,
             "engine_version": match[1], "languages": languages, "models": models,
-            "cacheable": len(models) == len(language.split("+"))}
+            "cacheable": len(models) == len(names)}
 
 
 def _terminate(process):

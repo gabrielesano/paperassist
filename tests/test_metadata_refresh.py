@@ -1,12 +1,16 @@
 """Bulk metadata refresh preserves PDF state and accepts only corroborated identities."""
 import io
 import json
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
 
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
@@ -351,7 +355,7 @@ class MetadataRefreshTests(unittest.TestCase):
     def test_unavailable_failed_and_empty_ocr_keep_existing_values_without_counting_errors(self):
         doc = self.add_scan()
         for status, message, expected in [
-                ("unavailable", "Offline OCR is unavailable: Tesseract 5 is not installed.", "Tesseract 5 is not installed."),
+                ("unavailable", "Offline OCR is unavailable: Tesseract is not installed.", "Tesseract is not installed."),
                 ("timeout", "Offline OCR reached its time limit.", "time limit"),
                 ("failed", "Offline OCR failed: boom", "boom"),
                 ("empty", "No readable text was found by offline OCR.", "Offline OCR found no readable text.")]:

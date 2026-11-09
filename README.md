@@ -6,7 +6,7 @@ Reading a research paper is rarely linear. Half the time you are scrolling to th
 
 > **Project status:** Alpha (`0.1.0a4`). Reading, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
 
-The screenshots below were captured from the native `0.1.0a3` reader on Linux with synthetic papers and a disposable library. System fonts and window appearance vary by platform.
+The screenshots below show the native reader on Linux with synthetic papers and a disposable library. The library screenshot reflects `0.1.0a4`; reader views were captured under `0.1.0a3`. System fonts and window appearance vary by platform.
 
 ![PaperAssist workspace showing the document outline on the left, a main paper with a cited paper open in Quick view below it, and ranked references on the right](docs/screenshots/workspace-split-view.png)
 
@@ -121,13 +121,17 @@ Annotation controls live in a calm contextual strip inside the top toolbar—nev
 
 ### Build a clean, private local library
 
-Open **Library** (`L` key) to search your collection by title, author, year, DOI, filename, or metadata status; click a column header to sort by title, authors, year, or metadata status (click again to reverse); select several papers with `Ctrl`/`Shift`-click; and open a paper in a main tab (**Open**) or in **Quick view**. Add papers via **Import PDFs…** or **Import folder…**—when selecting a single PDF, **Import & open** imports the file and opens it straight in a reader tab. **Open** (`Ctrl+O` in the reader) reads a standalone PDF without importing it; its explicit Save writes back to that file. Start without PDF arguments to use the library.
+Open **Library** (`L` key) to browse and search your collection by title, tab name, author, year, DOI, filename, or metadata status. The catalog displays five columns: **Title**, **Tab name** (showing persistent catalog nicknames set via the web UI or API), **Authors**, **Year**, and **Metadata**. Click any column header to sort in either direction (unknown years sort last); select multiple papers using `Ctrl`-click or `Shift`-click; and open a paper in a main tab (**Open**) or below in **Quick view**. Add papers via **Import PDFs…** or **Import folder…**—when importing a single PDF, choose **Import & open** to import the file and immediately view it in a reader tab. **Open** (`Ctrl+O` in the reader) reads a standalone PDF without importing it; its explicit Save writes back to that file. Start without PDF arguments to use the library.
 
 ![Library catalog dialog showing imported papers with confirmed authors and years alongside a working draft flagged for metadata review](docs/screenshots/library-catalog.png)
 
 - **Originals stay untouched:** Importing copies PDFs into PaperAssist's managed library and deduplicates them by file content (`SHA-256`). Re-importing a folder safely skips files you already have and preserves any manual metadata edits you have made.
-- **Deterministic metadata—no LLMs:** Titles, authors, years, and candidate DOIs are read locally from PDF properties, XMP metadata, and bounded first-page typography (including multiline titles, author lines, and printed arXiv submission stamps). Because a DOI on page 1 can belong to a cited work, uncertain results are kept for review and marked **Needs review** (with per-field provenance tooltips). Select a paper and click **Edit details…** (`F2`) to confirm or fix its metadata; only the specific fields you edit are frozen as manual corrections, so future refreshes can still fill in the remaining fields.
-- **Background metadata refresh & optional offline OCR:** Use **Refresh metadata** to recheck selected papers, all papers flagged **Needs review**, or the entire library in a cancellable background job that continues even if you close the Library window. From its menu, you can toggle corroborated online verification (**arXiv**, **Crossref**) and **offline OCR** (using a locally installed **Tesseract** engine with `eng` data) to recover provisional titles and authors from scanned first pages without network calls or changes to the PDF.
+- **Deterministic metadata—no LLMs:** Titles, authors, years, and candidate DOIs are read locally from PDF properties, XMP metadata, and bounded first-page typography (including multiline titles, author lines, and printed arXiv submission stamps). Because a DOI on page 1 can belong to a cited work, uncertain results are kept for review and marked **Needs review** (with per-field provenance tooltips). Select a paper and click **Edit details…** (`F2`) to confirm or fix its metadata. Only the specific fields you actually change are frozen as manual corrections, leaving untouched fields eligible for future enrichment (for legacy entries edited before this granular protection, previously corrected fields that differ from extracted or verified values remain protected).
+- **Background metadata refresh & OCR:** Use **Refresh metadata** to recheck selected papers, all papers flagged **Needs review**, or the entire library in a cancellable background job that continues even if you close the Library window. Its dropdown menu provides:
+  - **Automatic mode:** Runs local PDF extraction and, when enabled, **offline OCR** (recovering provisional titles and authors only if native text is absent or under 150 characters and metadata remains incomplete).
+  - **Recover selected papers with OCR:** Forces OCR on all selected papers, including scans that already possess an incomplete or low-quality text layer.
+  - **Online corroboration:** When **Look up metadata online (arXiv, Crossref)** is enabled, title and author strings recovered by OCR or local heuristics are sent to external providers to verify DOIs and bibliographic records. Uncheck this toggle to run completely offline without network requests.
+  - See [Installing Tesseract for offline OCR](#installing-tesseract-for-offline-ocr) below to configure the optional local OCR engine.
 
 ---
 
@@ -221,7 +225,36 @@ Source availability, authentication rules, and quotas are controlled by each pro
 - **Separate rendering process:** PDFium renders whole-page bitmaps in a worker process with a bounded page cache; it does not use tile rendering. Memory and latency vary with documents, zoom, open panes, and platform. See the scoped measurements in [native stack notes](docs/development/native-stack.md), rather than treating them as a fixed memory guarantee or a security sandbox.
 - **No AI guesswork:** Importing, metadata extraction, and citation matching are 100% deterministic.
 - **Citation detection is partial:** PaperAssist recognizes author-year and bracketed numeric citations, abstaining when entries cannot be disambiguated. A six-paper tuning benchmark reported about 96% recall at the reference/page level, not exact sentence-level accuracy or a guarantee on new papers. The private benchmark is not reproducible from this repository; see [accuracy notes](docs/development/citation-accuracy.md). OCR errors, superscripts, and unusual styles can cause missed citations.
-- **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer (PaperAssist does not write an OCR text layer into PDFs). For scanned papers lacking extractable text, **Refresh metadata** can optionally run a local **Tesseract** (`eng`) worker in a separate process to recover provisional titles and authors from the first page (or the second, when the first is a cover sheet) completely offline; see [offline OCR notes](docs/development/offline-ocr.md). Very large or malformed PDFs do not yet enforce hard time or memory caps during import.
+- **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer (PaperAssist does not write an OCR text layer into PDFs). For scanned papers lacking extractable text, **Refresh metadata** can optionally invoke a local **Tesseract** (`eng`) worker in an isolated background process to recover provisional titles and authors (reading page 1, and falling back to page 2 only if no title is recognized on page 1). Tesseract is not bundled with PaperAssist; when absent, OCR is marked unavailable without affecting normal metadata extraction.
+- **Packaged OCR verification:** Offline OCR was verified from a source checkout on Linux. In standalone frozen application bundles (Linux installer, Windows setup EXE, macOS DMG), execution across non-ASCII user directories, Windows DLL resolution, and macOS Finder launches without shell `PATH` inheritance have not been verified in CI and remain pending host-level acceptance. PaperAssist discovers Tesseract on system `PATH` and standard installation paths (`/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `%ProgramFiles%\Tesseract-OCR`, and `%LOCALAPPDATA%\Programs\Tesseract-OCR`), but does not currently support custom path overrides via environment variables or settings.
+
+---
+
+## Installing Tesseract for offline OCR
+
+Offline OCR metadata recovery is optional and uses an external installation of **Tesseract (4.1 or newer)** with English language data (`eng.traineddata`). PaperAssist checks standard system paths automatically.
+
+- **Debian / Ubuntu (including Ubuntu 22.04 LTS with Tesseract 4.1.1):**
+  ```bash
+  sudo apt install tesseract-ocr tesseract-ocr-eng
+  ```
+  *(On Ubuntu and Debian, `tesseract-ocr` pulls in `tesseract-ocr-eng` as a standard dependency).*
+- **Fedora:**
+  ```bash
+  sudo dnf install tesseract tesseract-langpack-eng
+  ```
+  *(Fedora's base `tesseract` package omits language data; `tesseract-langpack-eng` is required).*
+- **macOS (Homebrew):**
+  ```bash
+  brew install tesseract
+  ```
+  *(Homebrew includes English language data by default).*
+- **Windows:**
+  Install using the [UB Mannheim Tesseract installer](https://github.com/UB-Mannheim/tesseract/wiki) (English language data is included by default). You can also install it via `winget`:
+  ```powershell
+  winget install UB-Mannheim.TesseractOCR
+  ```
+  PaperAssist automatically checks `%ProgramFiles%\Tesseract-OCR\tesseract.exe` as well as per-user installations in `%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe`. Adding Tesseract to your Windows system `PATH` is recommended if installed to an alternate directory.
 
 ---
 
@@ -230,11 +263,6 @@ Source availability, authentication rules, and quotas are controlled by each pro
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install -e '.[native]'
-
-# Optional: install system Tesseract (with English data) for offline OCR metadata recovery
-# Debian/Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-eng
-# Fedora:        sudo dnf install tesseract tesseract-langpack-eng
-# macOS:         brew install tesseract
 
 # Run the Python & native Qt test suite (headless offscreen mode supported)
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v
