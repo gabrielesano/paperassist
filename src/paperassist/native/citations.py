@@ -105,17 +105,33 @@ def merge_links(links, displayed=False):
         previous = merged[-1] if merged else None
         last = previous["rects"][-1] if previous else None
         rect = link["rects"][0]
-        height = rect[3] - rect[1]
-        wrapped = (rect[1] > last[3] - height * 0.5 and rect[1] - last[3] < height * 2.2
-                   if previous and displayed else previous and rect[3] < last[1] + height * 0.5 and last[1] - rect[3] < height * 2.2)
+        height = max(rect[3] - rect[1], last[3] - last[1] if last else 0, 8)
+        gap = (rect[1] - last[3] if displayed else last[1] - rect[3]) if previous else math.inf
+        text = previous.get("text", "").strip() if previous else ""
+        complete = complete_citation(text)
+        # Geometry alone cannot distinguish a wrapped citation from a new citation on the next line.
+        wrapped = -height * .5 < gap <= (height * 2.2 if text else 2) and not complete
         touches = previous and previous["page"] == link["page"] and previous["dest"] == link["dest"] and (
-            (same_line(last, rect) and rect[0] - last[2] < height and rect[0] > last[0]) or
-            (wrapped and rect[0] < last[0]))
+            (abs(last[1] - rect[1]) < height * .5 and -3 <= rect[0] - last[2] < height * 2 and rect[0] > last[0]
+             and (not text or text != link.get("text", "").strip())
+             and not (complete and complete_citation(link.get("text", "")))) or
+            (wrapped and rect[0] <= last[0] + height * 2.5))
         if touches:
             previous["rects"].extend(link["rects"])
+            previous["text"] = (previous.get("text", "") + " " + link.get("text", "")).strip()
         else:
             merged.append({**link, "rects": list(link["rects"])})
     return merged
+
+
+def complete_citation(text):
+    return re.search(r"\b(?:19|20)\d{2}[a-z]?\s*[\])}.,;]*$|^\[?\d+[\d,; –-]*\]?$", text.strip())
+
+
+def pdf_rect(frame, rect):
+    points = [frame.to_pdf(x, y) for x in (rect[0], rect[2]) for y in (rect[1], rect[3])]
+    return Rect(min(p[0] for p in points), min(p[1] for p in points),
+                max(p[0] for p in points), max(p[1] for p in points))
 
 
 def next_citation_index(positions, last, here):
@@ -167,6 +183,7 @@ class CitationIndex:
         self._pages = {}
         self._links_loaded = False
         self.links, self.destination_pages = [], {}
+        self._bibliography = None
 
     def _load_links(self):
         if self._links_loaded:
@@ -186,35 +203,106 @@ class CitationIndex:
 
     def _items(self, number):
         if number not in self._pages:
-            self._pages[number] = [{"str": word[4], "rect": Rect(*word[:4])} for word in self._pdf.words(number - 1)]
+            self._pages[number] = [{"str": word[4], "rect": Rect(*word[:4]), "line": word[5]}
+                                   for word in self._pdf.words(number - 1)]
         return self._pages[number]
 
+    def prepare_bibliography(self, refs, heading_page):
+        """Mask recognized entry rows, preserving body text and appendices on the same page."""
+        self._load_links()
+        self._bibliography = defaultdict(list)
+        entries = ["".join(c for c in normalize(ref["raw"]) if c.isalnum()) for ref in refs]
+        last = max((self.destination_pages[name] + 1 for ref in refs for name in ref.get("destinations", [])
+                    if name in self.destination_pages), default=heading_page)
+        for page in range(heading_page, last + 1):
+            rows = defaultdict(list)
+            for item in self._items(page):
+                rows[item["line"]].append(item)
+            for row in rows.values():
+                text = " ".join(item["str"] for item in row)
+                text = re.sub(r"^\s*(?:\[\d+\]|\d+\.)\s*", "", text)
+                normalized = "".join(c for c in normalize(text) if c.isalnum())
+                if len(normalized) >= 12 and any(normalized in raw for raw in entries):
+                    rects = [item["rect"] for item in row]
+                    self._bibliography[page].append(Rect(min(r.x0 for r in rects) - 3, min(r.y0 for r in rects) - 2,
+                                                         max(r.x1 for r in rects) + 3, max(r.y1 for r in rects) + 2))
+            # Analysis visits bibliography pages once; keep only pages used by citation locations.
+            self._pages.pop(page, None)
+
+    def _in_bibliography(self, page, rect):
+        return self._bibliography is not None and any(
+            band.contains((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
+            for band in self._bibliography.get(page, []))
+
     def locate(self, ref):
+        if ref.get("occurrence_geometry") == "pdf":
+            return [{**occurrence, "rects": [self._pdf.frame(occurrence["page"] - 1).rect(*rect)
+                                             for rect in occurrence.get("rects", [])]}
+                    for occurrence in ref.get("occurrences", [])]
         names = ref.get("destinations") or []
         if names:
             self._load_links()
         bibliography = min((self.destination_pages[name] + 1 for name in names if name in self.destination_pages), default=math.inf)
-        links = [{**link, "key": nearest_item(self._items(link["page"]), link["rects"][0])}
-                 for link in self.links if link["dest"] in names and link["page"] < bibliography]
-        if links:
-            return merge_links(sorted(links, key=lambda link: (link["page"], link["key"], link["rects"][0][1], link["rects"][0][0])), displayed=True)
+        by_destination = defaultdict(list)
+        seen = set()
+        for link in self.links:
+            if link["dest"] not in names or self._in_bibliography(link["page"], link["rects"][0]):
+                continue
+            if self._bibliography is None and link["page"] == bibliography:
+                continue  # old callers without entry geometry cannot classify this page safely
+            identity = (link["page"], tuple(link["rects"][0]))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            items, rect = self._items(link["page"]), link["rects"][0]
+            text = " ".join(item["str"] for item in items
+                            if overlaps(item_rect(item), rect)
+                            and min(item["rect"].height, rect.height) >= 2
+                            and (min(item["rect"].y1, rect.y1) - max(item["rect"].y0, rect.y0))
+                            > min(item["rect"].height, rect.height) * .5)
+            native = pdf_rect(self._pdf.frame(link["page"] - 1), rect)
+            by_destination[link["dest"]].append({**link, "rects": [native], "text": text,
+                                                 "key": nearest_item(items, rect)})
+        links = [event for group in by_destination.values()
+                 for event in merge_links(sorted(group, key=lambda link: (link["page"], link["key"], link["rects"][0][0])))]
+        for event in links:
+            event["rects"] = [self._pdf.frame(event["page"] - 1).rect(*rect) for rect in event["rects"]]
         markers = defaultdict(list)
         for occurrence in ref.get("occurrences", []):
             if 1 <= occurrence.get("page", 0) <= len(self._pdf.sizes):
-                markers[occurrence["page"]].append(occurrence.get("marker", ""))
+                markers[occurrence["page"]].append(occurrence)
         citations = []
         for page, values in sorted(markers.items()):
             text = self._items(page)
             index = build_text_index(text)
-            found = [{"page": page, "rects": match_rects(text, index, match) if match else [],
-                      "key": match["start"] if match else math.inf} for match in find_markers(index, values)]
+            found = []
+            for occurrence, match in zip(values, find_markers(index, [o.get("marker", "") for o in values])):
+                rects = match_rects(text, index, match) if match else []
+                if rects and self._in_bibliography(page, rects[0]):
+                    continue
+                if any(link["page"] == page and any(overlaps(a, b) for a in rects for b in link["rects"])
+                       for link in links):
+                    continue
+                found.append({**occurrence, "rects": rects,
+                              "key": nearest_item(text, rects[0]) if rects else math.inf})
             citations.extend(sorted(found, key=lambda item: item["key"]))
-        return citations
+        return sorted(links + citations, key=lambda item: (item["page"], item["key"]))
+
+    def pdf_occurrences(self, ref):
+        """Persist geometry in PDF coordinates so crop and rotation cannot move saved events."""
+        return [{"page": event["page"], "marker": event.get("marker", event.get("text", "")),
+                 "context": event.get("context", event.get("text", "")),
+                 "rects": [list(pdf_rect(self._pdf.frame(event["page"] - 1), rect)) for rect in event["rects"]],
+                 "source": "link" if event.get("dest") else "text"} for event in self.locate(ref)]
 
     def close(self):
         self._pages.clear()
         if not self._pdf.is_closed:
             self._pdf.close()
+
+
+def overlaps(a, b):
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
 
 
 def reading_position(view):

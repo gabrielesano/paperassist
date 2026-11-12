@@ -1,7 +1,7 @@
 """Warm-paper visual tokens, HiDPI vector icons, QSS, and wrapping FlowLayout."""
 from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QLayout, QSizePolicy
+from PySide6.QtWidgets import QLayout
 
 INK = "#273b39"
 MUTED = "#5c6b65"

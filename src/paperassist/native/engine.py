@@ -5,6 +5,8 @@ crop offsets and rotation. Documents hold bytes, never an open source file.
 """
 import ctypes
 from contextlib import closing
+from functools import wraps
+from threading import RLock
 import unicodedata
 from typing import NamedTuple
 
@@ -14,6 +16,19 @@ import pypdfium2.raw as raw
 HIGHLIGHT = tuple(value / 255 for value in (245, 215, 110))
 FIT_TOP = {raw.PDFDEST_VIEW_FITR, raw.PDFDEST_VIEW_FITH, raw.PDFDEST_VIEW_FITBH}
 BLANK = {" ", "\r", "\n", "\t", "\ufffe"}
+
+
+_PDF_LOCK = RLock()
+
+
+def pdf_locked(method):
+    """PDFium is process-global: background analysis must not race the reader's PDF calls."""
+    @wraps(method)
+    def locked(*args, **kwargs):
+        with _PDF_LOCK:
+            return method(*args, **kwargs)
+    return locked
+
 
 class Rect(NamedTuple):
     x0: float
@@ -94,6 +109,7 @@ def _search_ranges(text_page, query):
 
 
 class Pdf:
+    @pdf_locked
     def __init__(self, data):
         self.data = bytes(data)
         self._doc = pdfium.PdfDocument(self.data)
@@ -106,12 +122,14 @@ class Pdf:
     def is_closed(self):
         return self._doc.raw is None
 
+    @pdf_locked
     def frame(self, number):
         if number not in self._frames:
             with closing(self._doc[number]) as page:
                 self._frames[number] = Frame(page)
         return self._frames[number]
 
+    @pdf_locked
     def words(self, number):
         frame, page = self.frame(number), self._doc[number]
         text_page = page.get_textpage()
@@ -134,6 +152,7 @@ class Pdf:
         page.close()
         return words
 
+    @pdf_locked
     def links(self, number):
         """Resolve internal destinations including XYZ, FitH and FitR to displayed coordinates."""
         frame, page = self.frame(number), self._doc[number]
@@ -189,10 +208,12 @@ class Pdf:
                     self._named_pages[value] = raw.FPDFDest_GetDestPageIndex(self._doc, dest)
         return self._named_destinations.get(ctypes.cast(destination, ctypes.c_void_p).value)
 
+    @pdf_locked
     def named_destinations(self):
         self._destination_name(raw.FPDF_DEST())
         return dict(self._named_pages)
 
+    @pdf_locked
     def search(self, text):
         hits = []
         for number in range(len(self.sizes)):
@@ -223,6 +244,7 @@ class Pdf:
         data = annotations.apply(self.data, kind, page, **values)
         self._replace(data)
 
+    @pdf_locked
     def _replace(self, data):
         document = pdfium.PdfDocument(data)
         self._doc.close()
@@ -270,12 +292,10 @@ class Pdf:
         from . import annotations
         self._replace(annotations.restore(self.data, previous, pages))
 
-    def can_save_incrementally(self):
-        return True
-
     def write(self, out):
         out.write(self.data)
 
+    @pdf_locked
     def close(self):
         self._doc.close()
 
@@ -291,14 +311,17 @@ class RenderedPage:
 
 
 class PageRenderer:
+    @pdf_locked
     def __init__(self, data):
         self.data = bytes(data)
         self._doc = pdfium.PdfDocument(self.data)
 
+    @pdf_locked
     def render(self, page, scale):
         with closing(self._doc[page]) as target:
             return RenderedPage(target.render(scale=scale, rev_byteorder=True, prefer_bgrx=False))
 
+    @pdf_locked
     def close(self):
         self._doc.close()
 

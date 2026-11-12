@@ -1,7 +1,7 @@
 """A pane is one PDF view with its own top find bar, and a title bar when it is a quick view or read-only."""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .document import PdfDocument

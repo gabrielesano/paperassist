@@ -5,7 +5,7 @@ from html import escape
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QVBoxLayout, QWidget)
 
@@ -218,7 +218,6 @@ class ReferencesPanel(QWidget):
                 self._expand(item, focus=True)
             return True
         return super().eventFilter(watched, event)
-        self.actions_bar.setVisible(visible)
 
     def minimumSizeHint(self):
         # An expanded card cannot shrink, so the panel must be wide enough for it. Only stable quantities

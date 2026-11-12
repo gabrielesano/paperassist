@@ -223,10 +223,9 @@ class DocumentTests(unittest.TestCase):
         self.assertTrue(self.doc.save())
         self.assertEqual((self.doc.state, self.doc.error, len(self.annotations())), (SaveState.SAVED, "", 1))
 
-    def test_files_that_cannot_be_appended_to_are_rewritten_atomically(self):
+    def test_saving_rewrites_atomically_without_leaving_temp_files(self):
         self.highlight_first_line()
-        with patch.object(Pdf, "can_save_incrementally", return_value=False):
-            self.assertTrue(self.doc.save())
+        self.assertTrue(self.doc.save())
         self.assertEqual(len(self.annotations()), 1)
         self.assertEqual([p.name for p in self.path.parent.iterdir()], ["paper.pdf"])  # no temp file left behind
 

@@ -6,6 +6,7 @@ import re
 import statistics
 import unicodedata
 from contextlib import contextmanager
+from pathlib import Path
 import sqlite3
 
 from pypdf import PdfReader
@@ -36,7 +37,7 @@ SECOND_AUTHOR = rf"(?:[^\W\d_]+\s+(?={PARTICLE}\s))?(?:{PARTICLE}\s+)*[^\W\d_]+(
 AFTER_NAME = re.compile(r'[^\W\d_]{2}\s*(?:&|\band)\s+$', re.I)
 SPACING_ACCENT = re.compile(r'\s*([´¨˜ˆˇ˚¸])\s*([A-Za-zı])')
 COMBINING = {'´': '\u0301', '¨': '\u0308', '˜': '\u0303', 'ˆ': '\u0302', 'ˇ': '\u030c', '˚': '\u030a', '¸': '\u0327'}
-DESTINATION_VERSION = 5
+DESTINATION_VERSION = 6
 # Sections printed after the references. Bare words must fill the line, so a wrapped title such as
 # "Table of integrals" stays in its entry.
 END_HEADING = re.compile(
@@ -69,7 +70,7 @@ CONTINUATION = re.compile(r'(?:[-–−]\s?\d+[.,;)]?$|\d+\s?[-–−]\s?\d+[.,;
 SHORT_LINE, MIN_LINES = 16, 8
 # An entry this many times longer than the median entry is suspect, however long real author lists are.
 OUTLIER = 6
-EXTRACTION_VERSION = 3
+EXTRACTION_VERSION = 4
 
 
 @contextmanager
@@ -313,6 +314,7 @@ def analyze(library, document_id):
     pages = [(page.extract_text() or '') for page in reader.pages]
     refs = extract(pages)
     map_destinations(reader, pages, refs)
+    crosscheck_links(path, pages, refs)
     previous = _load(library, document_id).get('references', [])
     preserved = [r for r in previous if r.get('manual_link') or r.get('retrieval') or r.get('identity')]
     claimed = set()
@@ -364,8 +366,42 @@ def _normalize(text):
     return ''.join(c for c in _clean(text).casefold() if c.isalnum())
 
 
+def crosscheck_links(path, pages, refs):
+    """Reconcile link and text events by position, retaining ambiguous counts as unknown."""
+    linked = [ref for ref in refs if ref.get('destinations') and ref.get('citation_count') is not None]
+    heading = next((i + 1 for i, page in enumerate(pages) if HEADING.search(page)), None)
+    if not linked or heading is None:
+        return
+    from paperassist.native.citations import CitationIndex
+
+    index = CitationIndex(Path(path).read_bytes())
+    try:
+        index.prepare_bibliography(refs, heading)
+        for ref in linked:
+            occurrences = index.pdf_occurrences(ref)
+            ref.update(occurrences=occurrences, citation_count=len(occurrences), occurrence_geometry='pdf')
+    finally:
+        index.close()
+
+
+STRUCTURAL_DESTINATION = re.compile(
+    r'^(?:page|section|subsection|subsubsection|chapter|appendix|part|figure|table|equation|footnote|Hfootnote)\.')
+
+
+def _destination_coordinates(destination):
+    left, top = destination.left, destination.top
+    if destination.typ == '/FitR' and top is not None:
+        bottom = destination.bottom
+        top = max(float(top), float(bottom)) if bottom is not None else top
+    elif destination.typ in ('/FitH', '/FitBH'):
+        left = None
+    elif destination.typ != '/XYZ':
+        return None, None
+    return float(left) if left is not None else None, float(top) if top is not None else None
+
+
 def map_destinations(reader, pages, refs):
-    """Match bibliography destinations by geometry, entry text and optional numeric label."""
+    """Match the nearest bibliography row; unrecognized or ambiguous rows stay unmapped."""
     for ref in refs:
         ref['destinations'] = []
     heading = next((i for i, page in enumerate(pages) if HEADING.search(page)), None)
@@ -373,15 +409,19 @@ def map_destinations(reader, pages, refs):
         return
     destinations = {}
     for name, dest in reader.named_destinations.items():
+        if STRUCTURAL_DESTINATION.match(str(name)):
+            continue
         try:
             page = reader.get_destination_page_number(dest)
-            if page >= heading and dest.typ == '/XYZ' and dest.left is not None and dest.top is not None:
-                destinations.setdefault(page, []).append((name, float(dest.left), float(dest.top)))
+            left, top = _destination_coordinates(dest)
+            if page is not None and heading <= page < len(reader.pages) and top is not None:
+                destinations.setdefault(page, []).append((name, left, top))
         except (TypeError, ValueError, AttributeError):
             continue
     entries = [(_normalize(ref['raw']), ref) for ref in refs]
     for page_number, targets in destinations.items():
         lines = []
+
         def visit(text, cm, tm, font, size):
             if not text.strip():
                 return
@@ -391,24 +431,37 @@ def map_destinations(reader, pages, refs):
                                             tm[2] * cm[1] + tm[3] * cm[3])
             if height:
                 lines.append((x, y, y + height, text.splitlines()[0]))
-        reader.pages[page_number].extract_text(visitor_text=visit)
-        for name, left, top in targets:
-            nearby = [(baseline, text) for x, baseline, y, text in lines
-                      if abs(x - left) <= 3 and -1 <= top - y <= 4]
-            if len(nearby) == 1:
-                baseline = nearby[0][0]
-                fragments = sorted((x, text) for x, y, _, text in lines
-                                   if abs(y - baseline) < 0.5 and left - 3 <= x < left + 240)
-                line = ''.join(text for _, text in fragments)
-                numbered = ENTRY.match(line)
-                label = (numbered[1] or numbered[2]) if numbered else None
-                line = _normalize(numbered[3] if numbered else line)
-                # A short line could start several entries; a short complete entry cannot.
-                matches = [ref for raw, ref in entries if raw.startswith(line) and (len(line) >= 20 or raw == line)
-                           and (label is None or str(ref.get('label')) == label)]
-                if len(matches) == 1:
-                    matches[0]['destinations'].append(name)
 
+        page = reader.pages[page_number]
+        page.extract_text(visitor_text=visit)
+        for name, left, top in targets:
+            # An anchor inside the font band can be closer to the next row's estimated top.
+            nearby = [(top - baseline, baseline) for x, baseline, y, _ in lines
+                      if -5 <= top - y <= 14 and top >= baseline - 1
+                      and (left is None or -10 <= x - left <= 120)]
+            if not nearby:
+                continue
+            distance, baseline = min(nearby)
+            # Do not try another row when this row's text cannot be recognized.
+            if any(abs(dy - distance) < .1 and abs(b - baseline) >= .8 for dy, b in nearby):
+                continue
+            right = min((x - 10 for _, x, _ in targets if left is not None and x is not None and x > left + 150),
+                        default=float(page.mediabox.right) if hasattr(page, 'mediabox') else (left or 0) + 260)
+            row = sorted(((x, order, text) for order, (x, b, _, text) in enumerate(lines)
+                          if abs(b - baseline) < .8 and (left is None or left - 10 <= x < right)),
+                         key=lambda span: (round(span[0], 1), span[1]))
+            line = ''.join(text for _, _, text in row)
+            repeated = re.match(r'^\s*[—–-]{1,3}\.?\s*(.+)', line)
+            numbered = ENTRY.match(line)
+            label = (numbered[1] or numbered[2]) if numbered else None
+            normalized = _normalize(repeated[1] if repeated else numbered[3] if numbered else line)
+            matches = [ref for raw, ref in entries if normalized
+                       and ((repeated and len(normalized) >= 12 and normalized in raw)
+                            or (not repeated and raw.startswith(normalized)
+                                and (len(normalized) >= 20 or raw == normalized and len(normalized) >= 12)))
+                       and (label is None or str(ref.get('label')) == label)]
+            if len(matches) == 1:
+                matches[0]['destinations'].append(name)
 
 
 def local_candidates(ref, documents, source_id, evidence=None):
@@ -606,6 +659,7 @@ def get(library, document_id):
         reader = PdfReader(str(library.get_path(document_id, annotated=False)))
         pages = [(page.extract_text() or '') for page in reader.pages]
         map_destinations(reader, pages, payload['references'])
+        crosscheck_links(library.get_path(document_id, annotated=False), pages, payload['references'])
         payload['destination_version'] = DESTINATION_VERSION
         _save(library, document_id, payload)
     return _resolve(library, document_id, payload, library.list_documents())

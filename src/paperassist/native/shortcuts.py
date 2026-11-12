@@ -12,7 +12,7 @@ from typing import Callable
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QAction, QIntValidator, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
-                               QTextBrowser, QToolButton, QVBoxLayout, QWidget, QWidgetAction)
+                               QTextBrowser, QVBoxLayout, QWidget, QWidgetAction)
 
 from paperassist.library import MAX_LABEL
 
