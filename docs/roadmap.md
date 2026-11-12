@@ -10,10 +10,11 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-1. Verify and prepare the `0.2.0a1` alpha with managed PDF opening, native file
-   delivery and bundled OCR, then publish the verified artifacts. The
-   existing `0.1.0a4` release downloads predate bundled OCR and are not replaced by
-   CI artifacts. See [host acceptance](development/host-acceptance.md).
+1. Verify and publish `0.2.0a2` for Linux, Windows and Apple Silicon macOS,
+   including the reference parsing, cross-page citation and acquisition-layout
+   fixes in the [follow-up record](development/reference-parser-followup.md).
+   The previous `0.2.0a1` alpha is already published with native file delivery
+   and bundled OCR; release artifacts must be rebuilt for the new version.
 2. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
    GUI trials and interactive Windows/macOS reading, editing, focus and display
    checks. Hosted build and installer tests cover automated acceptance; untested
