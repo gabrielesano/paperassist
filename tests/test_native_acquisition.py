@@ -145,6 +145,37 @@ class AcquisitionWidgetTests(unittest.TestCase):
         self.assertEqual(box.toolTip().strip(), title)
         self.assertNotIn("&&", box.toolTip())
 
+    def test_long_reference_titles_wrap_and_remain_clickable_and_accessible(self):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtGui import QAccessible
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QScrollArea
+        title = ('A long study of Müller & 李: λ-dependent transport 🧪 ' * 8
+                 + 'https://example.org/' + 'unbroken' * 30)
+        dialog = AcquisitionDialog(self.controller, 11, [{'id': '4', 'title': title}])
+        self.addCleanup(dialog.close)
+        dialog.resize(680, 560)
+        dialog.show()
+        self.app.processEvents()
+        box = dialog.boxes[0]
+        self.assertGreater(box.height(), box.fontMetrics().height() * 3)
+        self.assertGreater(box.heightForWidth(300), box.heightForWidth(500))
+        self.assertEqual(dialog.findChild(QScrollArea).horizontalScrollBar().maximum(), 0)
+        self.assertEqual(QAccessible.queryAccessibleInterface(box).text(QAccessible.Name), title)
+        box.setFocus()
+        QTest.keyClick(box, Qt.Key_Space)
+        self.assertEqual(dialog.selected(), ['4'])
+        QTest.mouseClick(box, Qt.LeftButton, pos=QPoint(box.width() // 2, box.height() - 2))
+        self.assertEqual(dialog.selected(), [])
+        original_height = box.height()
+        font = box.font()
+        font.setPointSizeF(font.pointSizeF() * 2)
+        box.setFont(font)
+        QTest.qWait(30)  # nested scroll/layout requests need more than one event-loop pass
+        self.assertGreater(box.height(), original_height)
+        self.assertEqual(dialog.findChild(QScrollArea).horizontalScrollBar().maximum(), 0)
+        self.workspace.download_references.assert_not_called()
+
     def test_new_main_open_waits_for_references_and_offers_once(self):
         self.controller.main_opened(22)
         self.assertIn(22, self.controller.pending)

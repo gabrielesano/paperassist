@@ -5,6 +5,7 @@ import math
 import re
 import statistics
 import unicodedata
+from bisect import bisect_right
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
@@ -25,7 +26,7 @@ INITIALS_ENTRY = re.compile(r"^\s*([^\W\d_]+(?:[-'’][^\W\d_]+)*),?\s(?:[A-Z][a
 # Text extraction sometimes inserts a space inside a year ("200 8") or after "[".
 YEAR = re.compile(r'\b(?:19|20)\d\s?\d[a-z]?\b')
 MARKER = re.compile(r'\[\s*(\d+(?:\s*[,;–−-]\s*\d+)*)\s*\]')
-JOINED_ENTRIES = re.compile(r"(?<=\d)\s+(?=[A-Z][^\W\d_]+(?:[-'’][^\W\d_]+)*,\s[A-Z]\.|[.;]\s*(?:1[89]|20)\d\d)")
+JOINED_ENTRIES = re.compile(r"(?<=[\d.])\s+(?=[A-Z][^\W\d_]+(?:[-'’][^\W\d_]+)*,\s[A-Z]\.|[.;]\s*(?:1[89]|20)\d\d)")
 IBID = re.compile(r'^[.;:—–_-]{1,8}\s*[.,]?\s*((?:1[89]|20)\d\d[a-z]?\b.*)')
 ENTRY_LIKE = re.compile(r"[A-Z][^\W\d_]+,\s[A-Z]\..*\b(?:1[89]|20)\d\d\b")
 # A second author may carry particles ("Rouppe van der Voort") but never a whole phrase,
@@ -45,6 +46,8 @@ END_HEADING = re.compile(
     r'|acronyms|abbreviations|glossary|nomenclature|data\s+availability|author\s+contributions?|funding'
     r'|conflicts?\s+of\s+interests?)\s*[:.]?\s*', re.I)
 END_START = re.compile(r'\s*(?:appendi(?:x|ces)\b|supplement(?:ary|al)\b|supporting\s+information|acknowledg)', re.I)
+LETTERED_HEADING = re.compile(r'\s*[A-Z](?:\.\d+)*[.)]?\s+[A-Z][^\n,;]{2,}\s*$')
+PAGE_LIST = re.compile(r'\d+(?:\s*[,–−-]\s*\d+)*[.]?')
 # Preprints and emulateapj papers float figures and tables between reference pages, so a caption
 # only closes the entry before it; the list resumes at the next entry.
 FLOAT = re.compile(r'\s*(?:fig(?:ure)?|table)s?\.?\s*(?:\d|[IVX]+\b)', re.I)
@@ -70,7 +73,7 @@ CONTINUATION = re.compile(r'(?:[-–−]\s?\d+[.,;)]?$|\d+\s?[-–−]\s?\d+[.,;
 SHORT_LINE, MIN_LINES = 16, 8
 # An entry this many times longer than the median entry is suspect, however long real author lists are.
 OUTLIER = 6
-EXTRACTION_VERSION = 4
+EXTRACTION_VERSION = 5
 
 
 @contextmanager
@@ -130,8 +133,13 @@ def _continues(raw, line):
     return raw.endswith(('-', '/', ',', ';', ':')) or bool(CONTINUATION.match(line))
 
 
-def _ends_bibliography(line):
-    return bool(END_HEADING.fullmatch(line) or END_START.match(line))
+def _lettered_heading(line):
+    return bool(LETTERED_HEADING.fullmatch(line) and not YEAR.search(line) and not AUTHOR_ENTRY.match(line))
+
+
+def _appendix_heading(line):
+    return bool(re.match(r'\s*(?:appendi(?:x|ces)\b|supplement(?:ary|al)\b|supporting\s+information)', line, re.I)
+                or _lettered_heading(line))
 
 
 def _figure_page(text):
@@ -141,20 +149,34 @@ def _figure_page(text):
     return len(lines) >= MIN_LINES and sum(len(line) < SHORT_LINE for line in lines) * 2 >= len(lines)
 
 
-def _split_entries(lines):
-    """Group bibliography lines into entries; also return the lines before the first entry.
+def _split_entries(lines, page_starts=(), running_headers=()):
+    """Return entries, leading text, and the source-line index of the ending section.
 
     Each entry is open until its citation ends. A line that is neither a continuation nor a new
     entry then closes it, so running headers and whatever follows the list stay out of it.
     """
-    entries, leading, state = [], [], 'open'
+    entries, leading, state, previous_index = [], [], 'open', None
     # Scanned two-column pages can run several entries together on one line.
-    for line in (part for line in lines for part in JOINED_ENTRIES.split(line)):
+    for index, line in ((i, part) for i, line in enumerate(lines) for part in JOINED_ENTRIES.split(line)):
+        same_line, previous_index = index == previous_index, index
         line = line.strip()
         numeric = ENTRY.match(line)
+        # A wrapped year followed by backreference pages ("2021. 6") is not entry 2021.
+        if numeric and numeric[2] and YEAR.fullmatch(numeric[2]) and PAGE_LIST.fullmatch(numeric[3]):
+            numeric = None
         author = _name_start(line) and AUTHOR_ENTRY.match(line)
-        if entries and _ends_bibliography(line):
-            break
+        raw = entries[-1]['raw'] if entries else ''
+        lettered = _lettered_heading(line)
+        if lettered and re.sub(r'\s+\d+$', '', line).casefold() in running_headers:
+            continue
+        completed = False
+        if entries and lettered:
+            year = YEAR.search(raw)
+            completed = _citation_end(CITATION_END, raw) or (
+                index in page_starts and entries[0]['label'].isdigit() and year and len(raw[:year.start()]) >= 40)
+        if entries and (END_HEADING.fullmatch(line) or END_START.match(line)
+                        or (lettered and not raw.endswith((',', ';', ':', '-', '/')) and completed)):
+            return entries, leading, index
         if entries and FLOAT.match(line):
             state = 'closed'
             continue
@@ -165,10 +187,11 @@ def _split_entries(lines):
         elif numeric:
             entries.append({'label': numeric.group(1) or numeric.group(2), 'raw': numeric.group(3)})
             state = 'done' if _ended(entries[-1]['raw']) else 'open'
-        elif author and (not entries or YEAR.search(entries[-1]['raw'])):
+        elif (author and (not same_line or YEAR.search(line) or state == 'done')
+              and (not entries or not entries[0]['label'].isdigit() and YEAR.search(entries[-1]['raw']))):
             entries.append({'label': author.group(1), 'raw': line})
             state = 'done' if _ended(line) else 'open'
-        elif entries and state != 'open' and (initials := _name_start(line) and INITIALS_ENTRY.match(line)):
+        elif entries and not entries[0]['label'].isdigit() and state != 'open' and (initials := _name_start(line) and INITIALS_ENTRY.match(line)):
             entries.append({'label': initials.group(1), 'raw': line})
             state = 'done' if _ended(line) else 'open'
         elif entries and line:
@@ -179,7 +202,7 @@ def _split_entries(lines):
                 state = 'done' if state == 'done' or _ended(entries[-1]['raw']) else 'open'
         elif line:
             leading.append(line)
-    return entries, leading
+    return entries, leading, None
 
 
 def _trim_outliers(entries):
@@ -197,25 +220,31 @@ def _trim_outliers(entries):
             entry.update(raw=raw[:end.end()].rstrip(), truncated=True)
 
 
-def _citation(author, year):
-    """Regex for citations of one author-year entry.
-
-    Accepts "A 2001", "A et al. (2001)", "A & B, 2001", earlier years of the same
-    group ("A 1999, 2001") and later suffixes ("A 2001a,b"). Intervening text is
-    limited to citation grammar, not arbitrary prose.
-    """
-    base, suffix = year[:4], year[4:]
-    # "2001a,b" cites both suffixed entries, so b is also found after an earlier suffix.
-    year_part = base + (rf'(?:{suffix}|[a-z](?:\s*,\s*[a-z])*?\s*,\s*{suffix})' if suffix else '')
-    # A large kerning gap after the first capital reads as a space ("W atanabe").
+def _citation_name(author):
     name = re.escape(author).replace(r'\-', r'-\s*').replace(r'\ ', r'\s+')
-    name = name[0] + r'\s?' + name[1:]
-    return re.compile(rf'\b{name}\b(?:(?P<more>\s+et\s+al\.?)|\s*(?:and|&)\s+(?P<second>{SECOND_AUTHOR}))?'
-                      rf'\s*[,\(]?\s*(?:(?:19|20)\d\d[a-z]?\s*,\s*)*{year_part}(?![A-Za-z0-9])', re.I)
+    return name[0] + r'\s?' + name[1:]
 
 
-def _fits(count, second, citation):
-    """Whether an entry with this many authors and second author can be that citation."""
+def _citation(author, year, names=()):
+    """Match citation grammar, using known surnames for explicit multi-author lists."""
+    base, suffix = year[:4], year[4:]
+    year_part = r'\s*'.join(base) + (rf'(?:{suffix}|[a-z](?:\s*,\s*[a-z])*?\s*,\s*{suffix})' if suffix else '')
+    second = rf'(?:{_citation_name(names[1])}|{SECOND_AUTHOR})' if len(names) >= 2 else SECOND_AUTHOR
+    explicit = ''
+    if len(names) >= 3:
+        separator = r'(?:\s*,\s*(?:(?:and|&)\s+)?|\s+(?:and|&)\s+)'
+        explicit = rf'(?P<explicit>{separator.join(_citation_name(name) for name in names[1:])})'
+        explicit = rf'(?:\s*,\s*|\s+(?:and|&)\s+){explicit}|'
+    return re.compile(rf"\b{_citation_name(author)}\b(?:['’]s)?(?:{explicit}(?P<more>\s+et\s+a\s*l\.?)"
+                      rf'|\s*(?:and|&)\s+(?P<second>{second}))?'
+                      rf'\s*[,\(]?\s*(?:(?:19|20)\d\d[a-z]?\s*[,;]\s*)*{year_part}(?![A-Za-z0-9])', re.I)
+
+
+def _fits(names, count, second, citation):
+    """Only a compatible author list can own a citation shared by homonymous entries."""
+    if explicit := citation.groupdict().get('explicit'):
+        listed = [fold(name) for name in re.split(r'\s*(?:,|&|\band\b)\s*', explicit) if name]
+        return listed == [fold(name) for name in names[1:]]
     if citation['more']:
         return count >= 3
     if citation['second']:
@@ -235,11 +264,11 @@ def _share(group, found):
         names = surnames(entry['raw'])
         # "Smith, A., et al." lists one name but stands for three or more authors.
         count = max(len(names), 3) if re.search(r'\bet\s+al\b', re.split(YEAR, entry['raw'], maxsplit=1)[0]) else len(names)
-        authors.append((count, fold(names[1]) if len(names) > 1 else None))
+        authors.append((names, count, fold(names[1]) if len(names) > 1 else None))
     owned, ambiguous = [[] for _ in group], set()
-    # Every member found the same text, so one member's matches stand for all.
-    for page, m in found[0]:
-        fits = [i for i, (count, second) in enumerate(authors) if _fits(count, second, m)]
+    events = {(page, m.start(), m.end()): m for hits in found for page, m in hits}
+    for (page, _, _), m in sorted(events.items()):
+        fits = [i for i, (names, count, second) in enumerate(authors) if _fits(names, count, second, m)]
         if len(fits) == 1:
             owned[fits[0]].append((page, m))
         else:
@@ -259,12 +288,29 @@ def extract(pages):
     top = len(above)
     while top and ENTRY_LIKE.search(above[top - 1]):
         top -= 1
-    later = [page for page in pages[page_index + 1:] if not _figure_page(page)]
-    bibliography = '\n'.join([*above[top:], pages[page_index][match.end():], *later])
-    entries, leading = _split_entries(bibliography.splitlines())
+    bibliography = [(page_index, line) for line in above[top:] + pages[page_index][match.end():].splitlines()]
+    bibliography.extend((i, line) for i in range(page_index + 1, len(pages)) if not _figure_page(pages[i])
+                        for line in pages[i].splitlines())
+    first_lines = {}
+    for index, (page, line) in enumerate(bibliography):
+        if line.strip():
+            first_lines.setdefault(page, index)
+    running_headers = {re.sub(r'\s+\d+$', '', line.strip()).casefold()
+                       for page in pages[:page_index] for line in page.splitlines()[:2]}
+    entries, leading, ending = _split_entries([line for _, line in bibliography], set(first_lines.values()), running_headers)
     _trim_outliers(entries)
     # In two-column layouts a mid-page heading can precede the rest of the body text.
     body = pages[:page_index] + ['\n'.join([*above[:top], *leading])]
+    body.extend('' for _ in pages[page_index + 1:])
+    if ending is not None and _appendix_heading(bibliography[ending][1]):
+        ending_page = bibliography[ending][0]
+        body[ending_page] += '\n' + '\n'.join(line for page, line in bibliography[ending:] if page == ending_page)
+        body[ending_page + 1:] = pages[ending_page + 1:]
+    body_text = '\n'.join(body)
+    page_starts, offset = [], 0
+    for text in body:
+        page_starts.append(offset)
+        offset += len(text) + 1
     found = []
     for index, entry in enumerate(entries):
         raw = entry['raw']
@@ -279,11 +325,12 @@ def extract(pages):
         if numeric:
             find = lambda text, n=int(entry['label']): [m for m in MARKER.finditer(text) if n in _numbers(m.group(1))]
         elif author and year:
-            pattern = _citation(surname, year_text)
+            pattern = _citation(surname, year_text, surnames(raw))
             find = lambda text: [m for m in pattern.finditer(text) if not AFTER_NAME.search(text[max(0, m.start() - 30):m.start()])]
         else:
             find = lambda text: []
-        found.append([(page, m) for page, text in enumerate(body, 1) for m in find(text)])
+        found.append([(bisect_right(page_starts, m.start()), m) for m in find(body_text)
+                      if bisect_right(page_starts, m.end() - 1) - bisect_right(page_starts, m.start()) <= 1])
         entry.update(id=str(index), title=raw, authors=surname,
                      year=year_text, doi=doi.group().rstrip('.,;') if doi else '',
                      count_status='partial', local_document_id=None)
@@ -300,8 +347,20 @@ def extract(pages):
                 found[i] = hits
             ambiguous.update(members[j] for j in unclear)
     for i, entry in enumerate(entries):
-        entry['occurrences'] = [{'page': page, 'context': body[page - 1][max(0, m.start()-60):m.end()+60], 'marker': m.group()}
-                                for page, m in found[i]]
+        entry['occurrences'] = []
+        for page, m in found[i]:
+            occurrence = {'page': page, 'context': body_text[max(0, m.start()-60):m.end()+60], 'marker': m.group()}
+            last = bisect_right(page_starts, m.end() - 1)
+            if last > page:
+                parts = []
+                for number in range(page, last + 1):
+                    start = max(m.start() - page_starts[number - 1], 0)
+                    end = min(m.end() - page_starts[number - 1], len(body[number - 1]))
+                    marker = body[number - 1][start:end].strip()
+                    ordinal = body[number - 1][:start].casefold().count(marker.casefold()) if marker else 0
+                    parts.append({'page': number, 'marker': marker, 'ordinal': ordinal})
+                occurrence['marker_parts'] = parts
+            entry['occurrences'].append(occurrence)
         entry['citation_count'] = len(entry['occurrences'])
         if i in ambiguous:
             entry.update(citation_count=None, count_status='ambiguous', occurrences=[])
@@ -316,6 +375,24 @@ def analyze(library, document_id):
     map_destinations(reader, pages, refs)
     crosscheck_links(path, pages, refs)
     previous = _load(library, document_id).get('references', [])
+    reserved = {str(old['id']) for old in previous if 'id' in old}
+    next_id = max((int(value) for value in reserved if value.isdigit()), default=-1) + 1
+    retained = {}
+    previous_entries = [(_normalize(old['raw']), old) for old in previous if 'id' in old]
+    for ref in refs:
+        raw = _normalize(ref['raw'])
+        matches = [old for old_raw, old in previous_entries if str(old['id']) not in retained
+                   and (raw == old_raw or
+                        (str(ref['label']).isdigit() and ref['label'] == old.get('label')
+                         and min(len(raw), len(old_raw)) >= 20
+                         and (raw.startswith(old_raw) or old_raw.startswith(raw))))]
+        if len(matches) == 1:
+            ref['id'] = str(matches[0]['id'])
+            retained[ref['id']] = matches[0]
+        elif reserved:
+            # Removing a spurious row must not move a saved acquisition selection to another paper.
+            ref['id'] = str(next_id)
+            next_id += 1
     preserved = [r for r in previous if r.get('manual_link') or r.get('retrieval') or r.get('identity')]
     claimed = set()
     documents = library.list_documents()
@@ -326,7 +403,7 @@ def analyze(library, document_id):
             if i in claimed:
                 continue
             old_raw = _normalize(old['raw'])
-            if old_raw == raw and raw:
+            if (old_raw == raw and raw) or retained.get(ref['id']) is old:
                 matches.append(i)
                 continue
             # An older parser may have merged the next entry into this one.

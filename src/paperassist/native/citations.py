@@ -134,6 +134,19 @@ def pdf_rect(frame, rect):
                 max(p[0] for p in points), max(p[1] for p in points))
 
 
+def citation_parts(citation):
+    return [(citation["page"], citation.get("rects", []))] + [
+        (part["page"], part.get("rects", [])) for part in citation.get("continuations", [])]
+
+
+def map_citation_rects(citation, convert):
+    result = {**citation, "rects": [convert(citation["page"], rect) for rect in citation.get("rects", [])]}
+    if citation.get("continuations"):
+        result["continuations"] = [{"page": page, "rects": [convert(page, rect) for rect in rects]}
+                                   for page, rects in citation_parts(citation)[1:]]
+    return result
+
+
 def next_citation_index(positions, last, here):
     if not positions:
         return -1
@@ -234,10 +247,29 @@ class CitationIndex:
             band.contains((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
             for band in self._bibliography.get(page, []))
 
+    def _merge_page_breaks(self, events, ref):
+        author, year = normalize(ref.get("authors", "")), str(ref.get("year", ""))
+        merged = []
+        for event in sorted(events, key=lambda item: (item["page"], item["key"])):
+            previous = merged[-1] if merged else None
+            if previous and author and year and event["page"] == previous["page"] + 1:
+                prefix, suffix = normalize(previous.get("text", "")), normalize(event.get("text", ""))
+                bottom = self._pdf.frame(previous["page"] - 1)
+                top = self._pdf.frame(event["page"] - 1)
+                near_bottom = previous["rects"][-1][1] < bottom.origin[1] + (bottom.top - bottom.origin[1]) * .25
+                near_top = event["rects"][0][3] > top.top - (top.top - top.origin[1]) * .25
+                if (previous["dest"] == event["dest"] and near_bottom and near_top
+                        and author in prefix and year not in prefix and year in suffix and author not in suffix
+                        and not complete_citation(previous.get("text", ""))):
+                    previous["continuations"] = [{"page": event["page"], "rects": event["rects"]}]
+                    previous["text"] = previous.get("text", "") + " " + event.get("text", "")
+                    continue
+            merged.append(event)
+        return merged
+
     def locate(self, ref):
         if ref.get("occurrence_geometry") == "pdf":
-            return [{**occurrence, "rects": [self._pdf.frame(occurrence["page"] - 1).rect(*rect)
-                                             for rect in occurrence.get("rects", [])]}
+            return [map_citation_rects(occurrence, lambda page, rect: self._pdf.frame(page - 1).rect(*rect))
                     for occurrence in ref.get("occurrences", [])]
         names = ref.get("destinations") or []
         if names:
@@ -265,8 +297,8 @@ class CitationIndex:
                                                  "key": nearest_item(items, rect)})
         links = [event for group in by_destination.values()
                  for event in merge_links(sorted(group, key=lambda link: (link["page"], link["key"], link["rects"][0][0])))]
-        for event in links:
-            event["rects"] = [self._pdf.frame(event["page"] - 1).rect(*rect) for rect in event["rects"]]
+        links = [map_citation_rects(event, lambda page, rect: self._pdf.frame(page - 1).rect(*rect))
+                 for event in self._merge_page_breaks(links, ref)]
         markers = defaultdict(list)
         for occurrence in ref.get("occurrences", []):
             if 1 <= occurrence.get("page", 0) <= len(self._pdf.sizes):
@@ -278,22 +310,42 @@ class CitationIndex:
             found = []
             for occurrence, match in zip(values, find_markers(index, [o.get("marker", "") for o in values])):
                 rects = match_rects(text, index, match) if match else []
+                continuations = []
+                if occurrence.get("marker_parts"):
+                    parts = []
+                    for part_number, part in enumerate(occurrence["marker_parts"]):
+                        items = self._items(part["page"])
+                        part_index = build_text_index(items)
+                        needle = normalize(part["marker"])
+                        candidates = [match_rects(items, part_index, {"start": hit.start(), "end": hit.end()})
+                                      for hit in re.finditer(re.escape(needle), part_index["text"])] if needle else []
+                        frame = self._pdf.frame(part["page"] - 1)
+                        # PDFium may reorder text on rotated pages; a page-break prefix is the bottom occurrence.
+                        candidates.sort(key=lambda boxes: pdf_rect(frame, boxes[0]).y0, reverse=part_number != 0)
+                        parts.append({"page": part["page"], "rects": candidates[0] if candidates else []})
+                    rects, continuations = parts[0]["rects"], parts[1:]
                 if rects and self._in_bibliography(page, rects[0]):
                     continue
-                if any(link["page"] == page and any(overlaps(a, b) for a in rects for b in link["rects"])
-                       for link in links):
+                candidate = {**occurrence, "rects": rects, **({"continuations": continuations} if continuations else {})}
+                if any(link_page == text_page and any(overlaps(a, b) for a in text_rects for b in link_rects)
+                       for link in links for link_page, link_rects in citation_parts(link)
+                       for text_page, text_rects in citation_parts(candidate)):
                     continue
-                found.append({**occurrence, "rects": rects,
+                found.append({**candidate,
                               "key": nearest_item(text, rects[0]) if rects else math.inf})
             citations.extend(sorted(found, key=lambda item: item["key"]))
         return sorted(links + citations, key=lambda item: (item["page"], item["key"]))
 
     def pdf_occurrences(self, ref):
         """Persist geometry in PDF coordinates so crop and rotation cannot move saved events."""
-        return [{"page": event["page"], "marker": event.get("marker", event.get("text", "")),
-                 "context": event.get("context", event.get("text", "")),
-                 "rects": [list(pdf_rect(self._pdf.frame(event["page"] - 1), rect)) for rect in event["rects"]],
-                 "source": "link" if event.get("dest") else "text"} for event in self.locate(ref)]
+        result = []
+        for event in self.locate(ref):
+            converted = map_citation_rects(event, lambda page, rect: list(pdf_rect(self._pdf.frame(page - 1), rect)))
+            result.append({"page": event["page"], "marker": event.get("marker", event.get("text", "")),
+                           "context": event.get("context", event.get("text", "")), "rects": converted["rects"],
+                           "source": "link" if event.get("dest") else "text",
+                           **({"continuations": converted["continuations"]} if converted.get("continuations") else {})})
+        return result
 
     def close(self):
         self._pages.clear()
@@ -326,5 +378,5 @@ def reveal_citation(view, citation):
     x, y = view.pages.to_content(page, (band.x0 + band.x1) / 2, (band.y0 + band.y1) / 2)
     view.verticalScrollBar().setValue(round(y - view.viewport().height() / 2))
     view.horizontalScrollBar().setValue(round(x - view.viewport().width() / 2))
-    view.outline_rects([(page, rect) for rect in rects])
+    view.outline_rects([(part_page - 1, rect) for part_page, part_rects in citation_parts(citation) for rect in part_rects])
     return True

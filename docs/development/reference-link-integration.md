@@ -1,5 +1,7 @@
 # Reference link integration
 
+This records the initial integration in `cfac1fd`. Subsequent bibliography parsing, cross-page events, text grammar, and acquisition-layout changes are documented in [Reference parsing follow-up](reference-parser-followup.md).
+
 The [original prototype](link-citation-crosscheck.md) improved destination coverage but could assign a citation to an adjacent bibliography entry. It also merged separate consecutive-line citations and excluded valid citations on bibliography/appendix pages. This implementation corrects those paths and uses one reconciled occurrence list for ranking and native navigation.
 
 ## Mapping

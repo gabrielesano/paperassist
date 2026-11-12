@@ -1,16 +1,17 @@
 """Reference acquisition and inline actions, using the existing Workspace jobs."""
 import json
+import math
 import os
 import tempfile
 from collections import Counter
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QObject, QPointF, QRect, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPalette, QTextLayout, QTextOption
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QScrollArea, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+                               QLineEdit, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyleOptionButton,
+                               QStyleOptionFocusRect, QStylePainter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from paperassist import references
 
@@ -124,6 +125,69 @@ class SelectionStore:
                 os.unlink(name)
 
 
+class ReferenceCheckBox(QCheckBox):
+    """Keep native checkbox semantics while allowing complete, arbitrarily long titles to wrap."""
+    def __init__(self, text):
+        super().__init__(text)
+        self.setAccessibleName(text.replace('&&', '&'))
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def _layout(self, width):
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.rect = QRect(0, 0, width, super().sizeHint().height())
+        content = self.style().subElementRect(QStyle.SE_CheckBoxContents, option, self)
+        layout = QTextLayout(self.text().replace('&&', '&'), self.font())
+        text_option = QTextOption()
+        text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(text_option)
+        height = 0
+        layout.beginLayout()
+        while (line := layout.createLine()).isValid():
+            line.setLineWidth(max(1, content.width()))
+            line.setPosition(QPointF(0, height))
+            height += line.height()
+        layout.endLayout()
+        return layout, content, height
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        _, content, height = self._layout(width)
+        return max(super().sizeHint().height(), math.ceil(height + content.top() * 2))
+
+    def sizeHint(self):
+        width = min(super().sizeHint().width(), 400)
+        return QSize(width, self.heightForWidth(width))
+
+    def minimumSizeHint(self):
+        return QSize(80, super().sizeHint().height())
+
+    def hitButton(self, point):
+        return self.rect().contains(point)
+
+    def paintEvent(self, event):
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = ''
+        option.rect.setHeight(super().sizeHint().height())
+        option.state &= ~QStyle.State_HasFocus
+        painter = QStylePainter(self)
+        painter.drawControl(QStyle.CE_CheckBox, option)
+        layout, content, _ = self._layout(self.width())
+        group = QPalette.Active if self.isEnabled() else QPalette.Disabled
+        painter.setPen(self.palette().color(group, QPalette.WindowText))
+        layout.draw(painter, QPointF(content.topLeft()))
+        if self.hasFocus():
+            focus = QStyleOptionFocusRect()
+            focus.initFrom(self)
+            focus.rect = self.rect().adjusted(0, 0, -1, -1)
+            painter.drawPrimitive(QStyle.PE_FrameFocusRect, focus)
+
+
 class AcquisitionDialog(QDialog):
     def __init__(self, controller, document_id, refs):
         super().__init__(controller.window)
@@ -169,7 +233,7 @@ class AcquisitionDialog(QDialog):
             item_layout.setContentsMargins(10, 8, 10, 8)
             item_layout.setSpacing(3)
             text = f"{ref.get('label') or ''} {ref.get('title') or ref.get('raw') or 'Unidentified reference'}"
-            box = QCheckBox(text.strip().replace("&", "&&"))
+            box = ReferenceCheckBox(text.strip().replace("&", "&&"))
             box.setToolTip(text)
             box.setEnabled(not local and not ref.get("legacy"))
             box.setChecked(box.isEnabled() and str(ref["id"]) in saved)

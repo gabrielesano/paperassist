@@ -86,6 +86,10 @@ One lower-priority layout follow-up remains: long acquisition checkbox captions
 stay on one line and require horizontal scrolling. They retain their tooltip,
 but wrapping them would make large reference lists easier to scan at 150%.
 
+Resolved on 2026-11-13: acquisition titles wrap, including long unbroken identifiers,
+while retaining checkbox accessibility and keyboard/mouse selection. See the
+[reference parsing and acquisition follow-up](reference-parser-followup.md).
+
 ## Follow-up: rendering and navigation regressions
 
 Subsequent user testing identified cases missed by the initial visual review:

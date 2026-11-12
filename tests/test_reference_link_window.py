@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_native_support import needs_qt
-from test_reference_links import make_link_paper
+from test_reference_links import make_cross_page_paper, make_link_paper
 
 
 @needs_qt
@@ -32,6 +32,12 @@ class ReferenceLinkWindowTests(unittest.TestCase):
         self.assertTrue(condition(), 'Timed out waiting for the native reader')
 
     def test_count_button_visits_same_page_and_later_appendices_without_saving(self):
+        self.check_window(make_link_paper, 5, [1, 1, 1, 2, 3])
+
+    def test_cross_page_citation_is_one_step_with_outlines_on_both_pages(self):
+        self.check_window(make_cross_page_paper, 1, [1], {0, 1})
+
+    def check_window(self, make_source, count, expected_pages, outlined_pages=None):
         from PySide6.QtCore import Qt
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QPushButton
@@ -42,7 +48,7 @@ class ReferenceLinkWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / 'source.pdf'
-            make_link_paper(source)
+            make_source(source)
             digest = hashlib.sha256(source.read_bytes()).digest()
             with patch('paperassist.paths.config_file', return_value=root / 'config.json'):
                 workspace = Workspace(root / 'library')
@@ -61,7 +67,7 @@ class ReferenceLinkWindowTests(unittest.TestCase):
                     panel = window.details
                     self.pump(lambda: bool(panel.refs) and view.has_page(0))
                     ref = panel.refs[0]
-                    self.assertEqual(ref['citation_count'], 5)
+                    self.assertEqual(ref['citation_count'], count)
                     self.assertEqual(ref['retrieval']['status'], 'not_found')
                     item = panel.list.item(0)
                     QTest.mouseClick(panel.list.viewport(), Qt.LeftButton, pos=panel.list.visualItemRect(item).center())
@@ -69,13 +75,15 @@ class ReferenceLinkWindowTests(unittest.TestCase):
                     card = panel.list.itemWidget(item)
                     button = next(button for button in card.findChildren(QPushButton)
                                   if button.accessibleName() == 'Go to the next citation in the text')
-                    self.assertEqual(button.text(), '5 detected')
-                    for step in range(6):
+                    self.assertEqual(button.text(), f'{count} detected')
+                    for step in range(count + 1):
                         QTest.mouseClick(button, Qt.LeftButton)
-                        self.pump(lambda: panel.series.get(view, (None, -1))[1] == step % 5)
+                        self.pump(lambda: panel.series.get(view, (None, -1))[1] == step % count)
                         self.assertTrue(view._outlines)
-                        self.assertEqual(panel.series[view][2], 5)
-                    self.assertEqual([event['page'] for event in panel.located[view][ref['id']]], [1, 1, 1, 2, 3])
+                        self.assertEqual(panel.series[view][2], count)
+                        if outlined_pages is not None:
+                            self.assertEqual({page for page, _ in view._outlines}, outlined_pages)
+                    self.assertEqual([event['page'] for event in panel.located[view][ref['id']]], expected_pages)
                     self.assertFalse(view.doc.modified)
                     self.assertEqual(workspace.library.get_document(document['id'])['revision'], 0)
                     self.assertEqual(hashlib.sha256(source.read_bytes()).digest(), digest)

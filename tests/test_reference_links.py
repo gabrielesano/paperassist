@@ -13,7 +13,7 @@ from pypdf.generic import (ArrayObject, DecodedStreamObject, DictionaryObject, F
                            NameObject, TextStringObject)
 
 from paperassist import references
-from paperassist.native.citations import CitationIndex, merge_links
+from paperassist.native.citations import CitationIndex, citation_parts, merge_links
 from paperassist.native.engine import Pdf
 
 
@@ -115,7 +115,73 @@ def make_link_paper(path, rotation=0, crop=False):
     writer.write(path)
 
 
+def make_cross_page_paper(path, rotation=0, linked=True, complete=False):
+    writer = PdfWriter()
+    font = writer._add_object(DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+        NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Courier')}))
+    prefix = 'Smith et al. (2000)' if complete else 'Smith et al.'
+    suffix = 'Smith et al. (2000)' if complete else '(2000)'
+    rows = [[('Earlier Smith et al. are discussed.', 40, 600), (prefix, 40, 50)],
+            [(suffix, 40, 640)],
+            [('References', 40, 640), ('Smith, A., Jones, B., & Brown, C. 2000, Journal, 1, 22', 40, 600)]]
+    for lines in rows:
+        page = writer.add_blank_page(600, 700)
+        page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+        stream = DecodedStreamObject()
+        content = []
+        for text, x, y in lines:
+            text = text.replace('(', r'\(').replace(')', r'\)')
+            content.append(f'BT /F1 11 Tf {x} {y} Td ({text}) Tj ET')
+        stream.set_data('\n'.join(content).encode())
+        page[NameObject('/Contents')] = writer._add_object(stream)
+        page.rotate(rotation)
+    writer.add_named_destination_array(TextStringObject('cite.smith'), ArrayObject([
+        writer.pages[2].indirect_reference, NameObject('/XYZ'), FloatObject(40), FloatObject(613), FloatObject(0)]))
+    if linked:
+        for number, text, y in ((0, prefix, 50), (1, suffix, 640)):
+            writer.add_annotation(number, DictionaryObject({NameObject('/Subtype'): NameObject('/Link'),
+                NameObject('/Rect'): ArrayObject(FloatObject(v) for v in (40, y - 2, 40 + len(text) * 6.6, y + 11)),
+                NameObject('/Dest'): TextStringObject('cite.smith')}))
+    writer.write(path)
+
+
 class EventTests(unittest.TestCase):
+    def test_one_cross_page_event_keeps_geometry_on_both_pages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for rotation in (0, 90, 180, 270):
+                for linked in (False, True):
+                    with self.subTest(rotation=rotation, linked=linked):
+                        path = Path(directory) / 'source.pdf'
+                        make_cross_page_paper(path, rotation, linked)
+                        reader = PdfReader(path)
+                        pages = [page.extract_text() for page in reader.pages]
+                        refs = references.extract(pages)
+                        self.assertEqual(refs[0]['citation_count'], 1)
+                        references.map_destinations(reader, pages, refs)
+                        references.crosscheck_links(path, pages, refs)
+                        self.assertEqual(refs[0]['citation_count'], 1)
+                        index = CitationIndex(path.read_bytes())
+                        try:
+                            events = index.locate(refs[0])
+                            self.assertEqual(len(events), 1)
+                            self.assertEqual([page for page, rects in citation_parts(events[0]) if rects], [1, 2])
+                            # The first partial marker also appears earlier; navigation must use its final occurrence.
+                            self.assertLess(refs[0]['occurrences'][0]['rects'][0][1], 100)
+                        finally:
+                            index.close()
+
+    def test_complete_citations_at_adjacent_page_edges_remain_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.pdf'
+            make_cross_page_paper(path, complete=True)
+            reader = PdfReader(path)
+            pages = [page.extract_text() for page in reader.pages]
+            refs = references.extract(pages)
+            references.map_destinations(reader, pages, refs)
+            references.crosscheck_links(path, pages, refs)
+            self.assertEqual(refs[0]['citation_count'], 2)
+            self.assertFalse(any(event.get('continuations') for event in refs[0]['occurrences']))
+
     def test_split_submitted_year_and_degenerate_wrap_still_form_one_event(self):
         links = [{'page': 1, 'dest': 'a', 'rects': [(316, 600, 376, 610)], 'text': 'Shelyag et al.'},
                  {'page': 1, 'dest': 'a', 'rects': [(391, 600, 507, 610)], 'text': '(Submitted on 31 Jan 2011)'}]
@@ -145,7 +211,7 @@ class EventTests(unittest.TestCase):
                     pages = [page.extract_text() for page in reader.pages]
                     refs = references.extract(pages)
                     self.assertEqual(len(refs), 1)
-                    self.assertEqual(refs[0]['citation_count'], 3)
+                    self.assertEqual(refs[0]['citation_count'], 4)
                     references.map_destinations(reader, pages, refs)
                     self.assertEqual(refs[0]['destinations'], ['Item.1'])
                     references.crosscheck_links(path, pages, refs)
