@@ -1,5 +1,9 @@
 # Hosted release acceptance
 
+This record preserves the earlier bundled-OCR development runs. Current
+published packages and acceptance results are in
+[the 0.2.0a2 release record](release-0.2.0a2.md).
+
 ## Scope
 
 GitHub-hosted runners supply the target operating systems without requiring a

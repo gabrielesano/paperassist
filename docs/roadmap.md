@@ -10,20 +10,23 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-1. Verify and publish `0.2.0a2` for Linux, Windows and Apple Silicon macOS,
-   including the reference parsing, cross-page citation and acquisition-layout
-   fixes in the [follow-up record](development/reference-parser-followup.md).
-   The previous `0.2.0a1` alpha is already published with native file delivery
-   and bundled OCR; release artifacts must be rebuilt for the new version.
-2. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
+The `0.2.0a2` alpha is published for all three platforms with the reference
+parsing, cross-page citation and acquisition-layout fixes. See the
+[release acceptance record](development/release-0.2.0a2.md).
+
+1. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
    GUI trials and interactive Windows/macOS reading, editing, focus and display
    checks. Hosted build and installer tests cover automated acceptance; untested
    environments remain documented rather than blocking local development.
-3. Before broader distribution, address Windows signing and macOS Developer ID
+2. Before broader distribution, address Windows signing and macOS Developer ID
    signing/notarization, and verify additional OS/architecture targets as needed.
 
 ## Completed transitions and automated acceptance
 
+- Published `0.2.0a2` with verified source provenance, installer checksums and
+  successful hosted source/build acceptance on Linux, Windows and macOS. See
+  [release notes](releases/0.2.0a2.md) and
+  [the reference parser follow-up](development/reference-parser-followup.md).
 - Managed PDF copies for command-line/system opening, Open and Quick view;
   duplicate reuse and unchanged external originals on Save. Native local-socket
   delivery selects the correct library owner without discarding unsaved edits.

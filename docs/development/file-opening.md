@@ -1,5 +1,9 @@
 # Managed file opening and PDF integration
 
+This record preserves file-delivery implementation and earlier candidate checks.
+Current published package acceptance is recorded for
+[0.2.0a2](release-0.2.0a2.md).
+
 The 0.2.0a1 candidate combines native-only startup, bundled offline OCR and native
 file delivery. The behavior is specified in [the desktop integration record](desktop-plan.md).
 
