@@ -10,8 +10,8 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-The `0.2.0a3` alpha fixes concurrency, native lifecycle, foreign PDF annotations,
-citation resolution, metadata and Linux installer bugs. See the
+The `0.2.0a3` alpha is published for all three platforms with concurrency, native
+lifecycle, foreign PDF annotation, citation, metadata and Linux installer fixes. See the
 [bug audit record](development/bug-audit-2026-11.md) and
 [release acceptance record](development/release-0.2.0a3.md).
 
@@ -24,6 +24,10 @@ citation resolution, metadata and Linux installer bugs. See the
 
 ## Completed transitions and automated acceptance
 
+- Published `0.2.0a3` with the audited bug fixes, verified source and tag CI,
+  successful Linux/Windows/macOS package acceptance, and all release checksums.
+  See [release notes](releases/0.2.0a3.md) and the
+  [acceptance record](development/release-0.2.0a3.md).
 - Published `0.2.0a2` with verified source provenance, installer checksums and
   successful hosted source/build acceptance on Linux, Windows and macOS. See
   [release notes](releases/0.2.0a2.md) and
