@@ -7,7 +7,7 @@ from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QVBoxLayout, QWidget, QSizePolicy)
+                               QStyleOptionButton, QStyleOptionViewItem, QVBoxLayout, QWidget, QSizePolicy)
 
 from paperassist import references
 
@@ -34,7 +34,11 @@ class ReferenceChoice(QPushButton):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.setText(self.fontMetrics().elidedText(self.label, Qt.ElideRight, max(0, self.width() - 24)).replace("&", "&&"))
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = ""
+        padding = self.style().sizeFromContents(QStyle.CT_PushButton, option, QSize(0, self.fontMetrics().height()), self).width()
+        self.setText(self.fontMetrics().elidedText(self.label, Qt.ElideRight, max(0, self.width() - padding)).replace("&", "&&"))
 
 
 def _load_or_analyze(library, document_id):

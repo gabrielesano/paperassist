@@ -171,7 +171,11 @@ class AcquisitionWidgetTests(unittest.TestCase):
         font = box.font()
         font.setPointSizeF(font.pointSizeF() * 2)
         box.setFont(font)
-        QTest.qWait(30)  # nested scroll/layout requests need more than one event-loop pass
+        # Cocoa can defer nested scroll-area layout beyond a single event-loop pass.
+        for _ in range(100):
+            QTest.qWait(20)
+            if box.height() > original_height:
+                break
         self.assertGreater(box.height(), original_height)
         self.assertEqual(dialog.findChild(QScrollArea).horizontalScrollBar().maximum(), 0)
         self.workspace.download_references.assert_not_called()
