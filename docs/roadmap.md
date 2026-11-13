@@ -10,9 +10,10 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-The `0.2.0a2` alpha is published for all three platforms with the reference
-parsing, cross-page citation and acquisition-layout fixes. See the
-[release acceptance record](development/release-0.2.0a2.md).
+The `0.2.0a3` alpha fixes concurrency, native lifecycle, foreign PDF annotations,
+citation resolution, metadata and Linux installer bugs. See the
+[bug audit record](development/bug-audit-2026-11.md) and
+[release acceptance record](development/release-0.2.0a3.md).
 
 1. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
    GUI trials and interactive Windows/macOS reading, editing, focus and display

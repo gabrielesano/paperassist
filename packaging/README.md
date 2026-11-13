@@ -6,15 +6,15 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current release is **0.2.0a2**, adding reconciled citation events, bibliography
-repairs and wrapped acquisition titles to native file delivery, managed PDF opening,
-optional OS PDF registrations and bundled offline OCR. Release notes are in
-[0.2.0a2](../docs/releases/0.2.0a2.md). See
-[the desktop integration record](../docs/development/desktop-plan.md). Build commands
-below produce the current source version. See the [maintenance verification](../docs/development/linux-alpha-maintenance.md)
-for earlier maintenance results and [release acceptance](../docs/development/release-0.2.0a2.md)
-for the published artifacts; the `0.1.0a2` measurements and examples below
-describe the preserved earlier candidate.
+The current release is **0.2.0a3**, fixing background-job races, native window
+lifecycle errors, foreign PDF annotation editing, citation resolution, metadata
+refresh and Linux installer edge cases. Release notes are in
+[0.2.0a3](../docs/releases/0.2.0a3.md); the
+[bug audit record](../docs/development/bug-audit-2026-11.md) documents regression
+coverage. Build commands below produce the current source version. See
+[release acceptance](../docs/development/release-0.2.0a3.md) for the current
+packages and [earlier maintenance verification](../docs/development/linux-alpha-maintenance.md)
+for the historical `0.1.0a2` measurements and examples below.
 
 PaperAssist provides two packaging tiers for Linux `x86_64`:
 1. A PyInstaller one-dir application bundle (`dist/PaperAssist/`).
