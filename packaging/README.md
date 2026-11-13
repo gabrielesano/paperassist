@@ -6,14 +6,12 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current release is **0.2.0a3**, fixing background-job races, native window
-lifecycle errors, foreign PDF annotation editing, citation resolution, metadata
-refresh and Linux installer edge cases. Release notes are in
-[0.2.0a3](../docs/releases/0.2.0a3.md); the
-[bug audit record](../docs/development/bug-audit-2026-11.md) documents regression
-coverage. Build commands below produce the current source version. See
-[release acceptance](../docs/development/release-0.2.0a3.md) for the current
-packages and [earlier maintenance verification](../docs/development/linux-alpha-maintenance.md)
+The current release is **0.2.0a4**, fixing toolbar overflow visibility in narrow
+windows and preserving safe style cleanup when toolbars close. Release notes are
+in [0.2.0a4](../docs/releases/0.2.0a4.md). Build commands below produce the current
+source version. See [release acceptance](../docs/development/release-0.2.0a4.md)
+for the current packages and
+[earlier maintenance verification](../docs/development/linux-alpha-maintenance.md)
 for the historical `0.1.0a2` measurements and examples below.
 
 PaperAssist provides two packaging tiers for Linux `x86_64`:

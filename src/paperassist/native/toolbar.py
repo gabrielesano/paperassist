@@ -1,6 +1,12 @@
 """Reachable overflow actions for native toolbars."""
 from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtWidgets import QMenu, QToolButton
+from PySide6.QtWidgets import QApplication, QMenu, QProxyStyle, QStyle, QToolButton
+
+
+class _ToolbarStyle(QProxyStyle):
+    def pixelMetric(self, metric, option=None, widget=None):
+        value = super().pixelMetric(metric, option, widget)
+        return max(value, 24) if metric == QStyle.PM_ToolBarExtensionExtent else value
 
 
 def reserve_zoom_width(action, button, text):
@@ -17,7 +23,14 @@ class _Overflow(QObject):
     def __init__(self, toolbar):
         super().__init__(toolbar)
         self.toolbar = toolbar
+        # Qt's toolbar layout reserves the style metric, regardless of CSS minimum widths.
+        self.style = style = _ToolbarStyle(QApplication.style().name())
+        # Widget actions can consult the style while the toolbar releases their widgets.
+        style.setParent(QApplication.instance())
+        toolbar.destroyed.connect(style.deleteLater)
+        toolbar.setStyle(style)
         self.button = toolbar.findChild(QToolButton, "qt_toolbar_ext_button")
+        self.button.setStyle(style)
         self.button.setFocusPolicy(Qt.StrongFocus)
         self.button.setAccessibleName(f"More {toolbar.windowTitle().lower()} actions")
         self.menu = QMenu(toolbar)

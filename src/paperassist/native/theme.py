@@ -276,7 +276,7 @@ QToolButton#save-button[dirty="true"]:hover {{
 }}
 QToolButton#qt_toolbar_ext_button {{
     padding: 2px 4px;
-    border: 0;
+    border: 1px solid transparent;
 }}
 QToolButton#qt_toolbar_ext_button:focus {{
     border: 1px solid {TEAL};
