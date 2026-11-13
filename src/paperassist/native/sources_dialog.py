@@ -3,7 +3,7 @@
 Keys are write-only: the library settings return only whether a key is set and its last
 four characters. Changes apply on an explicit Save; an access check uses what was saved.
 """
-from PySide6.QtCore import QEvent, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
@@ -244,6 +244,7 @@ class SourcesDialog(QDialog):
         self.check_thread.done.connect(self._checked)
         self.check_thread.start()
 
+    @Slot(object, str)
     def _checked(self, results, error):
         self.check_button.setEnabled(True)
         if error:

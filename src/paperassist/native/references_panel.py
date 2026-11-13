@@ -7,7 +7,7 @@ from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QVBoxLayout, QWidget)
+                               QStyleOptionViewItem, QVBoxLayout, QWidget, QSizePolicy)
 
 from paperassist import references
 
@@ -20,6 +20,21 @@ from .theme import FlowLayout, INK, LINE, TEAL, TONE_NEUTRAL, reference_palette
 SHOWN_CHARS = 240  # one bibliography entry can run to a page; the tooltip keeps the whole text
 PAD_X = 11
 PAD_Y = 8
+
+
+class ReferenceChoice(QPushButton):
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.label = text
+        self.setToolTip(text)
+        self.setAccessibleName(text)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setText(text.replace("&", "&&"))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.setText(self.fontMetrics().elidedText(self.label, Qt.ElideRight, max(0, self.width() - 24)).replace("&", "&&"))
 
 
 def _load_or_analyze(library, document_id):
@@ -143,7 +158,8 @@ class ReferencesPanel(QWidget):
         self.view, self.acquisition = None, None
         self.loaded = {}
         self.series, self.located = weakref.WeakKeyDictionary(), weakref.WeakKeyDictionary()
-        self.stepping, self.pending_reload = set(), set()
+        self.revisions = {}
+        self.stepping, self.pending_reload = weakref.WeakSet(), set()
         self.followed_citations = set()
         self.payload_status = "not_analyzed"
         self.pending_citation = None
@@ -253,6 +269,7 @@ class ReferencesPanel(QWidget):
             view.internal_link_handler = lambda link, target=weakref.ref(view): self._citation_link(target(), link)
 
     def reload(self, document_id):
+        self._invalidate_citations(document_id)
         self.loaded.pop(document_id, None)
         if document_id in self.analyzing:
             self.pending_reload.add(document_id)
@@ -263,6 +280,8 @@ class ReferencesPanel(QWidget):
     def library_changed(self):
         """Forget bibliographies affected by library imports or metadata edits."""
         self.loaded.clear()
+        for document_id in list(self.revisions):
+            self._invalidate_citations(document_id)
         self.pending_reload.update(self.analyzing)
         if self.document_id is not None:
             self.reload(self.document_id)
@@ -489,10 +508,15 @@ class ReferencesPanel(QWidget):
             return self._show_citation(view, ref, cached)
         self.stepping.add(view)
         target = weakref.ref(view)
-        view.client.locate(view.doc_id, ref, lambda result, error: self._located(target(), ref, result, error))
+        document_id = self.document_id
+        revision = self.revisions.setdefault(document_id, 0)
+        view.client.locate(view.doc_id, ref, lambda result, error: self._located(
+            target(), ref, result, error, document_id, revision))
 
-    def _located(self, view, ref, result, error):
+    def _located(self, view, ref, result, error, document_id=None, revision=None):
         if view is None:
+            return
+        if revision is not None and revision != self.revisions.get(document_id, 0):
             return
         self.stepping.discard(view)
         if error:
@@ -551,7 +575,7 @@ class ReferencesPanel(QWidget):
             self.choice_layout.addWidget(QLabel(f"Citation {text}: choose a reference", objectName="muted-note", wordWrap=True))
             for ref in matches:
                 label = f"{ref.get('label', '')} {ref.get('title') or ref.get('raw') or 'Reference'}"
-                button = QPushButton(label.replace("&", "&&"))
+                button = ReferenceChoice(label)
                 button.clicked.connect(lambda _=False, target=ref: self._follow_citation(target))
                 self.choice_layout.addWidget(button)
             self.choices.show()
@@ -577,9 +601,18 @@ class ReferencesPanel(QWidget):
             self.list.scrollToItem(item, QListView.PositionAtCenter)
 
     # ---- analysis job ---------------------------------------------------------------------
+    def _invalidate_citations(self, document_id):
+        self.revisions[document_id] = self.revisions.get(document_id, 0) + 1
+        for view in set(self.located) | set(self.series) | set(self.stepping):
+            if view.doc.source.document_id == document_id:
+                self.located.pop(view, None)
+                self.series.pop(view, None)
+                self.stepping.discard(view)
+
     def analyze(self, document_id):
         if document_id is None or self.workspace is None or document_id in self.analyzing:
             return
+        self._invalidate_citations(document_id)
         self.loaded.pop(document_id, None)
         self._run_job(document_id, lambda: self.workspace.analyze_references(document_id), "analyze")
 
@@ -605,6 +638,7 @@ class ReferencesPanel(QWidget):
                 self._message(f"Could not {operation} the references: {job.get('error') or job['status']}", retry=True)
             return
         payload = job["result"]
+        self._invalidate_citations(document_id)
         self.loaded[document_id] = payload
         if document_id == self.document_id:
             self.refs, self.payload_status = payload["references"], payload["status"]

@@ -82,7 +82,7 @@ def _ocr_candidates(metadata):
 def _local_metadata(document, extracted):
     metadata = _ocr_candidates({**document["metadata"], **extracted})
     values = {key: extracted.get(key) for key in ("title", "authors", "year")}
-    values["year"] = document["year"] or values["year"]
+    values["year"] = values["year"] or document["year"]
     previous = document["metadata"].get("sources", {})
     metadata["sources"] = dict(metadata.get("sources", {}))
     for key in ("title", "authors"):
@@ -257,7 +257,7 @@ class Library:
         """Finish an interrupted rename, then give legacy <sha256>.pdf originals readable names."""
         with self._connect() as db:
             rows = db.execute("SELECT id, sha256, stored_name FROM documents").fetchall()
-        files = {entry.name for entry in os.scandir(self.originals) if entry.name.lower().endswith(".pdf")}
+        files = {entry.name for entry in os.scandir(self.originals) if entry.is_file() and entry.name.lower().endswith(".pdf")}
         names = {row["id"]: row["stored_name"] or row["sha256"] + ".pdf" for row in rows}
         strays = sorted(files - set(names.values()))
         # A crash between the file move and the database update leaves a missing file and a stray one.
@@ -448,6 +448,9 @@ class Library:
                 values["filename"] = filename
             db.execute("UPDATE documents SET " + ", ".join(f"{key} = ?" for key in values) + " WHERE id = ?",
                        (*values.values(), doc["id"]))
+            if values.get("work_id"):
+                db.execute("UPDATE works SET preferred_file_id = ? WHERE id = ? AND preferred_file_id IS NULL",
+                           (doc["id"], values["work_id"]))
             old_work = doc["work_id"]
             if "work_id" in values and old_work and old_work != values["work_id"]:
                 db.execute("""UPDATE works SET preferred_file_id = (SELECT id FROM documents

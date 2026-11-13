@@ -60,8 +60,6 @@ class OpenFiles(QObject):
             request = (path, quick)
             if request not in self.pending:
                 self.pending.append(request)
-        if self.window.library_dialog:
-            self.window.library_dialog.hide()
         self._next()
 
     def activate(self):
@@ -80,6 +78,8 @@ class OpenFiles(QObject):
         if QApplication.activeModalWidget():
             self.wait.start()
             return
+        if self.window.library_dialog:
+            self.window.library_dialog.hide()
         path, self.quick = self.pending.popleft()
         try:
             job = self.window.workspace.open_files([path])

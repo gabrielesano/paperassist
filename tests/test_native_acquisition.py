@@ -198,6 +198,57 @@ class AcquisitionWidgetTests(unittest.TestCase):
         self.assertEqual(dialog.count.text(), "0 selected")
         self.assertFalse(dialog.selected_button.isEnabled())
 
+    def test_reanalysis_rebuilds_offer_rows_and_preserves_current_selection(self):
+        self.controller.offer(11)
+        dialog = self.controller.dialogs[11]
+        dialog.boxes[0].setChecked(True)
+        refs = [{**self.refs[0], "title": "Updated title"}, {"id": "4", "title": "New reference"}]
+        self.controller.set_reference_data(11, refs)
+        self.assertEqual(list(dialog.rows), ["1", "4"])
+        self.assertEqual(dialog.selected(), ["1"])
+        self.assertIn("Updated title", dialog.boxes[0].text())
+        dialog.select_all(True)
+        self.assertEqual(dialog.selected(), ["1", "4"])
+
+    def test_other_reference_tasks_wait_for_the_current_job(self):
+        self.controller.jobs["running"] = Mock()
+        start, done = Mock(), Mock()
+        self.controller._task(11, start, done)
+        start.assert_not_called()
+        done.assert_not_called()
+        self.assertIn("Wait for the current", self.controller.status.text())
+
+    def test_deselected_current_link_candidate_cannot_be_accepted(self):
+        from PySide6.QtWidgets import QDialogButtonBox, QTreeWidget
+        self.workspace.library.list_documents.return_value = [{"id": 4, "title": "Candidate"}]
+        self.controller.choose_link(11, self.refs[0])
+        dialog = self.controller._link_dialog
+        table = dialog.findChild(QTreeWidget)
+        table.setCurrentItem(table.topLevelItem(0))
+        buttons = dialog.findChild(QDialogButtonBox)
+        self.assertTrue(buttons.button(QDialogButtonBox.Ok).isEnabled())
+        table.clearSelection()
+        self.assertIsNotNone(table.currentItem())
+        self.assertFalse(buttons.button(QDialogButtonBox.Ok).isEnabled())
+        with patch.object(self.controller, "link") as link:
+            buttons.accepted.emit()
+        link.assert_not_called()
+        dialog.close()
+
+    def test_deselected_current_folder_candidate_cannot_be_accepted(self):
+        from PySide6.QtWidgets import QDialogButtonBox, QTreeWidget
+        self.controller._folder_result(11, self.refs[0], {"candidates": [{"name": "Candidate.pdf"}]})
+        dialog = self.controller._folder_dialog
+        table = dialog.findChild(QTreeWidget)
+        table.setCurrentItem(table.topLevelItem(0))
+        table.clearSelection()
+        buttons = dialog.findChild(QDialogButtonBox)
+        self.assertFalse(buttons.button(QDialogButtonBox.Ok).isEnabled())
+        with patch.object(self.controller, "link_folder_file") as link:
+            buttons.accepted.emit()
+        link.assert_not_called()
+        dialog.close()
+
     def test_closing_drops_a_queued_acquisition_offer(self):
         self.controller.main_opened(11)
         self.controller.close()

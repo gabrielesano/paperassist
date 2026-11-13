@@ -16,7 +16,7 @@ class PageLayout:
             self.tops.append(y)
             y += height * zoom + GAP
         self.height = y - GAP + MARGIN
-        self.width = max(viewport_width, max(w for w, _ in sizes) * zoom + 2 * MARGIN)
+        self.width = max(viewport_width, max((w for w, _ in sizes), default=0) * zoom + 2 * MARGIN)
 
     def rect(self, page):
         """(x, y, width, height) of a page in content coordinates; pages are centered."""
@@ -41,10 +41,15 @@ class PageLayout:
 
     def anchor(self, top):
         """(page, fraction of that page above the viewport top), to keep the position through a zoom."""
+        if not self.sizes:
+            return 0, 0.0
         page = self.page_at(top - GAP / 2)  # the page whose top is at or above the viewport top
-        return page, (top - self.tops[page]) / (self.sizes[page][1] * self.zoom)
+        height = self.sizes[page][1] * self.zoom
+        return page, (top - self.tops[page]) / height if height else 0.0
 
     def top_of(self, page, fraction):
+        if not self.sizes:
+            return MARGIN
         return self.tops[page] + fraction * self.sizes[page][1] * self.zoom
 
 

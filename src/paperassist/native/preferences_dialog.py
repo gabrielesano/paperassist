@@ -204,6 +204,9 @@ class PreferencesDialog(QDialog):
         # Check unsaved work before prepare_switch, which persists the new library choice immediately.
         if self._unsaved_changes():
             return
+        if (opener := getattr(self.host, 'file_opener', None)) and opener.busy:
+            self._close_confirm()
+            return self._say("PDFs are still opening. Wait for opening to finish before switching libraries.", bad=True)
         try:
             target = self.host.workspace.prepare_switch(self.library_edit.text(), self._plan["action"])
         except (WorkspaceConflict, ValueError, OSError) as error:

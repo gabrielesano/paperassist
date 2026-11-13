@@ -32,7 +32,8 @@ def read_outline(data):
 
 def _top(page, top):
     """Rotated pages keep to the page top: converting their coordinates is the engine's job."""
-    if top is None or page.rotation % 360:
+    from pypdf.generic import NullObject
+    if top is None or isinstance(top, NullObject) or page.rotation % 360:
         return 0.0
     return max(0.0, float(page.cropbox.top) - float(top))
 

@@ -224,34 +224,8 @@ class AcquisitionDialog(QDialog):
         entries = QVBoxLayout(content)
         entries.setContentsMargins(0, 0, 0, 0)
         entries.setSpacing(0)
-        saved = controller.selections.load(document_id)
-        for ref in refs:
-            local = bool(ref.get("local_document_id"))
-            frame = QFrame(objectName="acquire-row")
-            frame.setStyleSheet(_row_style(ref))
-            item_layout = QVBoxLayout(frame)
-            item_layout.setContentsMargins(10, 8, 10, 8)
-            item_layout.setSpacing(3)
-            text = f"{ref.get('label') or ''} {ref.get('title') or ref.get('raw') or 'Unidentified reference'}"
-            box = ReferenceCheckBox(text.strip().replace("&", "&&"))
-            box.setToolTip(text)
-            box.setEnabled(not local and not ref.get("legacy"))
-            box.setChecked(box.isEnabled() and str(ref["id"]) in saved)
-            box.setProperty("reference_id", str(ref["id"]))
-            box.toggled.connect(self.selection_changed)
-            item_layout.addWidget(box)
-            status = QLabel("In library — no download needed" if local else reference_status(ref), wordWrap=True)
-            status.setStyleSheet(f"color: {status_tone(ref)};")
-            item_layout.addWidget(status)
-            entries.addWidget(frame)
-            self.boxes.append(box)
-            self.rows[str(ref["id"])] = (box, status)
-            self._frames[str(ref["id"])] = frame
-        if not refs:
-            empty = QLabel("No references were found in this paper.", objectName="muted-note", wordWrap=True)
-            empty.setContentsMargins(12, 12, 12, 12)
-            entries.addWidget(empty)
-        entries.addStretch()
+        self.entries = entries
+        self._populate(refs, controller.selections.load(document_id))
         scroll.setWidget(content)
         column.addWidget(scroll, 1)
 
@@ -274,6 +248,35 @@ class AcquisitionDialog(QDialog):
         continue_button.clicked.connect(self.close)
         column.addLayout(buttons)
         self.update_count()
+
+    def _populate(self, refs, saved):
+        for ref in refs:
+            local = bool(ref.get("local_document_id"))
+            frame = QFrame(objectName="acquire-row")
+            frame.setStyleSheet(_row_style(ref))
+            item_layout = QVBoxLayout(frame)
+            item_layout.setContentsMargins(10, 8, 10, 8)
+            item_layout.setSpacing(3)
+            text = f"{ref.get('label') or ''} {ref.get('title') or ref.get('raw') or 'Unidentified reference'}"
+            box = ReferenceCheckBox(text.strip().replace("&", "&&"))
+            box.setToolTip(text)
+            box.setEnabled(not local and not ref.get("legacy"))
+            box.setChecked(box.isEnabled() and str(ref["id"]) in saved)
+            box.setProperty("reference_id", str(ref["id"]))
+            box.toggled.connect(self.selection_changed)
+            item_layout.addWidget(box)
+            status = QLabel("In library — no download needed" if local else reference_status(ref), wordWrap=True)
+            status.setStyleSheet(f"color: {status_tone(ref)};")
+            item_layout.addWidget(status)
+            self.entries.addWidget(frame)
+            self.boxes.append(box)
+            self.rows[str(ref["id"])] = (box, status)
+            self._frames[str(ref["id"])] = frame
+        if not refs:
+            empty = QLabel("No references were found in this paper.", objectName="muted-note", wordWrap=True)
+            empty.setContentsMargins(12, 12, 12, 12)
+            self.entries.addWidget(empty)
+        self.entries.addStretch()
 
     def selected(self):
         return [box.property("reference_id") for box in self.boxes if box.isEnabled() and box.isChecked()]
@@ -300,20 +303,13 @@ class AcquisitionDialog(QDialog):
         self.selection_changed()
 
     def update_references(self, refs):
-        available = {str(ref["id"]): ref for ref in refs}
-        for reference_id, (box, status) in self.rows.items():
-            ref = available.get(reference_id)
-            enabled = ref is not None and not ref.get("local_document_id") and not ref.get("legacy")
-            box.setEnabled(enabled)
-            if not enabled:
-                box.blockSignals(True)
-                box.setChecked(False)
-                box.blockSignals(False)
-            if ref:
-                status.setText("In library — no download needed" if ref.get("local_document_id") else reference_status(ref))
-                status.setStyleSheet(f"color: {status_tone(ref)};")
-                if frame := self._frames.get(reference_id):
-                    frame.setStyleSheet(_row_style(ref))
+        selected = set(self.selected())
+        while self.entries.count():
+            if widget := self.entries.takeAt(0).widget():
+                widget.hide()
+                widget.deleteLater()
+        self.boxes, self.rows, self._frames = [], {}, {}
+        self._populate(refs, selected)
         self.selection_changed()
 
     def start(self, all_missing):
@@ -352,15 +348,24 @@ class AcquisitionController(QObject):
             self.dialogs[document_id].update_references(refs)
         if document_id in self.pending:
             self.pending.remove(document_id)
-            QTimer.singleShot(0, lambda: self.offer(document_id))
+            QTimer.singleShot(0, lambda: self._offer_if_active(document_id))
 
     def main_opened(self, document_id):
         if self._closed or self.workspace is None or document_id is None:
             return
         if document_id in self.data:
-            QTimer.singleShot(0, lambda: self.offer(document_id))
+            QTimer.singleShot(0, lambda: self._offer_if_active(document_id))
         else:
             self.pending.add(document_id)
+
+    def _offer_if_active(self, document_id):
+        if self._closed:
+            return
+        if hasattr(self.window, "tab"):
+            tab = self.window.tab()
+            if tab is None or tab.main.view.doc.source.document_id != document_id:
+                return
+        self.offer(document_id)
 
     def offer(self, document_id, refs=None):
         if self._closed or self.workspace is None:
@@ -451,6 +456,9 @@ class AcquisitionController(QObject):
         return True
 
     def _task(self, document_id, start, finished):
+        if self.jobs:
+            self._say(document_id, "Wait for the current reference task to finish.")
+            return
         try:
             self._watch(document_id, start(), lambda value: finished(value.get("result") or {}))
         except Exception as error:
@@ -498,8 +506,13 @@ class AcquisitionController(QObject):
             ok.setText("Link selected PDF")
             ok.setProperty("primary", True)
             ok.setEnabled(False)
-            table.itemSelectionChanged.connect(lambda: ok.setEnabled(table.currentItem() is not None))
-            buttons.accepted.connect(lambda: (self.link_folder_file(document_id, ref, table.currentItem().data(0, Qt.UserRole)), dialog.accept()))
+            table.itemSelectionChanged.connect(lambda: ok.setEnabled(bool(table.selectedItems())))
+
+            def accept():
+                if selected := table.selectedItems():
+                    self.link_folder_file(document_id, ref, selected[0].data(0, Qt.UserRole))
+                    dialog.accept()
+            buttons.accepted.connect(accept)
             buttons.rejected.connect(dialog.reject)
             column.addWidget(buttons)
             dialog.setAttribute(Qt.WA_DeleteOnClose)
@@ -557,8 +570,13 @@ class AcquisitionController(QObject):
                 table.addTopLevelItem(item)
         typing = QTimer(dialog, singleShot=True, interval=150, timeout=fill)
         search.textChanged.connect(typing.start)
-        table.itemSelectionChanged.connect(lambda: ok.setEnabled(table.currentItem() is not None))
-        buttons.accepted.connect(lambda: (self.link(document_id, ref, table.currentItem().data(0, Qt.UserRole)), dialog.accept()))
+        table.itemSelectionChanged.connect(lambda: ok.setEnabled(bool(table.selectedItems())))
+
+        def accept():
+            if selected := table.selectedItems():
+                self.link(document_id, ref, selected[0].data(0, Qt.UserRole))
+                dialog.accept()
+        buttons.accepted.connect(accept)
         buttons.rejected.connect(dialog.reject)
         column.addWidget(search)
         column.addWidget(table, 1)

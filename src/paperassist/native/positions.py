@@ -48,6 +48,7 @@ class PositionKeeper(QObject):
         super().__init__(pane)
         self.pane, self.view, self.workspace, self.document_id = pane, pane.view, workspace, pane.view.doc.source.document_id
         self.active = self.dirty = False  # moves before the restore are the window settling, not the reader
+        self.closed = False
         self.known = self.restored = None  # the stored (page, scale); the restored (scale, zoom, fit)
         self.timer = QTimer(self, singleShot=True, interval=SAVE_DELAY_MS, timeout=self.save)
         self.view.moved.connect(self._moved)
@@ -56,6 +57,8 @@ class PositionKeeper(QObject):
         QTimer.singleShot(0, self.restore)  # the view needs its final size to place itself
 
     def restore(self):
+        if self.closed:
+            return
         view = self.view
         try:
             saved = self.workspace.get_view(self.document_id)
@@ -113,3 +116,4 @@ class PositionKeeper(QObject):
         self.timer.stop()
         self.save()
         self.active = False
+        self.closed = True

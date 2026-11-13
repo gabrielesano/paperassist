@@ -4,11 +4,14 @@ import json
 import math
 import re
 import statistics
+import threading
 import unicodedata
 from bisect import bisect_right
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 import sqlite3
+from weakref import WeakValueDictionary
 
 from pypdf import PdfReader
 
@@ -74,6 +77,23 @@ SHORT_LINE, MIN_LINES = 16, 8
 # An entry this many times longer than the median entry is suspect, however long real author lists are.
 OUTLIER = 6
 EXTRACTION_VERSION = 5
+
+_locks = WeakValueDictionary()
+_locks_guard = threading.Lock()
+
+
+def _synchronized(function):
+    @wraps(function)
+    def synchronized(library, *args, **kwargs):
+        # Separate Library objects may share a database. Keep its JSON updates atomic.
+        key = str(Path(library.db_path).resolve())
+        with _locks_guard:
+            lock = _locks.get(key)
+            if lock is None:
+                lock = _locks[key] = threading.RLock()
+        with lock:
+            return function(library, *args, **kwargs)
+    return synchronized
 
 
 @contextmanager
@@ -374,9 +394,17 @@ def analyze(library, document_id):
     refs = extract(pages)
     map_destinations(reader, pages, refs)
     crosscheck_links(path, pages, refs)
-    previous = _load(library, document_id).get('references', [])
+    return _store_analysis(library, document_id, refs)
+
+
+@_synchronized
+def _store_analysis(library, document_id, refs):
+    # Extraction can be slow; merge the latest user changes only after it finishes.
+    previous_payload = _load(library, document_id)
+    previous = previous_payload.get('references', [])
     reserved = {str(old['id']) for old in previous if 'id' in old}
-    next_id = max((int(value) for value in reserved if value.isdigit()), default=-1) + 1
+    next_id = max(previous_payload.get('next_reference_id', 0),
+                  max((int(value) for value in reserved if value.isdigit()), default=-1) + 1)
     retained = {}
     previous_entries = [(_normalize(old['raw']), old) for old in previous if 'id' in old]
     for ref in refs:
@@ -389,8 +417,8 @@ def analyze(library, document_id):
         if len(matches) == 1:
             ref['id'] = str(matches[0]['id'])
             retained[ref['id']] = matches[0]
-        elif reserved:
-            # Removing a spurious row must not move a saved acquisition selection to another paper.
+        else:
+            # Never reuse removed IDs: a download may still hold an older selection.
             ref['id'] = str(next_id)
             next_id += 1
     preserved = [r for r in previous if r.get('manual_link') or r.get('retrieval') or r.get('identity')]
@@ -400,7 +428,8 @@ def analyze(library, document_id):
         raw = _normalize(ref['raw'])
         matches = []
         for i, old in enumerate(preserved):
-            if i in claimed:
+            old_id = str(old['id']) if 'id' in old else None
+            if i in claimed or (old_id in retained and ref['id'] != old_id):
                 continue
             old_raw = _normalize(old['raw'])
             if (old_raw == raw and raw) or retained.get(ref['id']) is old:
@@ -416,6 +445,9 @@ def analyze(library, document_id):
         old = preserved[matches[0]] if len(matches) == 1 else {}
         if old:
             claimed.add(matches[0])
+            if 'id' in old:
+                ref['id'] = str(old['id'])
+                retained[ref['id']] = old
         if state := old.get('retrieval'):
             ref['retrieval'], ref['status'] = state, state['status']
         if identity := old.get('identity'):
@@ -429,10 +461,13 @@ def analyze(library, document_id):
                 ref['local_document_id'] = matches[0]['id']
     for i, old in enumerate(preserved):
         if i not in claimed:
-            refs.append({**old, 'id': f'legacy-{i}', 'destinations': [], 'occurrences': [],
+            reference_id = str(old['id']) if 'id' in old else str(next_id)
+            next_id += 'id' not in old
+            refs.append({**old, 'id': reference_id, 'destinations': [], 'occurrences': [],
                          'citation_count': None, 'count_status': 'ambiguous', 'legacy': True,
                          'status': 'Previous reference — verify link'})
     payload = {'references': sorted(refs, key=lambda r: -(r['citation_count'] if r['citation_count'] is not None else -1)), 'status': 'partial', 'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION,
+               'next_reference_id': next_id,
                'message': 'Detected citations only; bibliography and counts may be incomplete.'}
     _save(library, document_id, payload)
     return _resolve(library, document_id, payload, documents)
@@ -455,6 +490,8 @@ def crosscheck_links(path, pages, refs):
     try:
         index.prepare_bibliography(refs, heading)
         for ref in linked:
+            # Rebuild link events from the PDF, rather than treating saved geometry as new text.
+            ref.pop('occurrence_geometry', None)
             occurrences = index.pdf_occurrences(ref)
             ref.update(occurrences=occurrences, citation_count=len(occurrences), occurrence_geometry='pdf')
     finally:
@@ -726,6 +763,7 @@ def _first_page_doi(ref, document, evidence_for):
     return bool(author) and not _conflict(ref, document, evidence) and bool(re.search(r'(?<!\w)' + re.escape(author) + r'(?!\w)', seen))
 
 
+@_synchronized
 def get(library, document_id):
     payload = _load(library, document_id)
     if payload['status'] == 'not_analyzed':
@@ -742,6 +780,7 @@ def get(library, document_id):
     return _resolve(library, document_id, payload, library.list_documents())
 
 
+@_synchronized
 def link(library, document_id, reference_id, target_id):
     if target_id is not None:
         if str(document_id) == str(target_id):
@@ -760,6 +799,7 @@ def link(library, document_id, reference_id, target_id):
     return next(r for r in get(library, document_id)['references'] if r['id'] == str(reference_id))
 
 
+@_synchronized
 def set_retrieval(library, document_id, reference_id, result):
     from datetime import datetime, timezone
     payload = get(library, document_id)
@@ -788,18 +828,31 @@ def repair_downloads(library, document_id, find=identify):
         if not doc or doc['filename'] != 'download.pdf' or doc['metadata_status'] == 'corrected':
             continue
         try:
-            status, message, identity = ('found', '', ref['identity']) if ref.get('identity') else find(ref)
+            _, message, identity = ('found', '', ref['identity']) if ref.get('identity') else find(ref)
         except OSError as error:
-            status, message, identity = 'error', str(error), None
-        lines = ' '.join((_publication_evidence(library, doc) or {}).get('lines', []))
-        # Small-caps headers extract as "D AHLBURG", so compare without spaces.
-        squash = lambda text: fold(text).replace(' ', '')
-        if not identity or not identity.get('first_author') or squash(identity['first_author']) not in squash(lines):
-            report.append({'reference': ref['id'], 'document': target, 'status': 'skipped', 'message': message or 'First author not on the first page'})
-            continue
-        ref['identity'], ref['doi'] = identity, ref.get('doi') or identity['doi']
-        name = pdf_name(ref.get('authors') or identity['first_author'], identity['year'], identity.get('publication'))
-        library.apply_verified(target, identity, name)
-        report.append({'reference': ref['id'], 'document': target, 'status': 'repaired', 'message': name})
-    _save(library, document_id, payload)
+            message, identity = str(error), None
+        report.append(_repair_reference(library, document_id, ref['id'], target, identity, message))
     return report
+
+
+@_synchronized
+def _repair_reference(library, document_id, reference_id, target, identity, message):
+    payload = get(library, document_id)
+    ref = next((ref for ref in payload['references'] if ref['id'] == reference_id), None)
+    result = {'reference': reference_id, 'document': target, 'status': 'skipped'}
+    if ref is None or str(ref.get('local_document_id')) != str(target):
+        return {**result, 'message': 'Reference link changed during lookup'}
+    doc = library.get_document(target)
+    if doc['filename'] != 'download.pdf' or doc['metadata_status'] == 'corrected':
+        return {**result, 'message': 'Document changed during lookup'}
+    identity = ref.get('identity') or identity
+    lines = ' '.join((_publication_evidence(library, doc) or {}).get('lines', []))
+    # Small-caps headers extract as "D AHLBURG", so compare without spaces.
+    squash = lambda text: fold(text).replace(' ', '')
+    if not identity or not identity.get('first_author') or squash(identity['first_author']) not in squash(lines):
+        return {**result, 'message': message or 'First author not on the first page'}
+    ref['identity'], ref['doi'] = identity, ref.get('doi') or identity['doi']
+    name = pdf_name(ref.get('authors') or identity['first_author'], identity['year'], identity.get('publication'))
+    library.apply_verified(target, identity, name)
+    _save(library, document_id, payload)
+    return {**result, 'status': 'repaired', 'message': name}

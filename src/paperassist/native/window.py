@@ -555,6 +555,8 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event):
+        if getattr(self, '_closing', False):
+            return event.ignore()
         self._closing = True
         accepted = False
         try:

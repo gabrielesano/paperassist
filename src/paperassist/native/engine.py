@@ -4,6 +4,7 @@ All coordinates exposed to the UI are top-left displayed PDF points, including
 crop offsets and rotation. Documents hold bytes, never an open source file.
 """
 import ctypes
+import math
 from contextlib import closing
 from functools import wraps
 from threading import RLock
@@ -114,6 +115,9 @@ class Pdf:
         self.data = bytes(data)
         self._doc = pdfium.PdfDocument(self.data)
         self.sizes = [self._doc.get_page_size(i) for i in range(len(self._doc))]
+        if not self.sizes or any(not math.isfinite(size) or size <= 0 for pair in self.sizes for size in pair):
+            self._doc.close()
+            raise ValueError('PDF must contain pages with positive width and height')
         self._frames = {}
         self._named_destinations = None
         self._named_pages = {}
@@ -221,14 +225,19 @@ class Pdf:
             text_page = page.get_textpage()
             for match in _search_ranges(text_page, text):
                 line = None
+                angle = raw.FPDFText_GetCharAngle(text_page, match[0])
+                a, b, c, d, _, _ = frame.matrix
+                vertical = abs(b * math.cos(angle) + d * math.sin(angle)) > abs(a * math.cos(angle) + c * math.sin(angle))
+                across = 0 if vertical else 1
                 for i in range(text_page.count_rects(*match)):
-                    rect = Rect(*text_page.get_rect(i))
-                    if line and min(line.y1, rect.y1) - max(line.y0, rect.y0) > 0.5 * min(line.height, rect.height):
+                    rect = frame.rect(*text_page.get_rect(i))
+                    if line and min(line[across + 2], rect[across + 2]) - max(line[across], rect[across]) > 0.5 * min(
+                            line[across + 2] - line[across], rect[across + 2] - rect[across]):
                         line = line.union(rect)  # PDFium splits a match at font changes and spaces
                     else:
-                        line and hits.append((number, frame.rect(*line)))
+                        line and hits.append((number, line))
                         line = rect
-                line and hits.append((number, frame.rect(*line)))
+                line and hits.append((number, line))
             text_page.close()
             page.close()
         return hits

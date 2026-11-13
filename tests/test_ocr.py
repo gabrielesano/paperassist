@@ -293,6 +293,11 @@ class TsvTests(unittest.TestCase):
         self.assertEqual(page["words"][0]["bbox"], [10, 20, 60, 30])
         self.assertEqual(page["lines"][0]["text"], "Hello")
 
+    def test_missing_trailing_text_column_is_skipped(self):
+        page = self.parse("5\t1\t1\t1\t1\t1\t20\t40\t100\t20\t96.5\n")
+        self.assertEqual(page["words"], [])
+        self.assertEqual(page["lines"], [])
+
     def test_oversized_output_is_rejected(self):
         with patch.object(ocr, "MAX_TSV_BYTES", 10):
             with self.assertRaisesRegex(ValueError, "size limit"):

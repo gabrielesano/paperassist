@@ -232,6 +232,28 @@ class EventTests(unittest.TestCase):
         references.crosscheck_links('unused.pdf', ['References'], refs)
         self.assertIsNone(refs[0]['citation_count'])
 
+    def test_destination_migration_reextracts_saved_link_occurrences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.pdf'
+            make_link_paper(path)
+            reader = PdfReader(path)
+            pages = [page.extract_text() for page in reader.pages]
+            refs = references.extract(pages)
+            references.map_destinations(reader, pages, refs)
+            references.crosscheck_links(path, pages, refs)
+            expected = copy.deepcopy(refs[0]['occurrences'])
+            library = SimpleNamespace(db_path=Path(directory) / 'library.sqlite',
+                                      get_path=lambda *args, **kwargs: path,
+                                      list_documents=lambda: [])
+            references._save(library, 1, {'references': refs, 'status': 'partial',
+                                          'destination_version': references.DESTINATION_VERSION - 1,
+                                          'extraction_version': references.EXTRACTION_VERSION})
+            migrated = references.get(library, 1)['references'][0]
+            self.assertEqual(migrated['citation_count'], len(expected))
+            self.assertEqual(sum(o['source'] == 'link' for o in migrated['occurrences']),
+                             sum(o['source'] == 'link' for o in expected))
+            self.assertEqual([o['rects'] for o in migrated['occurrences']], [o['rects'] for o in expected])
+
     def test_duplicate_annotation_and_goto_action_do_not_add_an_extra_event(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'source.pdf'

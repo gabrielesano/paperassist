@@ -347,7 +347,7 @@ def _parse_tsv(path, page_number, size, pixels):
     words, groups = [], {}
     with path.open(encoding="utf-8", errors="replace", newline="") as source:
         for row in csv.DictReader(source, delimiter="\t"):
-            text = row.get("text", "").strip()
+            text = (row.get("text") or "").strip()
             if row.get("level") != "5" or not text:
                 continue
             try:

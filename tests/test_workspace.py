@@ -92,6 +92,25 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.workspace.cancel_job('missing')
 
+    def test_worker_progress_waits_for_polling_snapshot_lock(self):
+        for update in (lambda job: job.__setitem__('progress', {'completed': 1}),
+                       lambda job: job.update(progress={'completed': 1})):
+            ready, publish, published = threading.Event(), threading.Event(), threading.Event()
+            def run(job, cancel):
+                ready.set()
+                publish.wait(2)
+                update(job)
+                published.set()
+            job = self.workspace.submit(run)
+            self.assertTrue(ready.wait(2))
+            with self.workspace.job_lock:
+                publish.set()
+                self.assertFalse(published.wait(.05))
+                self.assertNotIn('progress', self.workspace.job_status(job['id']))
+            done = self.finish(job)
+            done['progress']['completed'] = 99
+            self.assertEqual(self.workspace.job_status(job['id'])['progress']['completed'], 1)
+
     def test_shutdown_cleans_queued_uploads_without_importing_them(self):
         entered = threading.Barrier(3)
         def wait(job, cancel):
@@ -113,7 +132,7 @@ class WorkspaceTests(unittest.TestCase):
             progress('arxiv')
             if ref['id'] == '2':
                 raise RuntimeError('offline')
-            return {'status': 'local', 'document_id': self.doc['id']}
+            return {'status': 'local', 'document_id': self.doc['id'] + 1}
         with patch('paperassist.workspace.references.get', return_value=refs) as get, \
              patch('paperassist.workspace.retrieval.download', side_effect=download), \
              patch('paperassist.workspace.references.link') as link, \
@@ -123,6 +142,38 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(store.call_count, 2)
         self.assertEqual(link.call_count, 1)
         self.assertEqual(get.call_count, 3)
+
+    def test_download_self_match_keeps_success_without_linking_source(self):
+        refs = {'references': [{'id': 'legacy-0'}]}
+        with patch('paperassist.workspace.references.get', return_value=refs), \
+             patch('paperassist.workspace.retrieval.download', return_value={
+                 'status': 'local', 'document_id': self.doc['id']}), \
+             patch('paperassist.workspace.references.link') as link, \
+             patch('paperassist.workspace.references.set_retrieval') as store:
+            done = self.finish(self.workspace.download_references(self.doc['id'], ['legacy-0']))
+        self.assertEqual(done['result']['references'][0]['status'], 'local')
+        link.assert_not_called()
+        store.assert_called_once()
+
+    def test_download_removed_reference_does_not_abort_batch(self):
+        refs = {'references': [{'id': '1'}, {'id': '2'}]}
+        with patch('paperassist.workspace.references.get', side_effect=[refs, {'references': [{'id': '2'}]}, refs]), \
+             patch('paperassist.workspace.retrieval.download', return_value={'status': 'not_found'}), \
+             patch('paperassist.workspace.references.set_retrieval') as store:
+            done = self.finish(self.workspace.download_references(self.doc['id'], ['1', '2']))
+        self.assertEqual(done['status'], 'completed')
+        self.assertEqual([r['status'] for r in done['result']['references']], ['failed', 'not_found'])
+        store.assert_called_once()
+
+    def test_reference_removed_while_storing_download_does_not_abort_batch(self):
+        refs = {'references': [{'id': '1'}, {'id': '2'}]}
+        with patch('paperassist.workspace.references.get', return_value=refs), \
+             patch('paperassist.workspace.retrieval.download', return_value={'status': 'not_found'}), \
+             patch('paperassist.workspace.references.set_retrieval', side_effect=[KeyError('Reference not found'),
+                                                                                  KeyError('Reference not found'), None]):
+            done = self.finish(self.workspace.download_references(self.doc['id'], ['1', '2']))
+        self.assertEqual(done['status'], 'completed')
+        self.assertEqual([r['status'] for r in done['result']['references']], ['failed', 'not_found'])
 
     def test_analysis_folder_link_and_repair_use_the_open_library_and_settings(self):
         self.workspace.update_settings({'inbox': str(self.root)})

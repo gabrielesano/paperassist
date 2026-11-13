@@ -117,6 +117,44 @@ class LinuxInstallerTestCase(unittest.TestCase):
         )
         return installer_path
 
+    def test_existing_empty_target_and_trailing_slashes_install_upgrade_and_uninstall(self):
+        bundle = self._create_synthetic_bundle()
+        desktop = self._create_desktop_assets()
+        installer = self._build_test_installer(bundle, desktop_dir=desktop)
+        target = self.test_root / 'app'
+        target.mkdir()
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                result = subprocess.run([str(installer), '--install-dir', str(target) + '///'],
+                                        env=self.base_env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((target / 'PaperAssist').is_file())
+                self.assertFalse(list(target.glob('*.staging.*')))
+                self.assertFalse((target / '.lock.flock').exists())
+        uninstall = subprocess.run([str(target / 'uninstall.sh'), '--install-dir', str(target) + '/'],
+                                   env=self.base_env, capture_output=True, text=True)
+        self.assertEqual(uninstall.returncode, 0, uninstall.stderr)
+        self.assertFalse(target.exists())
+        self.assertFalse(Path(str(target) + '.lock').exists())
+
+    def test_installer_uninstall_reports_actual_desktop_and_refreshes_database(self):
+        bundle = self._create_synthetic_bundle()
+        desktop = self._create_desktop_assets()
+        installer = self._build_test_installer(bundle, desktop_dir=desktop)
+        subprocess.run([str(installer)], env=self.base_env, capture_output=True, check=True)
+        commands = self.test_root / 'commands'
+        commands.mkdir()
+        marker = self.test_root / 'desktop-update'
+        updater = commands / 'update-desktop-database'
+        updater.write_text(f'#!/bin/sh\nprintf "%s" "$1" > "{marker}"\n')
+        updater.chmod(0o755)
+        env = {**self.base_env, 'PATH': str(commands) + os.pathsep + self.base_env['PATH']}
+        result = subprocess.run([str(installer), '--uninstall', '--install-dir',
+                                 str(self.data_dir / 'paperassist-app') + '/'], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Removed desktop entry: {self.data_dir / 'applications' / 'paperassist.desktop'}", result.stdout)
+        self.assertEqual(marker.read_text(), str(self.data_dir / 'applications'))
+
     def test_fresh_install_and_verification(self):
         """Test fresh install, --verify option, CLI launcher execution, and uninstall.sh."""
         bundle = self._create_synthetic_bundle("b_fresh", version="0.1.0a0")

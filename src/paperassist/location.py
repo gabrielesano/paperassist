@@ -41,26 +41,28 @@ def _size(count):
 
 def classify(current, text):
     """Say what choosing `text` would do: open, move, current or refuse."""
-    if not isinstance(text, str) or not text.strip() or not Path(text.strip()).expanduser().is_absolute():
-        return _answer('refuse', NOT_A_FOLDER)
-    current = Path(current).resolve()
-    target = Path(text.strip()).expanduser().resolve()
-    if target == current:
-        return _answer('current', 'That is the library you are using now.')
-    if current in target.parents:
-        return _answer('refuse', 'Choose a folder outside the current library.')
-    if target in current.parents:
-        return _answer('refuse', 'Choose a folder that does not contain the current library.')
     try:
+        if not isinstance(text, str) or not text.strip() or not Path(text.strip()).expanduser().is_absolute():
+            return _answer('refuse', NOT_A_FOLDER)
+        current = Path(current).resolve()
+        target = Path(text.strip()).expanduser().resolve()
+        if target == current:
+            return _answer('current', 'That is the library you are using now.')
+        if current in target.parents:
+            return _answer('refuse', 'Choose a folder outside the current library.')
+        if target in current.parents:
+            return _answer('refuse', 'Choose a folder that does not contain the current library.')
         if target.exists() and not target.is_dir():
             return _answer('refuse', f'{target} is a file, not a folder.')
         if (target / 'library.sqlite3').is_file():
             return _answer('open', f'Open the library in {target}? The current library stays where it is.')
         if target.exists() and any(target.iterdir()):
             return _answer('refuse', 'That folder is not empty and holds no PaperAssist library. Choose an empty or new folder.')
+        _, files = _tree(current)
     except OSError as error:
         return _answer('refuse', f'That folder cannot be read: {error.strerror or error}.')
-    _, files = _tree(current)
+    except RuntimeError:
+        return _answer('refuse', NOT_A_FOLDER)
     return _answer('move', f'Move the library to {target}? PaperAssist copies {len(files)} files ({_size(sum(files.values()))}), '
                    'checks the copy and then uses it. The current folder is kept; you can delete it yourself afterwards.',
                    files=len(files), bytes=sum(files.values()))

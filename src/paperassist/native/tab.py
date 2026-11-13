@@ -87,7 +87,7 @@ class DocTab(QSplitter):
     def set_quick(self, pane):
         self.quick = pane
         pane.set_quick(True)
-        pane.view.activated.connect(lambda: self.activate(pane))
+        self._quick_activation = pane.view.activated.connect(lambda: self.activate(pane))
         pane.setMinimumSize(160, 120)
         self.main.setMinimumSize(160, 120)
         self.addWidget(pane)
@@ -97,6 +97,8 @@ class DocTab(QSplitter):
     def take_quick(self):
         """Detach the quick pane with its document, scroll, zoom and edits, for promotion to a tab."""
         pane, self.quick = self.quick, None
+        pane.view.activated.disconnect(self._quick_activation)
+        self._quick_activation = None
         pane.setParent(None)
         pane.set_quick(False)
         self.activate(self.main)

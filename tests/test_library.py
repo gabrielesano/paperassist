@@ -104,6 +104,35 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(duplicate['work_id'], a['work_id'])
         self.assertEqual(self.library.get_path(first['id'], False).read_bytes(), self.payload)
 
+    def test_reconcile_ignores_directories_named_pdf(self):
+        first = self.library.import_stream(io.BytesIO(self.payload), 'first.pdf')
+        (self.library.originals / 'directory.pdf').mkdir()
+        self.library.get_path(first['id'], False).unlink()
+        Library(self.library.data_dir)
+
+    def test_work_reused_after_last_document_clears_doi_has_a_preferred_file(self):
+        first = self.library.import_stream(io.BytesIO(self.payload), 'first.pdf')
+        linked = self.library.update_metadata(first['id'], {'doi': '10.1234/abc'})
+        self.library.update_metadata(first['id'], {'doi': ''})
+        writer = PdfWriter()
+        writer.add_blank_page(width=100, height=100)
+        stream = io.BytesIO()
+        writer.write(stream)
+        second = self.library.import_stream(io.BytesIO(stream.getvalue()), 'second.pdf')
+        self.library.update_metadata(second['id'], {'doi': '10.1234/abc'})
+        with self.library._connect() as db:
+            preferred = db.execute('SELECT preferred_file_id FROM works WHERE id = ?', (linked['work_id'],)).fetchone()[0]
+        self.assertEqual(preferred, second['id'])
+
+    def test_local_year_refresh_keeps_field_and_source_together(self):
+        from paperassist.library import _local_metadata
+        document = {'title': '', 'authors': '', 'year': 2015, 'metadata_status': 'needs_review',
+                    'metadata': {'sources': {'year': 'pdf_text'}}}
+        values, metadata = _local_metadata(document, {'year': 2020, 'sources': {'year': 'journal_reference'}})
+        self.assertEqual((values['year'], metadata['sources']['year']), (2020, 'journal_reference'))
+        values, metadata = _local_metadata(document, {'year': None, 'sources': {}})
+        self.assertEqual((values['year'], metadata['sources']['year']), (2015, 'pdf_text'))
+
     def test_reimport_refreshes_old_parser_without_losing_edits(self):
         doc = self.library.import_stream(io.BytesIO(self.payload), 'old.pdf')
         self.library.update_metadata(doc['id'], {'title': 'My correction'})

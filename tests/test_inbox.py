@@ -37,6 +37,12 @@ def text_pdf(*lines, subject=''):
 
 
 class InboxTests(unittest.TestCase):
+    def test_non_ascii_author_without_filename_characters_keeps_original_name(self):
+        for author in ('王', 'Иванов'):
+            for year in ('', '2020'):
+                with self.subTest(author=author, year=year):
+                    self.assertEqual(inbox._library_name({'authors': author, 'year': year}, 'download.pdf'), 'download.pdf')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

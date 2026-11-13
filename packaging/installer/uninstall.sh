@@ -40,6 +40,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Keep maintenance paths beside the installation, even with a trailing slash.
+while [ "$INSTALL_DIR" != "/" ] && [ "${INSTALL_DIR%/}" != "$INSTALL_DIR" ]; do
+    INSTALL_DIR="${INSTALL_DIR%/}"
+done
+
 is_pid_alive() {
     case "$1" in
         ''|*[!0-9]*) return 1 ;;

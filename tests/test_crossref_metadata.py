@@ -50,8 +50,10 @@ class CrossrefMetadataTests(unittest.TestCase):
 
     def test_arxiv_submission_year_does_not_constrain_a_later_journal_publication(self):
         self.doc["year"] = 2019
-        self.doc["metadata"]["sources"] = {"year": "arxiv_submission_date"}
-        self.assertEqual(self.search(self.item())[0]["year"], 2021)
+        for source in ("arxiv_submission_date", "ocr_arxiv_submission_date"):
+            with self.subTest(source=source):
+                self.doc["metadata"]["sources"] = {"year": source}
+                self.assertEqual(self.search(self.item())[0]["year"], 2021)
 
     def test_cancellation_during_a_doi_request_does_not_return_a_record(self):
         self.doc["doi"] = "10.1234/loops"

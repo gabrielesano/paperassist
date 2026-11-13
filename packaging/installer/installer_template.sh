@@ -159,6 +159,11 @@ XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
 if [ -z "$INSTALL_DIR" ]; then
     INSTALL_DIR="$XDG_DATA_HOME/paperassist-app"
 fi
+# Keep maintenance paths beside the installation, even with a trailing slash.
+while [ "$INSTALL_DIR" != "/" ] && [ "${INSTALL_DIR%/}" != "$INSTALL_DIR" ]; do
+    INSTALL_DIR="${INSTALL_DIR%/}"
+done
+
 if [ -z "$BIN_DIR" ]; then
     BIN_DIR="$XDG_BIN_HOME"
 fi
@@ -668,12 +673,12 @@ if [ "$UNINSTALL_ACTION" -eq 1 ]; then
     if [ -n "$DESKTOP_TO_REMOVE" ] && { [ -e "$DESKTOP_TO_REMOVE" ] || [ -L "$DESKTOP_TO_REMOVE" ]; }; then
         if grep -q "Managed-By: PaperAssist-Linux-Installer" "$DESKTOP_TO_REMOVE" 2>/dev/null; then
             rm -f "$DESKTOP_TO_REMOVE"
-            echo "Removed desktop entry: $DESKTOP_PATH"
+            echo "Removed desktop entry: $DESKTOP_TO_REMOVE"
         fi
     fi
 
     grep '^ICON_ENTRY=' "$MANIFEST" 2>/dev/null | cut -d= -f2- | while IFS='|' read -r ICON_PATH RECORDED_HASH; do
-        if [ -n "$ICON_PATH" ] && [ -e "$ICON_PATH" ]; then
+        if [ -n "$ICON_PATH" ] && { [ -e "$ICON_PATH" ] || [ -L "$ICON_PATH" ]; }; then
             CURR_HASH=$($SHA_CMD "$ICON_PATH" 2>/dev/null | awk '{print $1}')
             if [ -z "$RECORDED_HASH" ] || [ "$CURR_HASH" = "$RECORDED_HASH" ]; then
                 rm -f "$ICON_PATH"
@@ -681,6 +686,10 @@ if [ "$UNINSTALL_ACTION" -eq 1 ]; then
             fi
         fi
     done
+
+    if [ -n "$DESKTOP_TO_REMOVE" ] && command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$(dirname "$DESKTOP_TO_REMOVE")" >/dev/null 2>&1 || true
+    fi
 
     rm -rf "$INSTALL_DIR"
     release_lock
@@ -879,6 +888,10 @@ fi
 # Fault injection hook: after_backup
 check_fault_inject "after_backup"
 
+# An existing empty target must be removed so mv renames instead of nesting the stage.
+if [ "$IS_UPGRADE" -eq 0 ] && [ -d "$INSTALL_DIR" ]; then
+    rmdir "$INSTALL_DIR"
+fi
 mv "$STAGE" "$INSTALL_DIR"
 SWAPPED=1
 
@@ -931,6 +944,11 @@ while [ $# -gt 0 ]; do
             exit 1
             ;;
     esac
+done
+
+# Keep maintenance paths beside the installation, even with a trailing slash.
+while [ "$INSTALL_DIR" != "/" ] && [ "${INSTALL_DIR%/}" != "$INSTALL_DIR" ]; do
+    INSTALL_DIR="${INSTALL_DIR%/}"
 done
 
 is_pid_alive() {
@@ -1089,6 +1107,10 @@ if [ -n "$DESKTOP_PATH" ] && { [ -e "$DESKTOP_PATH" ] || [ -L "$DESKTOP_PATH" ];
 fi
 
 # 3. Remove owned icons
+if [ -n "$DESKTOP_PATH" ] && command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$(dirname "$DESKTOP_PATH")" >/dev/null 2>&1 || true
+fi
+
 grep '^ICON_ENTRY=' "$MANIFEST" 2>/dev/null | cut -d= -f2- | while IFS='|' read -r ICON_PATH RECORDED_HASH; do
     if [ -n "$ICON_PATH" ] && { [ -e "$ICON_PATH" ] || [ -L "$ICON_PATH" ]; }; then
         if [ -n "$SHA_CMD" ] && [ -n "$RECORDED_HASH" ]; then

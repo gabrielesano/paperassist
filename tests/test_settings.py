@@ -67,7 +67,8 @@ class SettingsTests(unittest.TestCase):
         bad = [{'email': 'not-an-address'}, {'proxy': 'http://proxy.example.edu/?url='}, {'proxy': 'ftp://x.example/{url}'},
                {'proxy': 'https://'}, {'keys': {'ads': 'short'}}, {'keys': {'ads': 'has a space in it'}}, {'keys': {'ads': 'x' * 300}},
                {'keys': {'nope': SECRET}}, {'keys': {'ads': 12345678}}, {'enabled': {'nope': True}}, {'enabled': {'ads': 'yes'}},
-               {'surprise': 1}]
+               {'surprise': 1}, *({name: value} for name in ('enabled', 'keys')
+                                    for value in ('bad', [1], 7, False))]
         for body in bad:
             with self.subTest(body=body), self.assertRaises(ValueError) as raised:
                 self.put(body)

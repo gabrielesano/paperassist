@@ -94,6 +94,41 @@ class Base(unittest.TestCase):
 
 
 class RetrievalTests(Base):
+    def test_given_doi_reuses_local_document_without_crossref_identity(self):
+        for cfg, failure in ((Settings({'enabled': {'crossref': False}}), None),
+                             (Settings(), RuntimeError('offline'))):
+            with self.subTest(enabled=cfg.enabled('crossref')):
+                library = self.library()
+                library.find_by_doi.return_value = [{'id': 8}]
+                with patch('paperassist.retrieval.crossref_metadata', side_effect=failure), \
+                     patch('paperassist.retrieval._download_pdf') as fetch:
+                    result = download(library, {**REF, 'doi': '10.1234/test'}, settings=cfg)
+                self.assertEqual((result['status'], result['document_id']), ('local', 8))
+                library.find_by_doi.assert_called_once_with('10.1234/test')
+                fetch.assert_not_called()
+
+    def test_openalex_and_unpaywall_filter_http_pdf_urls_and_keep_browser_fallback(self):
+        for lookup, payload in ((retrieval._openalex_pdf, {'locations': [
+                {'is_oa': True, 'pdf_url': 'http://repo.example/a.pdf'},
+                {'is_oa': True, 'pdf_url': 'https://repo.example/a.pdf'}]}),
+                (retrieval._unpaywall_pdf, {'best_oa_location': {'url_for_pdf': 'http://repo.example/a.pdf'},
+                                          'oa_locations': [{'url_for_pdf': 'https://repo.example/a.pdf'}]})):
+            with self.subTest(provider=lookup.__name__), patch('paperassist.retrieval._get', return_value=json.dumps(payload).encode()):
+                _, _, urls = lookup({'doi': '10.1234/test'}, Settings())
+                self.assertEqual(urls, ['https://repo.example/a.pdf'])
+                with patch('paperassist.retrieval._download_pdf', side_effect=Blocked('Browser required')):
+                    with self.assertRaises(Blocked) as caught:
+                        retrieval._fetch_pdf(urls)
+                self.assertEqual(caught.exception.url, urls[0])
+
+    def test_arxiv_filtered_title_uses_journal_reference_fallback(self):
+        ref = {'authors': 'Guarrasi', 'year': '2014', 'raw': 'Guarrasi, F. 2014, A&A 564, A48',
+               'identity': {'title': 'The α β Sun', 'year': 2014}}
+        with patch('paperassist.retrieval._get', return_value=feed()) as get:
+            retrieval._arxiv_pdf(ref, Settings())
+        query = parse_qs(urlsplit(get.call_args.args[0]).query)['search_query'][0]
+        self.assertEqual(query, 'au:"guarrasi" AND jr:"564"')
+
     def test_search_links_encode_input(self):
         urls = search_urls({'title': 'A & B', 'authors': 'Smith', 'year': 2020})
         self.assertEqual(parse_qs(urlsplit(urls['google']).query)['q'], ['A & B Smith 2020'])

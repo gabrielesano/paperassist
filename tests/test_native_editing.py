@@ -284,6 +284,28 @@ class WindowEditingTests(unittest.TestCase):
         self.assertFalse(view.doc.modified)
 
     # ---- freehand highlights, strokes and the Save rule --------------------------------------
+    def test_foreign_indirect_ink_can_be_recolored_resized_and_saved_in_the_window(self):
+        from test_native_annotation_edges import foreign_ink
+        original = foreign_ink(True, (True, False), 'indirect-null', True)
+        path = self.dir / f'{self.id()}-foreign.pdf'
+        path.write_bytes(original)
+        tab = self.window.open_source(FileSource(path))
+        view = tab.main.view
+        self.pump(lambda: view.has_page(0))
+        strokes = view.doc.annotations(0)[0]['strokes']
+        view.select_annotation((0, 0))
+        view.set_annotation_color((0, 0, 1))
+        view.set_annotation_width(6)
+        self.pump(lambda: view.has_page(0))
+        item = view.doc.annotations(0)[0]
+        self.assertEqual(item['strokes'], strokes)
+        self.assertEqual((item['color'], item['width']), ((0, 0, 1), 6))
+        self.assertEqual(path.read_bytes(), original)
+        self.window.save()
+        self.assertFalse(tab.main.modified)
+        self.assertTrue(path.read_bytes().startswith(original))
+        self.assertGreater(len(path.read_bytes()), len(original))
+
     def test_highlighting_a_page_without_text_paints_a_freehand_highlight(self):
         view = self.open("scan", scan)
         original = digest(view.doc.source.path)

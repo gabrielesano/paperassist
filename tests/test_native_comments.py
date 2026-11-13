@@ -102,6 +102,47 @@ class CommentsTests(unittest.TestCase):
         self.assertEqual(self.model.notes, [first, second])
         self.assertFalse(self.model.undo_delete())
 
+    def test_last_pane_release_drops_cached_model_and_reopen_reloads_notes_without_undo(self):
+        from types import SimpleNamespace
+        from PySide6.QtWidgets import QMainWindow
+        from paperassist.native.comments import CommentsController
+
+        class Pane(QObject):
+            released = Signal()
+
+            def __init__(self, view):
+                super().__init__()
+                self.view, self.key = view, 'same-document'
+
+        host = QMainWindow()
+        self.addCleanup(host.deleteLater)
+        host.workspace = SimpleNamespace(library=self.library)
+        active = [None]
+        host.pane = lambda: active[0]
+        controller = CommentsController(host)
+        self.addCleanup(controller.panel.deleteLater)
+        first, second = Pane(self.make_view()), Pane(self.make_view())
+        controller.bind(first)
+        controller.bind(second)
+        model = first.view.notes_model
+        self.assertIs(second.view.notes_model, model)
+        self.assertTrue(model.update(self.notes[0]))
+        self.assertIsNotNone(model.deleted)
+        first.released.emit()
+        self.assertIs(controller.models[first.key], model)
+        self.assertIsNone(first.view.notes_model)
+        second.released.emit()
+        self.assertNotIn(first.key, controller.models)
+        self.assertIsNone(second.view.notes_model)
+        external = [{'page': 1, 'text': 'Changed after closing the tab'}]
+        self.library.save_notes(self.document['id'], external)
+        reopened = Pane(self.make_view())
+        controller.bind(reopened)
+        self.assertEqual(reopened.view.notes_model.notes, external)
+        self.assertIsNone(reopened.view.notes_model.deleted)
+        self.assertIsNot(reopened.view.notes_model, model)
+        reopened.released.emit()
+
     def test_edit_refuses_a_record_that_changed_since_it_was_selected(self):
         self.library.save_notes(self.document["id"], [{**self.notes[0], "text": "changed elsewhere"}])
         self.assertFalse(self.model.update(self.notes[0], "#000000"))

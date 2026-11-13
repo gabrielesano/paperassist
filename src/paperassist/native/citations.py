@@ -4,6 +4,7 @@ import re
 import unicodedata
 from collections import defaultdict
 
+from ..citation import first_surname, surnames
 from .engine import Pdf, Rect
 
 IGNORED = set("\u00ad\u2010\u2011\u2012\u2013\u2014\u2015\u2212-`¨¯´¸ˆ˘˙˚˛˜˝\ufffe\x02")
@@ -178,13 +179,21 @@ def citation_matches(refs, text, destination=None):
             numbers.extend(range(start, end + 1))
         groups = [[ref for ref in refs if re.sub(r"[\[\].\s]", "", str(ref.get("label", ""))) == str(n)] for n in numbers]
         return list({ref["id"]: ref for group in groups for ref in group}.values()) if all(groups) else []
-    author_year = re.fullmatch(r"\(?([^\W\d_][\w'’\-]+)(?:\s+et al\.?)?[,]?\s+\(?(19\d{2}|20\d{2})\)?\)?", text.strip())
+    author_year = re.fullmatch(r"\(?([^\d()]+?)\s*[,]?\s+\(?(19\d{2}[a-z]?|20\d{2}[a-z]?)\)?\)?", text.strip(), re.I)
     if not author_year:
         return []
+    cited = re.sub(r'\s+et\s+al\.?$', '', author_year[1].rstrip(', '), flags=re.I)
+    cited_names = re.split(r'\s*(?:&|\band\b)\s*', cited, flags=re.I)
     found = []
     for ref in refs:
-        author = re.split(r"[,;]|\band\b", str(ref.get("authors") or ""), flags=re.I)[0].strip().split()
-        if author and normalize(author[-1]) == normalize(author_year[1]) and str(ref.get("year")) == author_year[2]:
+        authors = str(ref.get('authors') or '')
+        names = surnames(str(ref.get('raw') or authors)) or [first_surname(part) for part in re.split(r';|&|\band\b', authors, flags=re.I)]
+        year = str(ref.get('year') or '')
+        raw_year = re.search(r'\b(?:19|20)\d{2}[a-z]?\b', str(ref.get('raw') or ''), re.I)
+        if len(year) == 4 and raw_year and raw_year[0][:4] == year:
+            year = raw_year[0]
+        if (len(names) >= len(cited_names) and all(normalize(name) == normalize(other) for name, other in zip(names, cited_names))
+                and year.casefold() == author_year[2].casefold()):
             found.append(ref)
     return found
 

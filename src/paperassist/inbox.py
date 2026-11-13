@@ -84,7 +84,7 @@ def _library_name(ref, original):
     identity = ref.get('identity') or {}
     year = str(identity.get('year') or ref.get('year') or '')[:4]
     surname = identity.get('first_author') or ref.get('authors')
-    if not surname:
+    if not surname or pdf_name(surname, '') == '.pdf':
         return original  # a bare year would be a meaningless file name
     fingerprint = identity.get('publication') if identity else publication(ref.get('raw') or '', year)
     return pdf_name(surname, year, fingerprint)

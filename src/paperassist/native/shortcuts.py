@@ -6,6 +6,7 @@ is matched, and window shortcuts do not fire while a modal dialog is the active 
 Ctrl+T, Ctrl+W, Ctrl+Tab and Alt+arrows are not bound here, and Preferences belongs to the app menu.
 """
 import html
+from weakref import WeakSet
 from dataclasses import dataclass
 from typing import Callable
 
@@ -216,7 +217,7 @@ class RenameEdit(QLineEdit):
 class Shortcuts(QObject):
     def __init__(self, window):
         super().__init__(window)
-        self.window, self.editor, self.bound = window, None, set()
+        self.window, self.editor, self.bound = window, None, WeakSet()
         self.actions = []
         for entry in TABLE:
             if entry.run:
@@ -264,6 +265,8 @@ class Shortcuts(QObject):
 
     def focus_page(self):
         pane = self.window.pane()
+        if pane is None:
+            return
         field = getattr(pane, 'navigation_field', None) if pane and pane.quick else self.page_field
         if field:
             bar = pane.navigation_bar if pane and pane.quick else self.window.main_bar

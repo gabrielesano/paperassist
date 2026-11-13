@@ -25,6 +25,13 @@ class LocationTests(unittest.TestCase):
         (self.current / '.server.lock').write_text('', encoding='utf-8')
         (self.current / '.server.json').write_text('{}', encoding='utf-8')
 
+    def test_unreadable_resolution_or_source_tree_is_refused(self):
+        for target in ('paperassist.location.Path.resolve', 'paperassist.location._tree'):
+            with self.subTest(target=target), patch(target, side_effect=PermissionError('denied')):
+                answer = location.classify(self.current, str(self.root / 'new'))
+                self.assertEqual(answer['action'], 'refuse')
+                self.assertIn('cannot be read', answer['message'])
+
     def action(self, path):
         return location.classify(self.current, str(path))['action']
 

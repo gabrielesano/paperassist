@@ -1,6 +1,8 @@
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
-from paperassist.references import (extract, local_candidates, get, link, repair_downloads, set_retrieval, _save,
+from paperassist.references import (analyze, extract, local_candidates, get, link, repair_downloads, set_retrieval, _save,
                                     map_destinations, _publication, DESTINATION_VERSION, EXTRACTION_VERSION)
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -586,6 +588,172 @@ class ConflictTests(unittest.TestCase):
     def save(self, library, *refs):
         _save(library, 9, {'references': list(refs), 'status': 'partial', 'destination_version': DESTINATION_VERSION,
                            'extraction_version': EXTRACTION_VERSION})
+
+    def test_concurrent_link_and_retrieval_preserve_both_changes(self):
+        library = self.library(BROWNING)
+        other = self.library(BROWNING)
+        self.save(library, dict(GERRARD))
+        saving, release, linked = threading.Event(), threading.Event(), threading.Event()
+        def save(library, document_id, payload):
+            if 'retrieval' in payload['references'][0] and not payload['references'][0].get('manual_link'):
+                saving.set()
+                if not release.wait(3):
+                    raise TimeoutError('Concurrent reference update did not finish')
+            return _save(library, document_id, payload)
+        def link_reference():
+            try:
+                return link(other, 9, '0', 28)
+            finally:
+                linked.set()
+        with ThreadPoolExecutor(max_workers=2) as executor, patch('paperassist.references._save', side_effect=save):
+            first = executor.submit(set_retrieval, library, 9, '0', {'status': 'not_found'})
+            self.assertTrue(saving.wait(3))
+            second = executor.submit(link_reference)
+            linked.wait(.1)
+            release.set()
+            first.result(timeout=3)
+            second.result(timeout=3)
+        ref = get(library, 9)['references'][0]
+        self.assertEqual(ref['retrieval']['status'], 'not_found')
+        self.assertTrue(ref['manual_link'])
+        self.assertEqual(ref['manual_target_id'], 28)
+
+    def test_pdf_extraction_does_not_block_reads_or_links_and_merges_latest_state(self):
+        library = self.library(BROWNING, {'id': 9, 'sha256': 'other'})
+        self.save(library, dict(GERRARD))
+        extracting, release = threading.Event(), threading.Event()
+        def extract_pages(pages):
+            extracting.set()
+            if not release.wait(3):
+                raise TimeoutError('PDF extraction was not released')
+            return [{**GERRARD, 'label': 'Gerrard 2001', 'citation_count': 0}]
+        def change_reference():
+            self.assertEqual(get(library, 9)['references'][0]['id'], '0')
+            link(library, 9, '0', 28)
+            set_retrieval(library, 9, '0', {'status': 'not_found'})
+        with ThreadPoolExecutor(max_workers=2) as executor, \
+             patch('paperassist.references.extract', side_effect=extract_pages), \
+             patch('paperassist.references.map_destinations'), \
+             patch('paperassist.references.crosscheck_links'):
+            analysis = executor.submit(analyze, library, 9)
+            try:
+                self.assertTrue(extracting.wait(3))
+                executor.submit(change_reference).result(timeout=1)
+            finally:
+                release.set()
+            ref = analysis.result(timeout=3)['references'][0]
+        self.assertEqual(ref['manual_target_id'], 28)
+        self.assertEqual(ref['retrieval']['status'], 'not_found')
+
+    def test_repair_lookup_does_not_block_updates_or_overwrite_latest_state(self):
+        FakeLibrary.pages['browning'] += '\nP. K. Browning'
+        for changed_target in (False, True):
+            with self.subTest(changed_target=changed_target):
+                library = self.library({**BROWNING, 'filename': 'download.pdf', 'metadata_status': 'unresolved'},
+                                       {'id': 29, 'sha256': 'other', 'filename': 'named.pdf',
+                                        'metadata_status': 'corrected'})
+                self.save(library, {**GERRARD, 'manual_link': True, 'local_document_id': 28},
+                          {**GERRARD, 'id': '1', 'raw': 'Other, A. 2002, Journal, 2, 33'})
+                identifying, release = threading.Event(), threading.Event()
+                def find(ref):
+                    identifying.set()
+                    if not release.wait(3):
+                        raise TimeoutError('Identity lookup was not released')
+                    return 'found', '', {'doi': '10.1234/browning', 'first_author': 'Browning', 'year': 2008}
+                def update_references():
+                    set_retrieval(library, 9, '0', {'status': 'not_found'})
+                    link(library, 9, '0' if changed_target else '1', 29)
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    repair = executor.submit(repair_downloads, library, 9, find)
+                    try:
+                        self.assertTrue(identifying.wait(3))
+                        executor.submit(update_references).result(timeout=1)
+                    finally:
+                        release.set()
+                    report = repair.result(timeout=3)
+                refs = {ref['id']: ref for ref in get(library, 9)['references']}
+                self.assertEqual(refs['0']['retrieval']['status'], 'not_found')
+                self.assertEqual(refs['0' if changed_target else '1']['manual_target_id'], 29)
+                self.assertEqual(report[0]['status'], 'skipped' if changed_target else 'repaired')
+                self.assertEqual(len(library.verified), 0 if changed_target else 1)
+
+    def test_repair_rechecks_document_eligibility_after_lookup(self):
+        FakeLibrary.pages['browning'] += '\nP. K. Browning'
+        document = {**BROWNING, 'filename': 'download.pdf', 'metadata_status': 'unresolved'}
+        library = self.library(document)
+        self.save(library, {**GERRARD, 'manual_link': True, 'local_document_id': 28})
+        def find(ref):
+            document['metadata_status'] = 'corrected'
+            return 'found', '', {'doi': '10.1234/browning', 'first_author': 'Browning', 'year': 2008}
+        report = repair_downloads(library, 9, find)
+        self.assertEqual(report[0]['status'], 'skipped')
+        self.assertEqual(library.verified, [])
+        self.assertNotIn('identity', get(library, 9)['references'][0])
+
+    def test_unmatched_and_rematched_references_keep_stable_ids(self):
+        library = self.library(BROWNING, {'id': 9, 'sha256': 'other'})
+        ref = {**GERRARD, 'id': 'legacy-3', 'legacy': True, 'manual_link': True,
+               'local_document_id': 28, 'retrieval': {'status': 'found'}}
+        self.save(library, ref)
+        with patch('paperassist.references.extract', return_value=[]), \
+             patch('paperassist.references.map_destinations'), \
+             patch('paperassist.references.crosscheck_links'):
+            unmatched = analyze(library, 9)['references'][0]
+        self.assertEqual(unmatched['id'], 'legacy-3')
+        with patch('paperassist.references.extract', return_value=[{
+                **GERRARD, 'id': '0', 'label': 'Gerrard 2001', 'citation_count': 0}]), \
+             patch('paperassist.references.map_destinations'), \
+             patch('paperassist.references.crosscheck_links'):
+            matched = analyze(library, 9)['references'][0]
+        self.assertEqual(matched['id'], 'legacy-3')
+        self.assertNotIn('legacy', matched)
+        self.assertTrue(matched['manual_link'])
+        self.assertEqual(matched['retrieval']['status'], 'found')
+
+    def test_reanalysis_add_remove_reorder_never_reuses_reference_ids(self):
+        library = self.library(BROWNING, {'id': 9, 'sha256': 'other'})
+        rows = {}
+        for name in ('Alpha', 'Beta', 'Gamma', 'Delta'):
+            rows[name] = {**GERRARD, 'raw': f'{name}, A. 2001, Journal, 1, 22',
+                          'authors': name, 'label': f'{name} 2001', 'citation_count': 0}
+        def run(*names):
+            with patch('paperassist.references.extract', return_value=[dict(rows[name]) for name in names]), \
+                 patch('paperassist.references.map_destinations'), \
+                 patch('paperassist.references.crosscheck_links'):
+                refs = analyze(library, 9)['references']
+            self.assertEqual(len({ref['id'] for ref in refs}), len(refs))
+            return {ref['authors']: ref for ref in refs}
+        initial = run('Alpha', 'Beta')
+        set_retrieval(library, 9, initial['Alpha']['id'], {'status': 'not_found'})
+        changed = run('Beta', 'Gamma')
+        self.assertEqual(changed['Beta']['id'], initial['Beta']['id'])
+        self.assertEqual(changed['Alpha']['id'], initial['Alpha']['id'])
+        self.assertTrue(changed['Alpha']['legacy'])
+        reordered = run('Gamma', 'Beta', 'Alpha')
+        self.assertEqual({name: ref['id'] for name, ref in reordered.items()},
+                         {name: ref['id'] for name, ref in changed.items()})
+        self.assertNotIn('legacy', reordered['Alpha'])
+        run('Alpha')
+        added = run('Alpha', 'Delta')
+        self.assertNotIn(added['Delta']['id'], {ref['id'] for ref in changed.values()})
+        run()
+        # Alpha's acquisition record remains, but even discarded rows keep their IDs reserved.
+        last = run('Beta')
+        self.assertNotEqual(last['Beta']['id'], initial['Beta']['id'])
+
+    def test_old_preserved_row_without_id_does_not_collide_with_legacy_id(self):
+        library = self.library(BROWNING, {'id': 9, 'sha256': 'other'})
+        without_id = {**GERRARD, 'raw': 'Other, A. 2002, Journal, 2, 33',
+                      'retrieval': {'status': 'not_found'}}
+        without_id.pop('id')
+        self.save(library, without_id, {**GERRARD, 'id': 'legacy-0',
+                                      'retrieval': {'status': 'not_found'}})
+        with patch('paperassist.references.extract', return_value=[]), \
+             patch('paperassist.references.map_destinations'), \
+             patch('paperassist.references.crosscheck_links'):
+            refs = analyze(library, 9)['references']
+        self.assertEqual(len({ref['id'] for ref in refs}), 2)
+        self.assertIn('legacy-0', {ref['id'] for ref in refs})
 
     def test_wrong_manual_link_is_kept_but_flagged(self):
         library = self.library(BROWNING)

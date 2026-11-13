@@ -103,6 +103,9 @@ def _key(value):
 
 
 def _merge(stored, changes, data_dir):
+    for name in ('enabled', 'keys'):
+        if name in changes and not isinstance(changes[name], (dict, type(None))):
+            raise ValueError(f'{name} must be an object')
     unknown = set(changes) - {'email', 'proxy', 'inbox', 'enabled', 'keys'}
     if unknown:
         raise ValueError('Unknown setting: ' + ', '.join(sorted(map(str, unknown))))
@@ -130,9 +133,6 @@ def _merge(stored, changes, data_dir):
         if name not in KEYS:
             raise ValueError(f'Unknown key: {name}')
         put(data['keys'], name, value, _key)
-    for name in ('enabled', 'keys'):
-        if name in changes and not isinstance(changes[name], (dict, type(None))):
-            raise ValueError(f'{name} must be an object')
     return data
 
 

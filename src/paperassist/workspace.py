@@ -30,6 +30,21 @@ class ReferenceNotFound(KeyError):
     pass
 
 
+class _Job(dict):
+    """Publish replacement values under the polling lock; workers leave nested values untouched."""
+    def __init__(self, lock, **values):
+        self.lock = lock
+        super().__init__(values)
+
+    def __setitem__(self, key, value):
+        with self.lock:
+            super().__setitem__(key, value)
+
+    def update(self, *args, **kwargs):
+        with self.lock:
+            super().update(*args, **kwargs)
+
+
 class Workspace:
     def __init__(self, data_dir, source='default'):
         self.data_dir = Path(data_dir).resolve()
@@ -83,7 +98,7 @@ class Workspace:
             self.cancellations.pop(old, None)
         job_id = uuid.uuid4().hex
         cancel = self.cancellations[job_id] = threading.Event()
-        job = self.jobs[job_id] = {'id': job_id, 'status': 'pending'}
+        job = self.jobs[job_id] = _Job(self.job_lock, id=job_id, status='pending')
         def run():
             job['status'] = 'running'
             try:
@@ -236,7 +251,8 @@ class Workspace:
 
     def download_references(self, document_id, values):
         self.library.get_document(document_id)
-        if not isinstance(values, list) or not values or any(not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value).isdigit() for value in values):
+        if not isinstance(values, list) or not values or any(
+                not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value) for value in values):
             raise ValueError('ids must be a non-empty list of reference IDs')
         ids = {str(value) for value in values}
         refs = [r for r in references.get(self.library, document_id)['references'] if r['id'] in ids]
@@ -250,17 +266,25 @@ class Workspace:
                 try:
                     with self.download_lock:
                         current = references.get(self.library, document_id)['references']
-                        ref = next((r for r in current if r['id'] == ref['id']), ref)
+                        ref = next((r for r in current if r['id'] == ref['id']), None)
+                        if ref is None:
+                            raise ReferenceNotFound('Reference changed during analysis')
                         job['progress'] = {'completed': index, 'total': len(refs), 'reference_id': ref['id'], 'provider': 'local'}
                         def progress(provider):
                             job['progress'] = {'completed': index, 'total': len(refs), 'reference_id': ref['id'], 'provider': provider}
                         result = retrieval.download(self.library, ref, progress=progress, settings=self.get_settings())
-                        if result.get('document_id'):
+                        if result.get('document_id') and str(result['document_id']) != str(document_id):
                             references.link(self.library, document_id, ref['id'], result['document_id'])
+                        references.set_retrieval(self.library, document_id, ref['id'], result)
                 except Exception as error:
                     result = {'version': 2, 'status': 'failed', 'summary': f'Search failed: {error}', 'attempts': []}
-                references.set_retrieval(self.library, document_id, ref['id'], result)
-                results.append({'id': ref['id'], **result})
+                    if ref is not None:
+                        try:
+                            with self.download_lock:
+                                references.set_retrieval(self.library, document_id, ref['id'], result)
+                        except KeyError:
+                            pass  # Re-analysis can remove a reference while a download is in flight.
+                results.append({'id': refs[index]['id'], **result})
                 job['progress'] = {'completed': index + 1, 'total': len(refs)}
             return {'references': results}
         return self.submit(download)

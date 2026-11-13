@@ -62,7 +62,11 @@ def note_rects(note, pdf):
                 band = frame.rect(*rect)
                 if band.width > 0 and band.height > 0:
                     bands.append(band)
-        result.extend((page - 1, rect) for rect in line_bands(bands, vertical=frame.matrix[0] == 0))
+        # Anchor boxes describe displayed text; page rotation alone says nothing
+        # about its baseline. Small punctuation must not outweigh a full word span.
+        span = max(bands, key=lambda rect: rect.width * rect.height, default=None)
+        vertical = span is not None and span.height > 3 * span.width
+        result.extend((page - 1, rect) for rect in line_bands(bands, vertical=vertical))
     return result
 
 
@@ -315,8 +319,21 @@ class CommentsController(QObject):
             model.changed.connect(self.refresh)
             model.failed.connect(lambda message: self.window.statusBar().showMessage(f"Could not save comment: {message}", 8000))
         pane.view.set_comment_model(self.models[pane.key])
+        pane.released.connect(self._released)
         pane.view.comment_selection_changed.connect(self._selected)
         pane.view.selection_changed.connect(lambda: self._selection(pane.view))
+
+    def _released(self):
+        pane = self.sender()
+        view, model = pane.view, pane.view.notes_model
+        self.bound.discard(view)
+        if model is None:
+            return
+        model.changed.disconnect(view._comments_changed)
+        view.notes_model = None
+        if not any(other.notes_model is model for other in self.bound):
+            self.models.pop(pane.key, None)
+            model.deleteLater()
 
     def refresh(self, *_):
         pane = self.window.pane()

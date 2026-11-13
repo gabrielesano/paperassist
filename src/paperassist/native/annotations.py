@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (ArrayObject, ContentStream, DecodedStreamObject, DictionaryObject,
-                           FloatObject, NameObject, NumberObject, RectangleObject, TextStringObject)
+                           FloatObject, NameObject, NullObject, NumberObject, RectangleObject, TextStringObject)
 
 
 def incremental_writer(data):
@@ -29,6 +29,26 @@ def bounds(points, pad=0):
     return min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad
 
 
+def value(annotation, key, default):
+    item = annotation.get(key)
+    item = item.get_object() if item is not None else None
+    return default if item is None or isinstance(item, NullObject) else item
+
+
+def ink_strokes(annotation):
+    return [stroke.get_object() for stroke in value(annotation, '/InkList', [])]
+
+
+def color_rgb(annotation):
+    color = list(value(annotation, '/C', [1, 1, 0] if annotation['/Subtype'] == '/Highlight' else [0, 0, 0]))
+    if len(color) == 1:
+        return color * 3
+    if len(color) == 4:
+        c, m, y, k = color
+        return [1 - min(1, channel + k) for channel in (c, m, y)]
+    return color if len(color) == 3 else [0, 0, 0]
+
+
 def read(data, page):
     reader = PdfReader(io.BytesIO(data))
     result = []
@@ -37,22 +57,15 @@ def read(data, page):
         subtype = annotation.get('/Subtype')
         if subtype not in ('/Highlight', '/Ink'):
             continue
-        points = annotation.get('/QuadPoints', [])
-        quads = [bounds(list(zip(points[i:i + 8:2], points[i + 1:i + 8:2]))) for i in range(0, len(points), 8)]
-        strokes = [list(zip(stroke[::2], stroke[1::2])) for stroke in annotation.get('/InkList', [])]
-        color = list(annotation.get('/C', [1, 1, 0] if subtype == '/Highlight' else [0, 0, 0]))
+        points = value(annotation, '/QuadPoints', [])
+        quads = [bounds(list(zip(points[i:i + 8:2], points[i + 1:i + 8:2]))) for i in range(0, len(points) - 7, 8)]
+        strokes = [list(zip(stroke[::2], stroke[1::2])) for stroke in ink_strokes(annotation)]
         # /C remains authoritative even when PDFium's GetColor refuses an AP-bearing annotation.
-        if not color:
-            color = [0, 0, 0]
-        if len(color) == 1:
-            color *= 3
-        elif len(color) == 4:
-            c, m, y, k = color
-            color = [1 - min(1, channel + k) for channel in (c, m, y)]
+        color = color_rgb(annotation)
         result.append(dict(index=index, subtype='highlight' if subtype == '/Highlight' else 'ink',
                            rect=tuple(annotation['/Rect']), quads=quads, strokes=strokes,
                            color=tuple(color), opacity=float(annotation.get('/CA', 1)),
-                           width=float(annotation.get('/BS', {}).get('/W', 1)),
+                           width=float(value(annotation, '/BS', {}).get('/W', 1)),
                            freehand=annotation.get('/IT') == '/InkHighlight'))
     return result
 
@@ -71,7 +84,7 @@ def appearance(writer, box, content, opacity, multiply=False):
 
 
 def regenerate(writer, annotation):
-    color = annotation['/C']
+    color = color_rgb(annotation)
     opacity = float(annotation.get('/CA', 1))
     if annotation['/Subtype'] == '/Highlight':
         points = annotation['/QuadPoints']
@@ -81,9 +94,9 @@ def regenerate(writer, annotation):
             content += ' '.join(f'{x} {y} {"m" if j == 0 else "l"}' for j, (x, y) in enumerate(corners)) + ' h f\n'
         multiply = True
     else:
-        width = float(annotation.get('/BS', {}).get('/W', 1))
+        width = float(value(annotation, '/BS', {}).get('/W', 1))
         content = '{:.6f} {:.6f} {:.6f} RG {} w 1 J 1 j\n'.format(*color, width)
-        for stroke in annotation['/InkList']:
+        for stroke in ink_strokes(annotation):
             content += ' '.join(f'{stroke[i]} {stroke[i + 1]} {"m" if i == 0 else "l"}' for i in range(0, len(stroke), 2)) + ' S\n'
         multiply = annotation.get('/IT') == '/InkHighlight'
     annotation[NameObject('/AP')] = appearance(writer, annotation['/Rect'], content, opacity, multiply)
@@ -143,16 +156,16 @@ def apply(data, kind, page, **values):
             if popup in references:
                 references.remove(popup)
         elif kind == 'transform':
-            old = list(map(float, annotation['/Rect']))
-            new = values['rect']
-            sx = (new[2] - new[0]) / (old[2] - old[0])
-            sy = (new[3] - new[1]) / (old[3] - old[1])
+            old = bounds([(float(annotation['/Rect'][i]), float(annotation['/Rect'][i + 1])) for i in (0, 2)])
+            new = bounds([values['rect'][:2], values['rect'][2:]])
+            sx = (new[2] - new[0]) / (old[2] - old[0]) if old[2] != old[0] else 1
+            sy = (new[3] - new[1]) / (old[3] - old[1]) if old[3] != old[1] else 1
             annotation[NameObject('/InkList')] = ArrayObject(
                 numbers(new[0] + (v - old[0]) * sx if i % 2 == 0 else new[1] + (v - old[1]) * sy
-                        for i, v in enumerate(stroke)) for stroke in annotation['/InkList'])
+                        for i, v in enumerate(stroke)) for stroke in ink_strokes(annotation))
             annotation[NameObject('/Rect')] = RectangleObject(new)
-            if '/BS' in annotation:
-                border = DictionaryObject(annotation['/BS'].get_object())
+            if value(annotation, '/BS', None) is not None:
+                border = DictionaryObject(value(annotation, '/BS', {}))
                 border[NameObject('/W')] = FloatObject(float(border.get('/W', 1)) * sx)
                 annotation[NameObject('/BS')] = border
         elif kind == 'update':
@@ -161,9 +174,9 @@ def apply(data, kind, page, **values):
                 annotation[NameObject('/C')] = numbers(color)
             if width is not None:
                 annotation[NameObject('/BS')] = DictionaryObject({NameObject('/W'): FloatObject(width)})
-                points = [p for stroke in annotation['/InkList'] for p in zip(stroke[::2], stroke[1::2])]
+                points = [p for stroke in ink_strokes(annotation) for p in zip(stroke[::2], stroke[1::2])]
                 annotation[NameObject('/Rect')] = RectangleObject(bounds(points, width / 2))
-            normal = annotation.get('/AP', {}).get('/N')
+            normal = value(value(annotation, '/AP', {}), '/N', None)
             if normal and width is None:
                 appearances = DictionaryObject(annotation['/AP'].get_object())
                 appearances[NameObject('/N')] = writer._add_object(recolor_appearance(writer, normal.get_object(), color))

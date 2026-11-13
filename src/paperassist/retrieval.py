@@ -346,9 +346,9 @@ def _arxiv_pdf(ref, cfg):
     else:
         if doi:
             queries.append({'search_query': 'all:"' + doi + '"', 'max_results': 20})
-        if title and ascii_surname and _words(title):
-            # A phrase would miss typesetting variants, so ask for the longest plain words instead.
-            words = sorted({w for w in _words(title) if len(w) > 3 and w.isascii() and w not in GREEK_NAMES}, key=lambda w: (-len(w), w))[:6]
+        # A phrase would miss typesetting variants, so ask for the longest plain words instead.
+        words = sorted({w for w in _words(title) if len(w) > 3 and w.isascii() and w not in GREEK_NAMES}, key=lambda w: (-len(w), w))[:6]
+        if words and ascii_surname:
             queries.append({'search_query': ' AND '.join([f'au:"{ascii_surname}"', *(f'ti:{w}' for w in words)]), 'max_results': 20})
         elif ascii_surname and cited:
             # The journal reference is free text, so match the volume loosely and verify below.
@@ -477,7 +477,7 @@ def _openalex_pdf(ref, cfg):
     locations = [place for place in info.get('locations') or [] if place.get('is_oa') and place.get('pdf_url')]
     # Repositories usually allow automated downloads; publisher sites often do not.
     locations.sort(key=lambda place: (place.get('source') or {}).get('type') != 'repository')
-    urls = list(dict.fromkeys(place['pdf_url'] for place in locations))[:4]
+    urls = _https(dict.fromkeys(place['pdf_url'] for place in locations))[:4]
     return ('found', 'Open-access PDF location found.', urls) if urls else ('not_found', 'OpenAlex lists no open PDF.', None)
 
 
@@ -522,7 +522,7 @@ def _unpaywall_pdf(ref, cfg):
             return 'not_found', 'Unpaywall does not know this DOI.', None
         raise
     places = [info.get('best_oa_location') or {}, *(info.get('oa_locations') or [])]
-    urls = list(dict.fromkeys(place['url_for_pdf'] for place in places if place.get('url_for_pdf')))[:4]
+    urls = _https(dict.fromkeys(place['url_for_pdf'] for place in places if place.get('url_for_pdf')))[:4]
     return ('found', 'Open-access PDF found.', urls) if urls else ('not_found', 'No PDF found by Unpaywall.', None)
 
 
@@ -728,7 +728,7 @@ def download(library, ref, progress=None, settings=None):
         ref = {**ref, 'doi': ref.get('doi') or identity['doi'], 'identity': identity}
     lead = _lead(ref, identity, _arxiv_id(ref))
     identified = bool(lead)
-    if identity and ref['doi']:
+    if ref.get('doi'):
         for document in (library.find_by_doi(ref['doi']) if library else []):
             try:
                 library.get_path(document['id'])

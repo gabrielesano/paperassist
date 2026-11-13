@@ -45,7 +45,7 @@ def _agrees(document, record, titles, printed):
     if not (by_title or by_reference):
         return False
     year_source = metadata.get("sources", {}).get("year")
-    if document.get("year") and year_source != "arxiv_submission_date" and record.get("year") != document["year"]:
+    if document.get("year") and year_source not in ("arxiv_submission_date", "ocr_arxiv_submission_date") and record.get("year") != document["year"]:
         return False
     return _author_agrees(document, record, header)
 

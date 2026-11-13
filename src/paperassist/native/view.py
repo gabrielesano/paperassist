@@ -118,7 +118,9 @@ class PdfView(QAbstractScrollArea):
         self._set_zoom(self.zoom * factor)
 
     def fit_width(self):
-        widest = max(w for w, _ in self.doc.sizes)
+        widest = max((w for w, _ in self.doc.sizes), default=0)
+        if widest <= 0:
+            return
         self._set_zoom((self.viewport().width() - 2 * MARGIN) / widest, fit=True)
 
     def goto(self, page, y=0.0):
