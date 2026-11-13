@@ -10,8 +10,9 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-The `0.2.0a4` alpha fixes toolbar overflow visibility in narrow windows and
-safe cleanup of toolbar styles. It includes the earlier audited bug fixes. See
+The `0.2.0a4` alpha is published for all three platforms with visible toolbar
+overflow buttons in narrow windows and safe cleanup of toolbar styles. It
+includes the earlier audited bug fixes. See
 [release notes](releases/0.2.0a4.md) and the
 [release acceptance record](development/release-0.2.0a4.md).
 
@@ -24,6 +25,10 @@ safe cleanup of toolbar styles. It includes the earlier audited bug fixes. See
 
 ## Completed transitions and automated acceptance
 
+- Published `0.2.0a4` with the toolbar overflow fix, verified source and tag CI,
+  successful Linux/Windows/macOS package acceptance, and all release checksums.
+  See [release notes](releases/0.2.0a4.md) and the
+  [acceptance record](development/release-0.2.0a4.md).
 - Published `0.2.0a3` with the audited bug fixes, verified source and tag CI,
   successful Linux/Windows/macOS package acceptance, and all release checksums.
   See [release notes](releases/0.2.0a3.md) and the
