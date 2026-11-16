@@ -3,7 +3,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from paperassist.references import (analyze, extract, local_candidates, get, link, repair_downloads, set_retrieval, _save,
-                                    map_destinations, _publication, DESTINATION_VERSION, EXTRACTION_VERSION)
+                                    map_destinations, _publication, _extract_pages, DESTINATION_VERSION, EXTRACTION_VERSION)
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
@@ -1005,3 +1005,109 @@ class ShortenedEntryCarryOverTests(unittest.TestCase):
         self.assertEqual(refs[2]['retrieval']['status'], 'found')
         self.assertEqual(refs[1]['local_document_id'], 3)
         self.assertFalse(any(ref.get('legacy') for ref in refs))
+
+
+class LineNumberAndHeadingTests(unittest.TestCase):
+    @staticmethod
+    def _mock_reader(page_fragments, width=595.0):
+        class Box:
+            right = width
+
+        class Page:
+            mediabox = Box()
+
+            def __init__(self, frags):
+                self._frags = frags
+
+            def extract_text(self, visitor_text=None, **_kwargs):
+                out = []
+                for text, x, y, size in self._frags:
+                    out.append(text)
+                    if visitor_text is not None:
+                        visitor_text(text, [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, x, y], None, size)
+                return ''.join(out)
+
+        class Reader:
+            pages = [Page(frags) for frags in page_fragments]
+            named_destinations = {}
+
+        return Reader()
+
+    def test_margin_line_numbers_are_stripped_from_headings_and_entries(self):
+        reader = self._mock_reader([
+            [
+                ('Introduction discusses Liu et al. (2010)', 37, 700, 9), ('10', 19, 700, 6.6), ('\n', 37, 700, 9),
+                ('and Rollett et al. (2016).', 37, 600, 9), ('20', 19, 600, 6.6), ('\n', 37, 600, 9),
+                ('Right column text continues.', 310, 700, 9), ('30', 571, 700, 6.6), ('\n', 310, 700, 9),
+            ],
+            [
+                ('More prose in body.', 37, 720, 9), ('40', 19, 720, 6.6), ('\n', 37, 720, 9),
+                ('References', 37, 615, 10.4), ('50', 16, 615, 6.6), ('\n', 37, 615, 10.4),
+                ('Liu, Y., Davies, J. A. 2010, ApJL, 710, L82', 37, 520, 8), ('60', 16, 520, 6.6), ('\n', 37, 520, 8),
+                ('Rollett, T., Möstl, C. 2016, ApJ, 824, 131', 37, 430, 8), ('70', 16, 430, 6.6), ('\n', 37, 430, 8),
+            ],
+        ])
+        pages, ignored = _extract_pages(reader)
+        self.assertEqual(sum(len(coords) for coords in ignored.values()), 7)
+        refs = extract(pages)
+        self.assertEqual([r['label'] for r in refs], ['Liu 2010', 'Rollett 2016'])
+        self.assertEqual([r['citation_count'] for r in refs], [1, 1])
+        self.assertEqual(refs[0]['raw'], 'Liu, Y., Davies, J. A. 2010, ApJL, 710, L82')
+        self.assertEqual(refs[1]['raw'], 'Rollett, T., Möstl, C. 2016, ApJ, 824, 131')
+
+    def test_pagewise_line_numbers_are_stripped(self):
+        reader = self._mock_reader([
+            [
+                ('Prose citing Smith (2020).\n', 45, 700, 9),
+                ('5', 20, 680, 7), ('line a\n', 45, 680, 9),
+                ('10', 20, 600, 7), ('line b\n', 45, 600, 9),
+                ('15', 20, 520, 7), ('line c\n', 45, 520, 9),
+                ('20', 20, 440, 7), ('line d\n', 45, 440, 9),
+            ],
+            [
+                ('5', 20, 700, 7), ('References\n', 45, 700, 10),
+                ('10', 20, 620, 7), ('Smith, A. 2020, A&A, 1, 2\n', 45, 620, 8),
+                ('15', 20, 540, 7), ('Brown, B. 2021, A&A, 3, 4\n', 45, 540, 8),
+                ('20', 20, 460, 7), ('end\n', 45, 460, 8),
+            ],
+        ])
+        pages, ignored = _extract_pages(reader)
+        self.assertEqual(sum(len(coords) for coords in ignored.values()), 8)
+        refs = extract(pages)
+        self.assertEqual([r['label'] for r in refs], ['Smith 2020', 'Brown 2021'])
+        self.assertEqual(refs[0]['citation_count'], 1)
+
+    def test_axis_ticks_and_page_numbers_are_not_stripped(self):
+        # Y-axis ticks increase bottom-to-top (y ascending), unlike top-to-bottom line numbers.
+        reader = self._mock_reader([
+            [
+                ('Prose citing Smith (2020).\n', 80, 700, 9),
+                ('1', 20, 50, 7), ('\n', 20, 50, 7),
+                ('0', 20, 100, 7), (' ', 20, 100, 7),
+                ('5', 20, 150, 7), (' ', 20, 150, 7),
+                ('10', 18, 200, 7), (' ', 18, 200, 7),
+                ('15', 18, 250, 7), ('\n', 18, 250, 7),
+            ],
+            [
+                ('More prose.\n', 80, 700, 9),
+                ('2', 20, 50, 7), ('\n', 20, 50, 7),
+                ('References\n', 80, 600, 10),
+                ('Smith, A. 2020, ApJ, 10, 20\n', 80, 550, 8),
+            ],
+        ])
+        pages, ignored = _extract_pages(reader)
+        self.assertEqual(ignored, {})
+        self.assertEqual([r['label'] for r in extract(pages)], ['Smith 2020'])
+
+    def test_heading_variants_and_fallback_with_entries(self):
+        for heading in ('7. References', 'References:', 'Literature Cited', 'References640'):
+            with self.subTest(heading=heading):
+                refs = extract([
+                    f'See Smith (2020) and Brown (2021).\n{heading}\n'
+                    'Smith, A. 2020, ApJ, 1, 2\nBrown, B. 2021, A&A, 3, 4'
+                ])
+                self.assertEqual([r['label'] for r in refs], ['Smith 2020', 'Brown 2021'])
+                self.assertEqual([r['citation_count'] for r in refs], [1, 1])
+
+        # Fallback must not trigger on stray prose lacking following bibliography entries.
+        self.assertEqual(extract(['References 1\nThis is a normal paragraph.\nNothing cited here.']), [])

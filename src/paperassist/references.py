@@ -20,7 +20,10 @@ from paperassist.library import manual_fields
 from paperassist.retrieval import identify, search_urls
 
 DOI = re.compile(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', re.I)
-HEADING = re.compile(r'^\s*(?:references|bibliography)\s*$', re.I | re.M)
+HEADING = re.compile(r'^\s*(?:\d+\.?\s+)?(?:references|bibliography|literature\s+cited)\s*[.:]?\s*$', re.I | re.M)
+FALLBACK_HEADING = re.compile(
+    r'^\s*(?:\d+\s+)?(?:references|bibliography|literature\s+cited)(?:\s*\d+|\s*[.:])?\s*$', re.I | re.M)
+_ASCII_DIGITS = re.compile(r'^[0-9]{1,5}$')
 ENTRY = re.compile(r'^\s*(?:\[(\d+)\]|(\d+)\.)\s+(.+)$')
 AUTHOR_ENTRY = re.compile(rf'^\s*({SURNAME}),\s*(?:[^\W\d_]\s?\.|[^\W\d_]+\s*,|[JS]r\.)')
 # "Hood A. W., Browning P. K." has no comma after the surname; accepted only once the previous
@@ -76,7 +79,7 @@ CONTINUATION = re.compile(r'(?:[-–−]\s?\d+[.,;)]?$|\d+\s?[-–−]\s?\d+[.,;
 SHORT_LINE, MIN_LINES = 16, 8
 # An entry this many times longer than the median entry is suspect, however long real author lists are.
 OUTLIER = 6
-EXTRACTION_VERSION = 5
+EXTRACTION_VERSION = 6
 
 _locks = WeakValueDictionary()
 _locks_guard = threading.Lock()
@@ -296,10 +299,165 @@ def _share(group, found):
     return owned, ambiguous
 
 
+def _looks_like_entry(line):
+    return bool(ENTRY.match(line) or AUTHOR_ENTRY.match(line) or INITIALS_ENTRY.match(line) or ENTRY_LIKE.search(line))
+
+
+def _find_heading(pages):
+    """Locate the bibliography heading, tolerating trailing margin numbers when entries follow."""
+    strict = next(((i, m) for i, page in enumerate(pages) if (m := HEADING.search(page))), None)
+    if strict:
+        return strict
+    for i, page in enumerate(pages):
+        for m in FALLBACK_HEADING.finditer(page):
+            following = [line.strip() for line in page[m.end():].splitlines() if line.strip()]
+            if len(following) < 12 and i + 1 < len(pages):
+                following.extend(line.strip() for line in pages[i + 1].splitlines() if line.strip())
+            if sum(_looks_like_entry(line) for line in following[:12]) >= 2:
+                return i, m
+    return None
+
+
+def _chain_line_numbers(ordered, step, n_pages, pagewise=False):
+    seqs = []
+    for item in ordered:
+        page, side, _, val, _, y, _ = item
+        if step > 1 and val % step != 0:
+            continue
+        max_jump = (4 if pagewise else 20) * step
+        for seq in reversed(seqs):
+            lp, lside, _, lval, _, ly, _ = seq[-1]
+            if val <= lval or ((page, side) == (lp, lside) and y >= ly - 2):
+                continue
+            if val - lval <= max_jump:
+                seq.append(item)
+                break
+        else:
+            if not pagewise or val in (1, step):
+                seqs.append([item])
+    if not seqs:
+        return []
+    best = max(seqs, key=len)
+    same_col = [(a, b) for a, b in zip(best, best[1:]) if (a[0], a[1]) == (b[0], b[1])]
+    exact = sum(1 for a, b in same_col if b[3] - a[3] == step)
+    if not same_col or exact * 2 < len(same_col):
+        return []
+    if pagewise:
+        return best if len(best) >= 4 else []
+    pages_hit = {item[0] for item in best}
+    min_pages = 1 if n_pages == 1 else 2
+    min_len = (5 if n_pages == 1 else 10) if step == 1 else 5
+    min_density = 4 if step == 1 else 2
+    if (len(best) >= min_len and len(pages_hit) >= min_pages
+            and len(same_col) >= 2 and len(best) >= min_density * len(pages_hit)):
+        return best
+    return []
+
+
+def _detect_line_numbers(pages_chunks, page_widths, prose_xs):
+    """Identify margin line-number spans by outer-margin alignment and step progression."""
+    if not prose_xs or not any(pages_chunks):
+        return set()
+    sorted_xs = sorted(prose_xs)
+    body_left = sorted_xs[int(len(sorted_xs) * 0.02)]
+    body_right = sorted_xs[min(len(sorted_xs) - 1, int(len(sorted_xs) * 0.99))]
+    by_side = {'left': [], 'right': []}
+    for page_idx, chunks in enumerate(pages_chunks):
+        if not chunks:
+            continue
+        width = page_widths[page_idx]
+        for chunk_idx, (text, x, y, _) in enumerate(chunks):
+            stripped = text.strip()
+            if not _ASCII_DIGITS.match(stripped):
+                continue
+            val = int(stripped)
+            if val < 1:
+                continue
+            if x < body_left - 2:
+                by_side['left'].append((page_idx, 'left', chunk_idx, val, x, y, 0))
+            elif x > body_right + 2 and x > width * 0.80:
+                by_side['right'].append((page_idx, 'right', chunk_idx, val, x, y, 0))
+
+    candidates = []
+    for items in by_side.values():
+        if not items:
+            continue
+        med_x = statistics.median(item[4] for item in items)
+        candidates.extend(item for item in items if abs(item[4] - med_x) <= 14.0)
+    if len(candidates) < 4:
+        return set()
+
+    ordered = sorted(candidates, key=lambda item: (item[0], 0 if item[1] == 'left' else 1, -item[5], item[2]))
+    n_pages = len(pages_chunks)
+    for step in (10, 5, 1):
+        chain = _chain_line_numbers(ordered, step, n_pages)
+        if chain:
+            return {(item[0], item[2]) for item in chain}
+
+    pagewise, pagewise_pages = set(), set()
+    for page_idx in range(n_pages):
+        page_items = [item for item in ordered if item[0] == page_idx]
+        if len(page_items) < 4:
+            continue
+        for step in (10, 5, 1):
+            chain = _chain_line_numbers(page_items, step, n_pages, pagewise=True)
+            if chain:
+                pagewise.update((item[0], item[2]) for item in chain)
+                pagewise_pages.add(page_idx)
+                break
+    return pagewise if len(pagewise_pages) >= (1 if n_pages == 1 else 2) else set()
+
+
+def _extract_pages(reader):
+    """Extract per-page text while stripping verified margin line numbers."""
+    pages_raw, pages_chunks, page_widths, prose_xs = [], [], [], []
+    for page in reader.pages:
+        box = getattr(page, 'mediabox', None)
+        width = float(getattr(box, 'width', getattr(box, 'right', 612.0))) if box is not None else 612.0
+        page_widths.append(width)
+        chunks = []
+
+        def visit(text, cm, tm, font, size):
+            x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+            y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+            chunks.append((text, x, y, abs(size)))
+            stripped = text.strip()
+            if len(stripped) >= 4 and any(ch.isalpha() for ch in stripped):
+                prose_xs.append(x)
+
+        try:
+            raw = page.extract_text(visitor_text=visit) or ''
+        except TypeError:
+            raw = page.extract_text() or ''
+            chunks = []
+        pages_raw.append(raw)
+        pages_chunks.append(chunks if chunks else None)
+
+    stripped_ids = _detect_line_numbers(pages_chunks, page_widths, prose_xs)
+    if not stripped_ids:
+        return pages_raw, {}
+
+    pages, ignored = [], {}
+    for page_idx, chunks in enumerate(pages_chunks):
+        if chunks is None:
+            pages.append(pages_raw[page_idx])
+            continue
+        out = []
+        for chunk_idx, (text, x, y, _) in enumerate(chunks):
+            if (page_idx, chunk_idx) in stripped_ids:
+                ignored.setdefault(page_idx, set()).add((round(x, 1), round(y, 1)))
+                if '\n' in text:
+                    out.append('\n' * text.count('\n'))
+            else:
+                out.append(text)
+        pages.append(''.join(out))
+    return pages, ignored
+
+
 def extract(pages):
     """Return detected references and occurrences; coverage is always partial."""
     pages = [_clean(page) for page in pages]
-    heading = next(((i, m) for i, page in enumerate(pages) if (m := HEADING.search(page))), None)
+    heading = _find_heading(pages)
     if not heading:
         return []
     page_index, match = heading
@@ -390,9 +548,9 @@ def extract(pages):
 def analyze(library, document_id):
     path = library.get_path(document_id, annotated=False)
     reader = PdfReader(str(path))
-    pages = [(page.extract_text() or '') for page in reader.pages]
+    pages, ignored = _extract_pages(reader)
     refs = extract(pages)
-    map_destinations(reader, pages, refs)
+    map_destinations(reader, pages, refs, _ignored=ignored)
     crosscheck_links(path, pages, refs)
     return _store_analysis(library, document_id, refs)
 
@@ -481,7 +639,8 @@ def _normalize(text):
 def crosscheck_links(path, pages, refs):
     """Reconcile link and text events by position, retaining ambiguous counts as unknown."""
     linked = [ref for ref in refs if ref.get('destinations') and ref.get('citation_count') is not None]
-    heading = next((i + 1 for i, page in enumerate(pages) if HEADING.search(page)), None)
+    found_heading = _find_heading([_clean(page) for page in pages])
+    heading = found_heading[0] + 1 if found_heading else None
     if not linked or heading is None:
         return
     from paperassist.native.citations import CitationIndex
@@ -514,11 +673,12 @@ def _destination_coordinates(destination):
     return float(left) if left is not None else None, float(top) if top is not None else None
 
 
-def map_destinations(reader, pages, refs):
+def map_destinations(reader, pages, refs, _ignored=None):
     """Match the nearest bibliography row; unrecognized or ambiguous rows stay unmapped."""
     for ref in refs:
         ref['destinations'] = []
-    heading = next((i for i, page in enumerate(pages) if HEADING.search(page)), None)
+    found_heading = _find_heading([_clean(page) for page in pages])
+    heading = found_heading[0] if found_heading else None
     if heading is None:
         return
     destinations = {}
@@ -535,12 +695,15 @@ def map_destinations(reader, pages, refs):
     entries = [(_normalize(ref['raw']), ref) for ref in refs]
     for page_number, targets in destinations.items():
         lines = []
+        skip_coords = (_ignored or {}).get(page_number, set())
 
         def visit(text, cm, tm, font, size):
             if not text.strip():
                 return
             x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
             y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+            if (round(x, 1), round(y, 1)) in skip_coords:
+                return
             height = abs(size) * math.hypot(tm[2] * cm[0] + tm[3] * cm[2],
                                             tm[2] * cm[1] + tm[3] * cm[3])
             if height:
@@ -772,8 +935,8 @@ def get(library, document_id):
         return analyze(library, document_id)
     if payload.get('destination_version') != DESTINATION_VERSION:
         reader = PdfReader(str(library.get_path(document_id, annotated=False)))
-        pages = [(page.extract_text() or '') for page in reader.pages]
-        map_destinations(reader, pages, payload['references'])
+        pages, ignored = _extract_pages(reader)
+        map_destinations(reader, pages, payload['references'], _ignored=ignored)
         crosscheck_links(library.get_path(document_id, annotated=False), pages, payload['references'])
         payload['destination_version'] = DESTINATION_VERSION
         _save(library, document_id, payload)

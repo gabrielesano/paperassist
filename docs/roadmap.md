@@ -10,11 +10,11 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-The `0.2.0a4` alpha is published for all three platforms with visible toolbar
-overflow buttons in narrow windows and safe cleanup of toolbar styles. It
-includes the earlier audited bug fixes. See
-[release notes](releases/0.2.0a4.md) and the
-[release acceptance record](development/release-0.2.0a4.md).
+The `0.2.0a5` alpha adds automatic margin line-number stripping and more
+resilient bibliography heading detection during reference extraction. It
+includes the earlier toolbar overflow and audited bug fixes. See
+[release notes](releases/0.2.0a5.md) and the
+[release acceptance record](development/release-0.2.0a5.md).
 
 1. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
    GUI trials and interactive Windows/macOS reading, editing, focus and display

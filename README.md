@@ -4,7 +4,7 @@ Reading a research paper is rarely linear. Half the time you are scrolling to th
 
 **PaperAssist** is a calm, local reading desk and shared library for scientific PDFs. It runs as a self-contained native desktop application built with Qt Widgets and PDFium, with no PaperAssist account, cloud sync, background web server, telemetry, or large language models. Reading and local import work offline; optional online reference actions use external services only when requested. A library can reuse the same PDF across multiple source papers; it is not a cloud collaboration service.
 
-> **Project status:** Alpha (`0.2.0a4`). Reading, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
+> **Project status:** Alpha (`0.2.0a5`). Reading, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
 
 The screenshots below show the application on Linux with synthetic papers and a disposable library. System fonts and window appearance vary by platform.
 
@@ -16,37 +16,37 @@ The screenshots below show the application on Linux with synthetic papers and a 
 
 PaperAssist can be installed as a standalone desktop application (with Python, Qt, PDFium, and offline OCR bundled inside—no Python setup required) or run directly from a source checkout.
 
-Download installers and their matching `.sha256` files from the [0.2.0a4 alpha release](https://github.com/gabrielesano/paperassist/releases/tag/v0.2.0a4). Platform provenance, third-party notices, and a combined checksum manifest (`SHA256SUMS`) are attached alongside the packages.
+Download installers and their matching `.sha256` files from the [0.2.0a5 alpha release](https://github.com/gabrielesano/paperassist/releases/tag/v0.2.0a5). Platform provenance, third-party notices, and a combined checksum manifest (`SHA256SUMS`) are attached alongside the packages.
 
 ### Linux (`x86_64`) — Standalone Installer
 
-For 64-bit Linux, PaperAssist provides a self-extracting per-user installer script (`PaperAssist-0.2.0a4-linux-x86_64.sh`) that requires **no `sudo` or root permissions**:
+For 64-bit Linux, PaperAssist provides a self-extracting per-user installer script (`PaperAssist-0.2.0a5-linux-x86_64.sh`) that requires **no `sudo` or root permissions**:
 
 ```bash
 # 1. Verify package integrity (optional but recommended)
-sha256sum -c PaperAssist-0.2.0a4-linux-x86_64.sh.sha256
-sh ./PaperAssist-0.2.0a4-linux-x86_64.sh --verify
+sha256sum -c PaperAssist-0.2.0a5-linux-x86_64.sh.sha256
+sh ./PaperAssist-0.2.0a5-linux-x86_64.sh --verify
 
 # 2. Install for your user account
-sh ./PaperAssist-0.2.0a4-linux-x86_64.sh
+sh ./PaperAssist-0.2.0a5-linux-x86_64.sh
 ```
 
 - **Launch:** Open **PaperAssist** from your desktop application menu, or run `paperassist` from a terminal (`~/.local/bin/paperassist`). You can also pass PDF files directly (`paperassist paper.pdf`) to import a managed copy and open it, reusing identical PDFs already in the active library.
 - **What gets installed where:** By default, application files live in `~/.local/share/paperassist-app`, the launcher in `~/.local/bin/paperassist`, and the desktop entry and icons under `~/.local/share/applications` and `~/.local/share/icons`. The installer respects XDG data directories. Your research library (`~/.local/share/paperassist`) and preferences (`~/.config/paperassist/config.json`) are kept separate and are not changed by the installer.
 - **Upgrade:** Close PaperAssist and run the newer installer script (`sh ./PaperAssist-<new-version>-linux-x86_64.sh`). Upgrades verify a staged bundle before swapping application directories. Detected failures roll back; a process interruption may require `--repair`.
-- **Repair:** After an interrupted upgrade, run `sh ./PaperAssist-0.2.0a4-linux-x86_64.sh --repair` to recover the previous committed installation. After an interrupted first install, repair clears incomplete owned state; rerun the installer to install the app.
-- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` (or `sh ./PaperAssist-0.2.0a4-linux-x86_64.sh --uninstall`). Only application-owned files are removed; your library, PDFs, annotations, and settings remain untouched.
+- **Repair:** After an interrupted upgrade, run `sh ./PaperAssist-0.2.0a5-linux-x86_64.sh --repair` to recover the previous committed installation. After an interrupted first install, repair clears incomplete owned state; rerun the installer to install the app.
+- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` (or `sh ./PaperAssist-0.2.0a5-linux-x86_64.sh --uninstall`). Only application-owned files are removed; your library, PDFs, annotations, and settings remain untouched.
 - **System requirements:** Linux `x86_64`, `glibc >= 2.35`, `flock` (`util-linux`), X11 or Wayland, and Qt's system OpenGL/EGL and display libraries. The published installer was built on Ubuntu 22.04 and passed its ELF compatibility gate and install/self-test/uninstall checks. A clean Ubuntu/Debian desktop trial remains outstanding; see [packaging details](packaging/README.md).
 
 ### Windows (`x86_64`)
 
-Download `PaperAssist-0.2.0a4-windows-x86_64-setup.exe` from the release and run the setup wizard. It installs for the current user in `%LOCALAPPDATA%\Programs\PaperAssist`, without administrator privileges, and creates a Start menu shortcut; a desktop shortcut is optional. Launch the installed app without a console window. The optional **Add PaperAssist to Open with for PDF files** task registers PDF support for your account and preserves your current default reader.
+Download `PaperAssist-0.2.0a5-windows-x86_64-setup.exe` from the release and run the setup wizard. It installs for the current user in `%LOCALAPPDATA%\Programs\PaperAssist`, without administrator privileges, and creates a Start menu shortcut; a desktop shortcut is optional. Launch the installed app without a console window. The optional **Add PaperAssist to Open with for PDF files** task registers PDF support for your account and preserves your current default reader.
 
 Close PaperAssist before upgrading or uninstalling. Run the newer setup EXE to update, or remove PaperAssist through Windows Settings. The library and preferences remain separate from the application and are preserved. The alpha installer is not Authenticode-signed, so Windows may show an unknown-publisher or SmartScreen prompt. Windows CI tests installation, the native window, the render worker, upgrade, and uninstall; see [Windows packaging](packaging/windows/README.md).
 
 ### macOS (Apple Silicon)
 
-Download `PaperAssist-0.2.0a4-macos-arm64.dmg` from the release. This package supports Apple Silicon only:
+Download `PaperAssist-0.2.0a5-macos-arm64.dmg` from the release. This package supports Apple Silicon only:
 
 1. Open the `.dmg` disk image and drag **PaperAssist.app** into **Applications**.
 2. Eject the disk image and launch **PaperAssist** from Applications (no Python or Terminal required).
@@ -76,7 +76,7 @@ Both the standalone application and the source console command open the reader. 
 | --- | --- |
 | `paperassist [FILE.pdf ...] [--data-dir DIR]`<br>`.venv/bin/python -m paperassist [FILE.pdf ...] [--data-dir DIR]` *(from source)* | Open the library, or import/reuse the given PDFs in tabs; send files to the existing window for that library |
 | `paperassist --self-test FILE.pdf`<br>`.venv/bin/python -m paperassist --self-test FILE.pdf` *(from source)* | Headlessly render page 1 of `FILE.pdf` via the frozen/native render worker to verify the runtime (exits `0` on success) |
-| `paperassist --self-test-ocr SCAN.pdf` *(new builds)*<br>`.venv/bin/python -m paperassist --self-test-ocr SCAN.pdf` *(from source, after building OCR)* | Verify the included OCR runtime on a scanned PDF without creating a library or changing the PDF |
+| `paperassist --self-test-ocr SCAN.pdf` *(standalone builds)*<br>`.venv/bin/python -m paperassist --self-test-ocr SCAN.pdf` *(from source, after building OCR)* | Verify the included OCR runtime on a scanned PDF without creating a library or changing the PDF |
 | `paperassist import PATH... [--data-dir DIR]` *(source CLI)* | Import PDF files or folders recursively into the library from the terminal |
 
 Only one instance accesses a library at a time (protected by a lock file inside the library folder). While the app is open, import new papers from the **Library** window (`L`) rather than running CLI imports against the same library in parallel.
@@ -132,7 +132,7 @@ Open **Library** (`L` key) to browse and search your collection by title, tab na
   - **Read scanned PDFs with offline OCR (checked by default):** Runs local PDF extraction and invokes **offline OCR** only if native text at the top of the first page (before the abstract) is absent or shorter than 150 characters, and metadata remains incomplete.
   - **Recover selected papers with OCR:** Forces OCR on all selected papers, including scans that already possess an incomplete or low-quality text layer.
   - **Online corroboration:** When **Look up metadata online (arXiv, Crossref)** is enabled, DOIs, arXiv IDs, publication references, and titles/authors recovered by OCR or local heuristics are sent to external providers to verify and corroborate records. Uncheck this toggle to run completely offline without network requests.
-  - New standalone builds include the offline OCR engine and English model; see [Offline OCR](#offline-ocr).
+  - Standalone builds include the offline OCR engine and English model; see [Offline OCR](#offline-ocr).
 
 ![Library refresh menu showing options to refresh selected papers, papers that need review, recover with OCR, or force refresh the entire library](docs/screenshots/library-refresh-menu.png)
 
@@ -150,14 +150,14 @@ Press `?` while the reader has focus, or choose **Keyboard shortcuts** from the 
 | `Esc` | Close an open dialog, or return focus from a toolbar field back to the PDF so arrows, `Space`, and `Page Up`/`Down` scroll naturally |
 | `Ctrl+F` | Find text in the paper pane you clicked last |
 | `Ctrl++`, `Ctrl+-`, `Ctrl+0` | Zoom in, zoom out, or fit page width |
-| `V`, `D`, `H`, `C` | Switch to **Select**, **Draw**, **Highlight**, or **Comment** |
-| `Delete` / `Backspace` | Delete the currently selected highlight or ink drawing |
+| `V`, `D`, `H`, `C` | Switch to **Select**, **Draw**, or **Highlight**; start a **Comment** on the selection or current page |
+| `Delete` / `Backspace` | Delete the currently selected highlight, ink drawing, or saved comment |
 | `Ctrl+Z`, `Ctrl+Shift+Z` (`Ctrl+Y`) | Undo or redo annotation changes |
 | `Ctrl+S` | Save PDF annotations |
 | `L` (`Ctrl+L`), `Ctrl+O` | Open **Library** catalog, or import/reuse and open a PDF from disk |
 | `Ctrl+,` | Open **Preferences** |
 | `,` and `.`, `X` (`Ctrl+W`), `F2` | Switch tabs, close the current tab, or rename the focused tab (`F2` also opens **Edit details…** in **Library**) |
-| `B` (`Ctrl+B`), `Ctrl+E` | Hide or restore both side panels; toggle **Quick view** |
+| `B` (`Ctrl+B`), `Ctrl+E` | Hide or restore both side panels; open a PDF in **Quick view** (`Esc` closes it) |
 | `O`, `1`, `2` | Toggle **Outline**, or show **References** or **Comments** |
 | `/` | Focus **Filter references** (`Esc` clears the filter; a second `Esc` returns to the paper) |
 
