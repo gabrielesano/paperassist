@@ -25,6 +25,11 @@ includes the earlier toolbar overflow and audited bug fixes. See
 
 ## Completed transitions and automated acceptance
 
+- Published `0.2.0a5` with margin line-number stripping and resilient
+  bibliography heading detection, verified source and tag CI, successful
+  Linux/Windows/macOS package acceptance, and all release checksums. See
+  [release notes](releases/0.2.0a5.md) and the
+  [acceptance record](development/release-0.2.0a5.md).
 - Published `0.2.0a4` with the toolbar overflow fix, verified source and tag CI,
   successful Linux/Windows/macOS package acceptance, and all release checksums.
   See [release notes](releases/0.2.0a4.md) and the
