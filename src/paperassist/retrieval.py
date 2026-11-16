@@ -5,14 +5,17 @@ import html
 import http.client
 import ipaddress
 import json
+import os
 import re
 import xml.etree.ElementTree as ET
 import socket
+import sys
 import threading
 import time
 import unicodedata
 import ssl
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 from urllib.request import Request, urlopen
@@ -31,6 +34,48 @@ _CACHE = {}
 _LAST_REQUEST = {}
 DOI_PATTERN = re.compile(r'10\.\d{4,9}/[-._;()/:A-Za-z0-9]+')
 CROSSREF_FIELDS = 'DOI,title,author,container-title,volume,page,article-number,issued,published-print,published-online'
+_LINUX_CA_FILES = (
+    '/etc/ssl/certs/ca-certificates.crt',
+    '/etc/pki/tls/certs/ca-bundle.crt',
+    '/etc/ssl/ca-bundle.pem',
+    '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem',
+    '/etc/ssl/cert.pem',
+)
+_LINUX_CA_DIRS = (
+    '/etc/ssl/certs',
+    '/etc/pki/tls/certs',
+)
+
+
+def _fallback_ca_paths():
+    """Locate host CA certificates on Linux when bundled OpenSSL's compiled-in path is absent."""
+    if not sys.platform.startswith('linux'):
+        return None, None
+    paths = ssl.get_default_verify_paths()
+    if paths.cafile or paths.capath:
+        return None, None
+    if os.environ.get(paths.openssl_cafile_env) or os.environ.get(paths.openssl_capath_env):
+        return None, None
+    cafile = next((path for path in _LINUX_CA_FILES if Path(path).is_file()), None)
+    capath = None if cafile else next((path for path in _LINUX_CA_DIRS if Path(path).is_dir()), None)
+    return cafile, capath
+
+
+def configure_ssl_env():
+    """Populate SSL_CERT_FILE/SSL_CERT_DIR for standalone Linux builds whose OpenSSL dir differs from host."""
+    cafile, capath = _fallback_ca_paths()
+    paths = ssl.get_default_verify_paths()
+    if cafile:
+        os.environ.setdefault(paths.openssl_cafile_env, cafile)
+    elif capath:
+        os.environ.setdefault(paths.openssl_capath_env, capath)
+
+
+def _ssl_context():
+    cafile, capath = _fallback_ca_paths()
+    if cafile or capath:
+        return ssl.create_default_context(cafile=cafile, capath=capath)
+    return ssl.create_default_context()
 
 
 def search_urls(ref):
@@ -60,7 +105,7 @@ def _download_pdf(url):
         connection = http.client.HTTPSConnection(parts.hostname, timeout=30)
         raw_socket = socket.create_connection((address, 443), timeout=30)
         try:
-            connection.sock = ssl.create_default_context().wrap_socket(raw_socket, server_hostname=parts.hostname)
+            connection.sock = _ssl_context().wrap_socket(raw_socket, server_hostname=parts.hostname)
             path = parts.path or '/'
             if parts.query:
                 path += '?' + parts.query
@@ -99,8 +144,12 @@ def _get(url, cfg, headers=None, fresh=False):
         if delay > 0:
             time.sleep(delay)
         agent = 'PaperAssist/0.1' + (f' (mailto:{cfg.email})' if cfg.email else '')
+        cafile, capath = _fallback_ca_paths()
+        kwargs = {'timeout': 15}
+        if cafile or capath:
+            kwargs['context'] = ssl.create_default_context(cafile=cafile, capath=capath)
         try:
-            with urlopen(Request(url, headers={'User-Agent': agent, **(headers or {})}), timeout=15) as response:
+            with urlopen(Request(url, headers={'User-Agent': agent, **(headers or {})}), **kwargs) as response:
                 data = response.read(2 * 1024 * 1024)
         finally:
             _LAST_REQUEST[host] = time.monotonic()

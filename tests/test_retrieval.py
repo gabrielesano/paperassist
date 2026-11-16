@@ -1,7 +1,10 @@
 import json
 import os
+import ssl
 import unittest
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
@@ -778,3 +781,43 @@ class SourceTests(Base):
         self.assertEqual(results['unpaywall'], {'ok': False, 'message': 'Network error: offline'})
         self.assertNotIn('openalex', results)
         self.assertNotIn(SECRET, json.dumps(results))
+
+
+class LinuxSslCaFallbackTests(Base):
+    def test_fallback_ca_paths_and_env_when_default_verify_paths_are_missing(self):
+        missing = ssl.DefaultVerifyPaths(None, None, 'SSL_CERT_FILE', '/missing/cert.pem', 'SSL_CERT_DIR', '/missing/certs')
+        with TemporaryDirectory() as directory:
+            bundle = Path(directory) / 'ca-bundle.crt'
+            bundle.write_text('dummy', encoding='utf-8')
+            with patch('paperassist.retrieval.sys.platform', 'linux'), \
+                 patch('paperassist.retrieval.ssl.get_default_verify_paths', return_value=missing), \
+                 patch('paperassist.retrieval._LINUX_CA_FILES', (str(bundle),)), \
+                 patch('paperassist.retrieval._LINUX_CA_DIRS', ()):
+                self.assertEqual(retrieval._fallback_ca_paths(), (str(bundle), None))
+                retrieval.configure_ssl_env()
+                self.assertEqual(os.environ['SSL_CERT_FILE'], str(bundle))
+
+    def test_get_uses_fallback_ssl_context_when_default_paths_are_missing(self):
+        missing = ssl.DefaultVerifyPaths(None, None, 'SSL_CERT_FILE', '/missing/cert.pem', 'SSL_CERT_DIR', '/missing/certs')
+        sentinel_ctx = object()
+        response = BytesIO(b'{}')
+        response.__enter__ = lambda self: self
+        response.__exit__ = lambda *args: None
+        with patch('paperassist.retrieval._fallback_ca_paths', return_value=('/etc/pki/tls/certs/ca-bundle.crt', None)), \
+             patch('paperassist.retrieval.ssl.get_default_verify_paths', return_value=missing), \
+             patch('paperassist.retrieval.ssl.create_default_context', return_value=sentinel_ctx) as make_ctx, \
+             patch('paperassist.retrieval.urlopen', return_value=response) as mock_open:
+            retrieval._get('https://api.crossref.org/works', Settings())
+        make_ctx.assert_called_once_with(cafile='/etc/pki/tls/certs/ca-bundle.crt', capath=None)
+        self.assertIs(mock_open.call_args.kwargs['context'], sentinel_ctx)
+
+    def test_fallback_skipped_when_default_paths_or_env_already_present(self):
+        present = ssl.DefaultVerifyPaths('/etc/ssl/cert.pem', None, 'SSL_CERT_FILE', '/etc/ssl/cert.pem', 'SSL_CERT_DIR', '/etc/ssl/certs')
+        with patch('paperassist.retrieval.sys.platform', 'linux'), \
+             patch('paperassist.retrieval.ssl.get_default_verify_paths', return_value=present):
+            self.assertEqual(retrieval._fallback_ca_paths(), (None, None))
+        missing = ssl.DefaultVerifyPaths(None, None, 'SSL_CERT_FILE', '/missing/cert.pem', 'SSL_CERT_DIR', '/missing/certs')
+        with patch('paperassist.retrieval.sys.platform', 'linux'), \
+             patch('paperassist.retrieval.ssl.get_default_verify_paths', return_value=missing), \
+             patch.dict(os.environ, {'SSL_CERT_FILE': '/custom/ca.pem'}):
+            self.assertEqual(retrieval._fallback_ca_paths(), (None, None))

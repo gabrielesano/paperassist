@@ -6,8 +6,9 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current release is **0.2.0a5**, adding automatic margin line-number stripping and
-more resilient bibliography heading detection during reference extraction. Release
+The current release is **0.2.0a5**, adding automatic margin line-number stripping,
+more resilient bibliography heading detection, and Linux host CA bundle
+discovery for standalone HTTPS retrieval. Release
 notes are in [0.2.0a5](../docs/releases/0.2.0a5.md). Build commands below produce
 the current source version. See [release acceptance](../docs/development/release-0.2.0a5.md)
 for the current packages and

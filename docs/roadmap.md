@@ -10,8 +10,9 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-The `0.2.0a5` alpha adds automatic margin line-number stripping and more
-resilient bibliography heading detection during reference extraction. It
+The `0.2.0a5` alpha adds automatic margin line-number stripping, more
+resilient bibliography heading detection during reference extraction, and Linux
+host CA bundle discovery for standalone HTTPS retrieval. It
 includes the earlier toolbar overflow and audited bug fixes. See
 [release notes](releases/0.2.0a5.md) and the
 [release acceptance record](development/release-0.2.0a5.md).
