@@ -13,7 +13,7 @@ from test_native_support import make_pdf, needs_pdf, needs_qt, pdf_available
 
 if pdf_available:
     from PySide6.QtCore import QPoint, Qt
-    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtGui import QContextMenuEvent, QGuiApplication
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QToolButton
 
@@ -40,6 +40,35 @@ def two_columns(path):
                       f'BT /F1 11 Tf 220 {430 - 14 * i} Td (right column line {i} words) Tj ET\n' for i in range(3))
     stream = DecodedStreamObject()
     stream.set_data(content.encode('ascii'))
+    page[NameObject('/Contents')] = writer._add_object(stream)
+    writer.write(path)
+    return path
+
+
+def two_columns_with_line_numbers(path, right_side="gutter", step=1):
+    """Two-column proof with a full-width title and line numbers in outer margins or central gutter."""
+    writer = PdfWriter()
+    font = writer._add_object(DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+        NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Courier')}))
+    page = writer.add_blank_page(600, 500)
+    page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+    lines = ['BT /F1 12 Tf 60 455 Td (Full Width Title Across Both Columns) Tj ET']
+    for i in range(6):
+        y = 420 - 16 * i
+        n1 = (i + 1) * step
+        lines.append(f'BT /F1 9 Tf 30 {y} Td ({n1}) Tj ET')
+        lines.append(f'BT /F1 10 Tf 60 {y} Td (left col line {i} text) Tj ET')
+    for i in range(6):
+        y = 420 - 16 * i
+        n2 = (i + 7) * step
+        if right_side == "gutter":
+            lines.append(f'BT /F1 9 Tf 295 {y} Td ({n2}) Tj ET')
+            lines.append(f'BT /F1 10 Tf 320 {y} Td (right col line {i} text) Tj ET')
+        else:
+            lines.append(f'BT /F1 10 Tf 320 {y} Td (right col line {i} text) Tj ET')
+            lines.append(f'BT /F1 9 Tf 565 {y} Td ({n2}) Tj ET')
+    stream = DecodedStreamObject()
+    stream.set_data('\n'.join(lines).encode('ascii'))
     page[NameObject('/Contents')] = writer._add_object(stream)
     writer.write(path)
     return path
@@ -74,6 +103,51 @@ class DocumentTests(unittest.TestCase):
         left, right = lines[0][1], lines[1][1]
         self.assertLess(left.x1, 200)
         self.assertGreater(right.x0, 200)
+
+    def test_multiline_selection_excludes_margin_and_gutter_line_numbers(self):
+        for side, step in (("gutter", 1), ("gutter", 5), ("right", 5)):
+            with self.subTest(side=side, step=step):
+                doc = PdfDocument(FileSource(two_columns_with_line_numbers(
+                    self.dir / f'lineno-{side}-{step}.pdf', right_side=side, step=step)))
+                self.addCleanup(doc.close)
+                # Drag across multiple lines in the left column and in the right column (even starting near the number).
+                left_start = doc.word_at(0, 32, 80)  # pointer in left margin near line number 1
+                left_end = doc.word_at(0, 210, 112)
+                left_lines = doc.selection_lines((0, left_start), (0, left_end))
+                self.assertEqual([text for _, _, text in left_lines],
+                                 ['left col line 0 text', 'left col line 1 text', 'left col line 2 text'])
+                self.assertTrue(all(rect.x0 >= 58 for _, rect, _ in left_lines))
+
+                right_start = doc.word_at(0, 297, 80)  # pointer in gutter near right-column line number
+                right_end = doc.word_at(0, 566, 112)   # pointer in right margin
+                right_lines = doc.selection_lines((0, right_start), (0, right_end))
+                self.assertEqual([text for _, _, text in right_lines],
+                                 ['right col line 0 text', 'right col line 1 text', 'right col line 2 text'])
+                self.assertTrue(all(rect.x0 >= 318 and rect.x1 <= 550 for _, rect, _ in right_lines))
+
+    def test_table_row_numbers_and_inline_digits_stay_selectable(self):
+        writer = PdfWriter()
+        font = writer._add_object(DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+            NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Courier')}))
+        page = writer.add_blank_page(500, 500)
+        page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+        lines = ['BT /F1 11 Tf 60 440 Td (Body paragraph starting at the left margin.) Tj ET']
+        for i in range(5):
+            y = 400 - 16 * i
+            lines.append(f'BT /F1 11 Tf 60 {y} Td ({i + 1}) Tj ET')
+            lines.append(f'BT /F1 11 Tf 110 {y} Td (row item with inline 42 value) Tj ET')
+        stream = DecodedStreamObject()
+        stream.set_data('\n'.join(lines).encode('ascii'))
+        page[NameObject('/Contents')] = writer._add_object(stream)
+        path = self.dir / 'table.pdf'
+        writer.write(path)
+        doc = PdfDocument(FileSource(path))
+        self.addCleanup(doc.close)
+        words = doc.words(0)
+        selected = "\n".join(text for _, _, text in doc.selection_lines((0, 0), (0, len(words) - 1)))
+        self.assertIn("1", selected)
+        self.assertIn("5", selected)
+        self.assertIn("42", selected)
 
     def test_changing_a_color_back_is_not_a_change_and_undo_redo_follow_the_saved_state(self):
         self.doc.add_highlight(0, [Rect(*self.doc.words(0)[0][:4])])
@@ -540,3 +614,79 @@ class WindowEditingTests(unittest.TestCase):
         view.locked = True  # another view of the paper holds unsaved edits
         self.bar.refresh()
         self.assertFalse(any(w.isEnabled() for w in (self.bar.select, self.bar.draw, self.bar.colors, self.bar.thickness, self.bar.remove)))
+
+    def _open_context_menu(self, view, pos):
+        view._context_menu.close()
+        QApplication.postEvent(view.viewport(), QContextMenuEvent(
+            QContextMenuEvent.Mouse, pos, view.viewport().mapToGlobal(pos)))
+        self.pump(lambda: view._context_menu.isVisible())
+        return {action.text(): action for action in view._context_menu.actions() if not action.isSeparator()}
+
+    def _click_menu_action(self, view, action):
+        QTest.mouseClick(view._context_menu, Qt.LeftButton, pos=view._context_menu.actionGeometry(action).center())
+        self.pump(lambda: not view._context_menu.isVisible())
+
+    def test_context_menu_copies_highlights_and_deletes_annotation_without_saving_until_save(self):
+        view = self.open("context-menu")
+        path = view.doc.source.path
+        original = digest(path)
+
+        # Without a selection on a loose file, Copy/Highlight/Comment are disabled and Select all works.
+        actions = self._open_context_menu(view, self.word_point(view, 0, 0))
+        self.assertFalse(actions["Copy"].isEnabled())
+        self.assertFalse(actions["Highlight"].isEnabled())
+        self.assertFalse(actions["Comment"].isEnabled())
+        self.assertTrue(actions["Select all"].isEnabled())
+        view._context_menu.close()
+
+        # Drag-selecting words preserves the selection on right-click and enables Copy and Highlight.
+        self.select_words(view, 0, 3)
+        expected_text = view.selected_text()
+        self.assertTrue(expected_text)
+        QGuiApplication.clipboard().clear()
+        actions = self._open_context_menu(view, self.word_point(view, 0, 1))
+        self.assertTrue(actions["Copy"].isEnabled())
+        self.assertTrue(actions["Highlight"].isEnabled())
+        self._click_menu_action(view, actions["Copy"])
+        self.assertEqual(QGuiApplication.clipboard().text(), expected_text)
+
+        actions = self._open_context_menu(view, self.word_point(view, 0, 1))
+        self._click_menu_action(view, actions["Highlight"])
+        self.assertEqual(len(view.doc.annotations(0)), 1)
+        self.assertEqual(view.doc.annotations(0)[0]["subtype"], "highlight")
+        self.assertEqual(digest(path), original)
+
+        # Right-clicking directly on the highlight selects it and offers Delete highlight.
+        actions = self._open_context_menu(view, self.word_point(view, 0, 1))
+        self.assertEqual(view.selected_annotation, (0, 1))
+        self.assertIn("Delete highlight", actions)
+        self.assertTrue(actions["Delete highlight"].isEnabled())
+        self._click_menu_action(view, actions["Delete highlight"])
+        self.assertEqual(view.doc.annotations(0), [])
+
+        # Read-only views (e.g. a second pane while another holds unsaved edits) keep Copy enabled while disabling Highlight.
+        self.select_words(view, 0, 2)
+        actions = self._open_context_menu(view, self.word_point(view, 0, 1))
+        self._click_menu_action(view, actions["Highlight"])
+        quick = self.window.open_quick(FileSource(path)).view
+        self.pump(lambda: quick.has_page(0))
+        self.assertTrue(quick.read_only)
+        self.select_words(quick, 0, 2)
+        actions = self._open_context_menu(quick, self.word_point(quick, 0, 1))
+        self.assertTrue(actions["Copy"].isEnabled())
+        self.assertFalse(actions["Highlight"].isEnabled())
+        quick._context_menu.close()
+
+    def test_context_menu_highlight_and_copy_on_two_column_line_numbered_pdf_exclude_numbers(self):
+        view = self.open("two-col-lineno", lambda path: two_columns_with_line_numbers(path, right_side="gutter", step=5))
+        # Drag from slightly left of column 2 (in the gutter) across three lines of column 2.
+        start = self.point(view, 0, 297, 80)
+        end = self.point(view, 0, 480, 114)
+        self.drag(view, [start, end])
+        self.assertEqual(view.selected_text(),
+                         "right col line 0 text\nright col line 1 text\nright col line 2 text")
+        actions = self._open_context_menu(view, self.point(view, 0, 360, 96))
+        self._click_menu_action(view, actions["Highlight"])
+        highlights = [a for a in view.doc.annotations(0) if a["subtype"] == "highlight"]
+        self.assertEqual(len(highlights), 1)
+        self.assertGreaterEqual(highlights[0]["rect"].x0, 318)

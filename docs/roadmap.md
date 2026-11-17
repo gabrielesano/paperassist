@@ -10,12 +10,12 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-The `0.2.0a5` alpha adds automatic margin line-number stripping, more
-resilient bibliography heading detection during reference extraction, and Linux
-host CA bundle discovery for standalone HTTPS retrieval. It
-includes the earlier toolbar overflow and audited bug fixes. See
-[release notes](releases/0.2.0a5.md) and the
-[release acceptance record](development/release-0.2.0a5.md).
+The `0.2.0a6` alpha adds a right-click PDF context menu (`Copy`, `Highlight`,
+`Comment`, `Select all`, and annotation/comment deletion) and confines multi-line
+selection and highlighting to article prose by excluding margin and two-column
+gutter line numbers. It includes the earlier `0.2.0a5` extraction and Linux CA
+fixes. See [release notes](releases/0.2.0a6.md) and the
+[release acceptance record](development/release-0.2.0a6.md).
 
 1. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
    GUI trials and interactive Windows/macOS reading, editing, focus and display

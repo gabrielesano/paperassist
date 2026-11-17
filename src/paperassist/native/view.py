@@ -4,8 +4,9 @@ import time
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QEvent, QEventLoop, QKeyCombination, QPointF, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QAbstractScrollArea, QScrollBar
+from PySide6.QtGui import (QColor, QContextMenuEvent, QDesktopServices, QGuiApplication, QImage,
+                         QKeySequence, QPainter, QPainterPath, QPen, QPixmap)
+from PySide6.QtWidgets import QAbstractScrollArea, QMenu, QScrollBar
 
 from .document import SaveState
 from .engine import HIGHLIGHT, Rect
@@ -29,6 +30,7 @@ class PdfView(QAbstractScrollArea):
     moved = Signal()      # scrolled or zoomed, for reading-position persistence
     selection_changed = Signal()
     comment_selection_changed = Signal(object)
+    comment_requested = Signal(object)  # 1-based page number at cursor when opened without a text selection
 
     def __init__(self, doc, client):
         super().__init__()
@@ -64,6 +66,8 @@ class PdfView(QAbstractScrollArea):
         self._press, self._anchor_word, self._drag = None, None, QPointF()
         self._transform = None
         self._autoscroll = QTimer(self, interval=40, timeout=self._autoscroll_step)
+        self._context_menu = QMenu(self)
+        self._context_menu.setToolTipsVisible(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.viewport().setMouseTracking(True)
         self.verticalScrollBar().setSingleStep(48)
@@ -484,6 +488,71 @@ class PdfView(QAbstractScrollArea):
             self.select_comment(None)
         if press['moved']:
             self.selection_changed.emit()
+
+    def contextMenuEvent(self, event):
+        self.finish_interaction()
+        self.setFocus()
+        self.activated.emit()
+        page = None
+        if event.reason() == QContextMenuEvent.Mouse and len(self.doc):
+            page, x, y = self._locate(event.pos())
+            if not self.selection_lines:
+                comment = self.comment_at(page, x, y) if not self.highlighting and not self.drawing else None
+                picked = self.doc.annotation_at(page, x, y, 4 / self.zoom, self.highlights_visible) if not self.highlighting else None
+                if comment is not None:
+                    self.select_comment(comment)
+                elif picked:
+                    self.select_annotation((page, picked["index"]))
+        menu = self._build_context_menu(page)
+        if event.reason() == QContextMenuEvent.Keyboard:
+            first = next((action for action in menu.actions() if action.isEnabled() and not action.isSeparator()), None)
+            if first is not None:
+                menu.setActiveAction(first)
+        # popup() uses the main event loop instead of blocking tests inside exec().
+        menu.popup(event.globalPos())
+
+    def _build_context_menu(self, page=None):
+        menu = self._context_menu
+        menu.clear()
+        has_selection = bool(self.selection_lines)
+
+        copy_action = menu.addAction("Copy")
+        copy_action.setEnabled(has_selection)
+        copy_action.triggered.connect(self.copy)
+
+        highlight_action = menu.addAction("Highlight")
+        highlight_action.setEnabled(has_selection and not self.read_only)
+        if self.read_only:
+            highlight_action.setToolTip("This view is read-only while another view has unsaved changes.")
+        highlight_action.triggered.connect(self.highlight_selection)
+
+        comment_action = menu.addAction("Comment")
+        comment_action.setEnabled(self.notes_model is not None)
+        if self.notes_model is None:
+            comment_action.setToolTip("Comments are available for papers in the library.")
+        comment_page = None if (has_selection or page is None) else page + 1
+        comment_action.triggered.connect(lambda _=False, p=comment_page: self.comment_requested.emit(p))
+
+        menu.addSeparator()
+        select_all_action = menu.addAction("Select all")
+        select_all_action.setEnabled(len(self.doc) > 0)
+        select_all_action.triggered.connect(self.select_all)
+
+        if self.selected_comment is not None:
+            menu.addSeparator()
+            delete_comment = menu.addAction("Delete comment")
+            delete_comment.setEnabled(self.notes_model is not None)
+            delete_comment.triggered.connect(self.delete_annotation)
+        elif self.selected_annotation is not None:
+            ann_page, index = self.selected_annotation
+            item = next((a for a in self.doc.annotations(ann_page) if a["index"] == index), None)
+            kind = "highlight" if item and (item["subtype"] == "highlight" or item["freehand"]) else "ink" if item else "annotation"
+            menu.addSeparator()
+            delete_annotation = menu.addAction(f"Delete {kind}")
+            delete_annotation.setEnabled(not self.read_only)
+            delete_annotation.triggered.connect(self.delete_annotation)
+
+        return menu
 
     def _finish_transform(self):
         drag, self._transform = self._transform, None

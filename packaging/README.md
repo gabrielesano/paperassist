@@ -6,11 +6,12 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current release is **0.2.0a5**, adding automatic margin line-number stripping,
-more resilient bibliography heading detection, and Linux host CA bundle
-discovery for standalone HTTPS retrieval. Release
-notes are in [0.2.0a5](../docs/releases/0.2.0a5.md). Build commands below produce
-the current source version. See [release acceptance](../docs/development/release-0.2.0a5.md)
+The current release is **0.2.0a6**, adding a right-click PDF context menu (Copy,
+Highlight, Comment, Select all, and annotation/comment deletion) and excluding
+margin and two-column gutter line numbers from multi-line text selection and
+highlighting. Release notes are in [0.2.0a6](../docs/releases/0.2.0a6.md). Build
+commands below produce the current source version. See
+[release acceptance](../docs/development/release-0.2.0a6.md)
 for the current packages and
 [earlier maintenance verification](../docs/development/linux-alpha-maintenance.md)
 for the historical `0.1.0a2` measurements and examples below.

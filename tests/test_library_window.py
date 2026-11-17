@@ -14,6 +14,7 @@ from test_native_support import make_pdf, needs_qt, pdf_available
 
 if pdf_available:
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QContextMenuEvent
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QMessageBox, QTreeWidget
 
@@ -775,6 +776,62 @@ class ReferencesTests(LibraryWindowCase):
         window = self.make_window(workspace=False)
         window.open_source(FileSource(make_pdf(self.dir / "loose.pdf")))
         self.assertIn("papers in the library", window.details.status.text())
+
+    def test_pdf_context_menu_comment_anchors_selection_or_clicked_page_and_deletes_comment(self):
+        window = self.make_window()
+        window.acquisition.main_opened = lambda document_id: None
+        tab = self.open_document(window, self.docs[0])
+        view = tab.main.view
+        self.pump(lambda: view.has_page(0))
+
+        def open_menu(pos):
+            view._context_menu.close()
+            QApplication.postEvent(view.viewport(), QContextMenuEvent(
+                QContextMenuEvent.Mouse, pos, view.viewport().mapToGlobal(pos)))
+            self.pump(lambda: view._context_menu.isVisible())
+            return {action.text(): action for action in view._context_menu.actions() if not action.isSeparator()}
+
+        def click_action(action):
+            QTest.mouseClick(view._context_menu, Qt.LeftButton, pos=view._context_menu.actionGeometry(action).center())
+            self.pump(lambda: not view._context_menu.isVisible())
+
+        # Right-clicking page 2 without a selection opens a page-2 comment draft and keeps C shortcut alive.
+        page2_pos = view._band(1, Rect(40, 80, 40, 80)).topLeft().toPoint()
+        actions = open_menu(page2_pos)
+        self.assertTrue(actions["Comment"].isEnabled())
+        click_action(actions["Comment"])
+        self.pump(lambda: window.comments.panel.composer.isVisibleTo(window))
+        self.assertEqual(view.comment_draft["page"], 2)
+        window.comments.discard_draft(tab.main)
+
+        # Selecting words and triggering Comment anchors the draft to that quote.
+        words = view.doc.words(0)
+        start = view._band(0, Rect(*words[0][:4])).center().toPoint()
+        end = view._band(0, Rect(*words[2][:4])).center().toPoint()
+        QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        QTest.mouseMove(view.viewport(), end)
+        QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+        quote_text = view.selected_text()
+        self.assertTrue(quote_text)
+        actions = open_menu(start)
+        click_action(actions["Comment"])
+        self.assertEqual(view.comment_draft["quote"], quote_text)
+        window.comments.panel.text.setPlainText("Anchored via context menu")
+        self.assertTrue(window.comments.save_draft(tab.main))
+
+        # Clear the text selection, then right-click the saved comment band to select and delete it.
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, view._band(0, Rect(350, 450, 350, 450)).topLeft().toPoint())
+        self.assertEqual(view.selection_lines, [])
+        actions = open_menu(start)
+        self.assertIsNotNone(view.selected_comment)
+        self.assertIn("Delete comment", actions)
+        click_action(actions["Delete comment"])
+        self.assertEqual(view.notes_model.notes, [])
+
+        # Confirm the window 'C' shortcut still triggers compose without ambiguity after using the menu.
+        view.setFocus()
+        QTest.keyClick(view, Qt.Key_C)
+        self.assertIsNotNone(view.comment_draft)
 
 
 class ReferenceCardTests(LibraryWindowCase):

@@ -5,8 +5,11 @@ is the only writer of the file, on explicit save. It works on the plain data of
 engine.py: coordinates are what the user sees, in PDF points.
 """
 from enum import Enum
+import re
 
 from .engine import Rect
+
+_LINE_NUMBER = re.compile(r"^[0-9]{1,5}$")
 
 
 class SaveState(Enum):
@@ -23,6 +26,136 @@ def same(a, b):
     return abs(a - b) < 1e-3 if isinstance(a, float) else a == b
 
 
+def _chain_margin_candidates(ordered, step):
+    seqs = []
+    for item in ordered:
+        _, val, _, y0, _, _ = item
+        if step > 1 and val % step != 0:
+            continue
+        max_jump = 20 * step
+        for seq in reversed(seqs):
+            _, prev_val, _, prev_y0, _, _ = seq[-1]
+            if val <= prev_val or y0 <= prev_y0 + 1:
+                continue
+            if val - prev_val <= max_jump:
+                seq.append(item)
+                break
+        else:
+            seqs.append([item])
+    if not seqs:
+        return []
+    best = max(seqs, key=len)
+    if len(best) < (3 if step == 10 else 4):
+        return []
+    pairs = list(zip(best, best[1:]))
+    exact = sum(1 for a, b in pairs if b[1] - a[1] == step)
+    if step == 10 and len(best) == 3:
+        return best if exact == len(pairs) else []
+    return best if exact * 2 >= len(pairs) else []
+
+
+def _contiguous_span(words, from_left, gap=18.0):
+    if from_left:
+        intervals = sorted((w[0], w[2]) for w in words)
+        start, end = intervals[0]
+        for x0, x1 in intervals[1:]:
+            if x0 > end + gap:
+                break
+            end = max(end, x1)
+        return end - start
+    intervals = sorted(((w[0], w[2]) for w in words), key=lambda pair: pair[1], reverse=True)
+    start, end = intervals[0]
+    for x0, x1 in intervals[1:]:
+        if x1 < start - gap:
+            break
+        start = min(start, x0)
+    return end - start
+
+
+def _line_edges(prose):
+    """Per-line (min_x0, max_x1) of prose words grouped by PDFium line index."""
+    edges = {}
+    for w in prose:
+        line = w[5]
+        if line in edges:
+            x0, x1 = edges[line]
+            edges[line] = (min(x0, w[0]), max(x1, w[2]))
+        else:
+            edges[line] = (w[0], w[2])
+    return list(edges.values())
+
+
+def _margin_or_gutter(band_x0, band_x1, prose, cluster_y0, cluster_y1, page_width):
+    """True when a vertical digit band sits in an outer margin or a two-column gutter."""
+    local = [w for w in prose if w[3] >= cluster_y0 - 2 and w[1] <= cluster_y1 + 2]
+    if not local:
+        return False
+    crossing = sum(1 for w in local if w[0] < band_x1 + 1 and w[2] > band_x0 - 1)
+    if crossing > max(1, len(local) // 40):
+        return False
+    left = [w for w in local if w[2] <= band_x0 + 1]
+    right = [w for w in local if w[0] >= band_x1 - 1]
+    edges = _line_edges(prose)
+    if not left:
+        starts = sorted(x0 for x0, _ in edges)
+        return band_x1 < starts[int(len(starts) * 0.04)] - 1
+    if not right:
+        ends = sorted(x1 for _, x1 in edges)
+        return band_x0 > ends[min(len(ends) - 1, int(len(ends) * 0.96))] + 1
+    return (len(left) >= 4 and len(right) >= 4
+            and _contiguous_span(left, False) > page_width * 0.15
+            and _contiguous_span(right, True) > page_width * 0.15)
+
+
+def detect_margin_line_numbers(words, page_width):
+    """Word indices of margin or inter-column gutter line numbers on a single page."""
+    prose = [w for w in words if any(ch.isalpha() for ch in w[4])]
+    if len(prose) < 4:
+        return set()
+    candidates = []
+    for index, w in enumerate(words):
+        text = w[4].strip()
+        if not _LINE_NUMBER.match(text):
+            continue
+        val = int(text)
+        if val < 1:
+            continue
+        x0, y0, x1, y1 = w[:4]
+        line_prose = [p for p in prose if min(p[3], y1) > max(p[1], y0)]
+        if not line_prose or any(p[0] < x1 + 1 and p[2] > x0 - 1 for p in line_prose):
+            continue
+        candidates.append((index, val, x0, y0, x1, y1))
+    if len(candidates) < 3:
+        return set()
+
+    # Cluster by x-alignment (right edge or left edge within 10 pt) so outer margins and gutters are independent.
+    clusters = []
+    for item in sorted(candidates, key=lambda c: (c[4], c[2])):
+        for cluster in clusters:
+            anchor = cluster[0]
+            if abs(item[4] - anchor[4]) <= 10 or abs(item[2] - anchor[2]) <= 10:
+                cluster.append(item)
+                break
+        else:
+            clusters.append([item])
+
+    ignored = set()
+    for cluster in clusters:
+        if len(cluster) < 3:
+            continue
+        band_x0 = min(c[2] for c in cluster)
+        band_x1 = max(c[4] for c in cluster)
+        cluster_y0 = min(c[3] for c in cluster)
+        cluster_y1 = max(c[5] for c in cluster)
+        if not _margin_or_gutter(band_x0, band_x1, prose, cluster_y0, cluster_y1, page_width):
+            continue
+        ordered = sorted(cluster, key=lambda c: (c[3], c[0]))
+        chain = max((_chain_margin_candidates(ordered, step) for step in (10, 5, 1)), key=len)
+        if chain:
+            ignored.update(c[0] for c in chain)
+    return ignored
+
+
 class PdfDocument:
     def __init__(self, source):
         self.source = source
@@ -30,7 +163,7 @@ class PdfDocument:
         self.sizes = self.pdf.sizes
         self.state, self.error = SaveState.SAVED, ""
         self.pending = {}  # page -> highlighted rects the render process has not drawn yet
-        self._words, self._links = {}, {}
+        self._words, self._links, self._line_numbers = {}, {}, {}
         self._undo, self._redo = [], []
         self._saved = {}  # page -> annotation state at the last save, for every page edited since
         self._annotations = {}
@@ -56,12 +189,19 @@ class PdfDocument:
     def link_at(self, page, x, y):
         return next((link for link in self.links(page) if link.rect.contains(x, y)), None)
 
+    def _line_number_indices(self, page):
+        if page not in self._line_numbers:
+            self._line_numbers[page] = detect_margin_line_numbers(self.words(page), self.sizes[page][0])
+        return self._line_numbers[page]
+
     def word_at(self, page, x, y):
         """Index of the word under the point, or the nearest one (lines weigh more than columns)."""
         def distance(w):
             return max(w[0] - x, 0, x - w[2]) ** 2 + 4 * max(w[1] - y, 0, y - w[3]) ** 2
         words = self.words(page)
-        return min(range(len(words)), key=lambda i: distance(words[i]), default=None)
+        ignored = self._line_number_indices(page)
+        indices = [i for i in range(len(words)) if i not in ignored] or range(len(words))
+        return min(indices, key=lambda i: distance(words[i]), default=None)
 
     def selection_lines(self, start, end):
         """[(page, rect, text)], one band per visual line, between two (page, word index) ends.
@@ -73,9 +213,13 @@ class PdfDocument:
         bands = []
         for page in range(start[0], end[0] + 1):
             words = self.words(page)
+            ignored = self._line_number_indices(page)
             first = start[1] if page == start[0] else 0
             last = end[1] if page == end[0] else len(words) - 1
-            for w in words[first:last + 1]:
+            for idx in range(first, last + 1):
+                if idx in ignored:
+                    continue
+                w = words[idx]
                 rect = Rect(*w[:4])
                 if bands and bands[-1][0] == (page, w[5]):
                     key, band, texts = bands[-1]
@@ -221,6 +365,7 @@ class PdfDocument:
             self._saved.clear()
         self._words.clear()
         self._links.clear()
+        self._line_numbers.clear()
 
     def close(self):
         self.pdf.close()

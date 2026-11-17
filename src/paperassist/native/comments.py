@@ -170,7 +170,7 @@ class CommentsPanel(QWidget):
         add_flow = FlowLayout(self.add_box, margin=0, h_spacing=8, v_spacing=2)
         self.add = QPushButton("Add comment")
         self.add.setProperty("link", True)
-        self.add.clicked.connect(controller.compose)
+        self.add.clicked.connect(lambda _=False: controller.compose())
         add_flow.addWidget(self.add)
         self.column.addWidget(self.add_box)
 
@@ -321,6 +321,7 @@ class CommentsController(QObject):
         pane.view.set_comment_model(self.models[pane.key])
         pane.released.connect(self._released)
         pane.view.comment_selection_changed.connect(self._selected)
+        pane.view.comment_requested.connect(self.compose)
         pane.view.selection_changed.connect(lambda: self._selection(pane.view))
 
     def _released(self):
@@ -352,15 +353,17 @@ class CommentsController(QObject):
         else:
             self.refresh()
 
-    def compose(self):
+    def compose(self, page=None):
         pane = self.window.pane()
         if not pane or pane.view.notes_model is None:
             return
         view = pane.view
         anchor = capture_anchor(view)
         if view.comment_draft is None:
-            page, _ = view.pages.anchor(view._scroll_top())
-            view.comment_draft = {"page": page + 1, "text": ""}
+            if type(page) is not int:
+                top_page, _ = view.pages.anchor(view._scroll_top())
+                page = top_page + 1
+            view.comment_draft = {"page": page, "text": ""}
         if anchor:
             view.comment_draft.update(anchor)
         view.set_tool("comment")
