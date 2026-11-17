@@ -70,8 +70,10 @@ class AccessibilityTests(LibraryWindowCase):
                     for widget in dialog.findChildren(QWidget):
                         if (isinstance(widget, (QAbstractButton, QComboBox, QLineEdit, QTreeWidget))
                                 and widget.isVisibleTo(dialog) and widget.isEnabled()):
-                            accessible = QAccessible.queryAccessibleInterface(widget)
-                            self.assertTrue(accessible.text(QAccessible.Name),
+                            # Release the non-QObject QAccessibleInterface wrapper before WA_DeleteOnClose
+                            # destroys the widget; otherwise Shiboken keeps its stale C++ address mapped.
+                            accessible_name = QAccessible.queryAccessibleInterface(widget).text(QAccessible.Name)
+                            self.assertTrue(accessible_name,
                                             f"{name}: {type(widget).__name__} {widget.objectName()}")
                 finally:
                     dialog.reject()
