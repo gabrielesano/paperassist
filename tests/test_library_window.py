@@ -795,7 +795,9 @@ class ReferencesTests(LibraryWindowCase):
             QTest.mouseClick(view._context_menu, Qt.LeftButton, pos=view._context_menu.actionGeometry(action).center())
             self.pump(lambda: not view._context_menu.isVisible())
 
-        # Right-clicking page 2 without a selection opens a page-2 comment draft and keeps C shortcut alive.
+        # Scroll to page 2, right-click without a selection to open a page-2 comment draft, and confirm C stays unambiguous.
+        view.goto(1)
+        self.pump(lambda: view.has_page(1))
         page2_pos = view._band(1, Rect(40, 80, 40, 80)).topLeft().toPoint()
         actions = open_menu(page2_pos)
         self.assertTrue(actions["Comment"].isEnabled())
@@ -804,7 +806,9 @@ class ReferencesTests(LibraryWindowCase):
         self.assertEqual(view.comment_draft["page"], 2)
         window.comments.discard_draft(tab.main)
 
-        # Selecting words and triggering Comment anchors the draft to that quote.
+        # Scroll back to page 1, select words, and trigger Comment to anchor the draft to that quote.
+        view.goto(0)
+        self.pump(lambda: view.has_page(0))
         words = view.doc.words(0)
         start = view._band(0, Rect(*words[0][:4])).center().toPoint()
         end = view._band(0, Rect(*words[2][:4])).center().toPoint()
