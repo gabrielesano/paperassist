@@ -23,6 +23,23 @@ def emit(kind, **values):
 
 
 def run(mode, root):
+    def trace(message):
+        print(message, file=sys.stderr, flush=True)
+
+    receive = native_app.OpenFiles.receive
+    close_event = MainWindow.closeEvent
+
+    def traced_receive(opener, pdfs, quick=False):
+        trace(f"receive {pdfs!r} kw={quick}")
+        return receive(opener, pdfs, quick)
+
+    def traced_close(window, event):
+        trace(f"close requested: busy={window.file_opener.busy} tabs={window.tabs.count()} status={window.statusBar().currentMessage()!r}")
+        try:
+            return close_event(window, event)
+        finally:
+            trace(f"close accepted={event.isAccepted()} widgets={[(type(w).__name__, w.isVisible()) for w in app.topLevelWidgets()]}")
+
     directory = root / "library"
     workspace = Workspace(directory)
     source = make_pdf(root / "source.pdf", pages=2)
@@ -80,6 +97,7 @@ def run(mode, root):
                 pane = window.pane()
                 emit("cancelled", modified=pane.modified, draft=window.comments.has_draft(pane), prompts=state["prompts"])
             return
+        trace(f"driver ready: dialog={window.library_dialog!r} busy={window.file_opener.busy} status={window.statusBar().currentMessage()!r}")
         state.update(started=True, old_workspace=window.workspace)
         if window.library_dialog is not None:
             window.library_dialog.reject()
@@ -113,7 +131,8 @@ def run(mode, root):
     QTimer.singleShot(15000, lambda: app.exit(9))
     previous = signal.getsignal(signal.SIGTERM)
     faulthandler.dump_traceback_later(8)
-    code = native_app.run([])
+    with patch.object(native_app.OpenFiles, "receive", traced_receive), patch.object(MainWindow, "closeEvent", traced_close):
+        code = native_app.run([])
     faulthandler.cancel_dump_traceback_later()
     timer.stop()
     emit("finished", code=code, restored=signal.getsignal(signal.SIGTERM) == previous,

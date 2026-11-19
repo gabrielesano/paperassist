@@ -203,7 +203,9 @@ class NativeProcessTests(unittest.TestCase):
 
     def finish(self):
         finished = self.event("finished")
-        self.assertEqual(self.process.wait(timeout=5), 0)
+        code = self.process.wait(timeout=5)
+        self.errors.seek(0)
+        self.assertEqual(code, 0, self.errors.read())
         self.assertEqual(finished["code"], 0)
         self.assertTrue(finished["restored"])
         with library_lock(self.root / "library"):
