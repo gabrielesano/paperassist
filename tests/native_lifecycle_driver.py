@@ -76,11 +76,14 @@ def run(mode, root):
                 pane = window.pane()
                 emit("cancelled", modified=pane.modified, draft=window.comments.has_draft(pane), prompts=state["prompts"])
             return
-        state["started"] = True
-        window.library_dialog.reject()
+        # Cocoa can deliver timer events while the main window is still showing.
+        library_dialog = window.library_dialog
+        if library_dialog is None or not library_dialog.isVisible():
+            return
+        state.update(started=True, old_workspace=window.workspace)
+        library_dialog.reject()
         window.acquisition.main_opened = lambda document_id: None
         if mode == "fallback":
-            state["old_workspace"] = window.workspace
             prepare = window.workspace.prepare_switch
 
             def disconnect(path, action):

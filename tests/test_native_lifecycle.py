@@ -20,7 +20,7 @@ from pypdf import PdfReader
 from support import QtTestCase, make_pdf, needs_qt, pdf_available, qt_app
 
 if pdf_available:
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
     from PySide6.QtGui import QCloseEvent
     from PySide6.QtWidgets import QDialog
     from shiboken6 import isValid
@@ -401,6 +401,22 @@ class WidgetLifecycleTests(QtTestCase):
         self.window.close_tab(0)
         self.app.processEvents()
         self.assertFalse(controller.dialogs)
+
+    def test_queued_acquisition_offers_are_dropped_when_the_window_is_deleted(self):
+        workspace = Workspace(self.root / "offer-library")
+        self.addCleanup(workspace.close)
+        window = MainWindow(self.client, workspace)
+        controller = window.acquisition
+        self.app.processEvents()
+        with patch.object(AcquisitionController, "_offer_if_active") as offer:
+            controller.main_opened(1)
+            controller.set_reference_data(1, [])
+            controller.main_opened(1)
+            window.deleteLater()
+            QCoreApplication.sendPostedEvents(window, QEvent.DeferredDelete)
+            self.assertFalse(isValid(controller))
+            self.app.processEvents()
+        offer.assert_not_called()
 
     def test_citation_cache_invalidation_drops_results_already_in_flight(self):
         view = self.open_pdf("citation").main.view

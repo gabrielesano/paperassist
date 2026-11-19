@@ -332,13 +332,13 @@ class AcquisitionController(QObject):
             self.dialogs[document_id].update_references(refs)
         if document_id in self.pending:
             self.pending.remove(document_id)
-            QTimer.singleShot(0, lambda: self._offer_if_active(document_id))
+            QTimer.singleShot(0, self, lambda: self._offer_if_active(document_id))
 
     def main_opened(self, document_id):
         if self._closed or self.workspace is None or document_id is None:
             return
         if document_id in self.data:
-            QTimer.singleShot(0, lambda: self._offer_if_active(document_id))
+            QTimer.singleShot(0, self, lambda: self._offer_if_active(document_id))
         else:
             self.pending.add(document_id)
 

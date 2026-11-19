@@ -405,7 +405,7 @@ class NativePreferencesTests(QtTestCase):
         dialog.inbox_edit.setText(str(inbox))
         dialog.inbox_edit.setFocus()
         QTest.keyClick(dialog.inbox_edit, Qt.Key_Return)
-        self.assertEqual(workspace.get_settings().inbox, str(inbox))
+        self.assertEqual(workspace.get_settings().inbox, str(inbox.resolve()))
         self.assertTrue(dialog.isVisible())
         dialog.library_edit.setText(str(self.dir / "new-library"))
         dialog.library_edit.setFocus()
@@ -427,6 +427,7 @@ class NativePreferencesTests(QtTestCase):
         self.addCleanup(workspace.close)
         inbox_dir = self.dir / "manual-downloads"
         inbox_dir.mkdir()
+        saved_inbox = str(inbox_dir.resolve())
         inside_lib = workspace.data_dir / "nested"
         inside_lib.mkdir(parents=True)
 
@@ -443,7 +444,7 @@ class NativePreferencesTests(QtTestCase):
         self.assertIn("Save to keep it", dialog.message.text())
 
         dialog.inbox_save.click()
-        self.assertEqual(workspace.get_settings().inbox, str(inbox_dir))
+        self.assertEqual(workspace.get_settings().inbox, saved_inbox)
         self.assertEqual(dialog.message.text(), "Saved.")
         self.assertNotIn("inbox", paths.load_config())
 
@@ -457,7 +458,7 @@ class NativePreferencesTests(QtTestCase):
             self.assertEqual(dialog.inbox_edit.text(), bad_text)
             self.assertTrue(dialog.message.isVisible())
             self.assertIn(snippet, dialog.message.text())
-            self.assertEqual(workspace.get_settings().inbox, str(inbox_dir))
+            self.assertEqual(workspace.get_settings().inbox, saved_inbox)
 
         dialog.inbox_clear.click()
         self.assertEqual(dialog.inbox_edit.text(), "")
