@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from paperassist import paths
@@ -63,6 +63,9 @@ def run(mode, root):
                 box.button(answer).click()
             QTimer.singleShot(150, respond)
             return
+        # Cocoa dispatches events during window creation, before the Qt event loop starts.
+        if not QThread.currentThread().loopLevel():
+            return
         windows = [widget for widget in app.topLevelWidgets() if isinstance(widget, MainWindow) and widget.isVisible()]
         if not windows:
             return
@@ -76,12 +79,9 @@ def run(mode, root):
                 pane = window.pane()
                 emit("cancelled", modified=pane.modified, draft=window.comments.has_draft(pane), prompts=state["prompts"])
             return
-        # Cocoa can deliver timer events while the main window is still showing.
-        library_dialog = window.library_dialog
-        if library_dialog is None or not library_dialog.isVisible():
-            return
         state.update(started=True, old_workspace=window.workspace)
-        library_dialog.reject()
+        if window.library_dialog is not None:
+            window.library_dialog.reject()
         window.acquisition.main_opened = lambda document_id: None
         if mode == "fallback":
             prepare = window.workspace.prepare_switch
