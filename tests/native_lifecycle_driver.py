@@ -1,4 +1,5 @@
 """Disposable real-app process used by the native lifecycle tests."""
+import faulthandler
 import io
 import json
 import signal
@@ -111,7 +112,9 @@ def run(mode, root):
     timer.start()
     QTimer.singleShot(15000, lambda: app.exit(9))
     previous = signal.getsignal(signal.SIGTERM)
+    faulthandler.dump_traceback_later(8)
     code = native_app.run([])
+    faulthandler.cancel_dump_traceback_later()
     timer.stop()
     emit("finished", code=code, restored=signal.getsignal(signal.SIGTERM) == previous,
          library=str(paths.saved_library()))
