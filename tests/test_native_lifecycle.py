@@ -174,8 +174,10 @@ class NativeProcessTests(unittest.TestCase):
         self.errors = (self.root / "stderr.log").open("w+")
         self.addCleanup(self.errors.close)
         driver = Path(__file__).with_name("native_lifecycle_driver.py")
-        self.process = subprocess.Popen([sys.executable, str(driver), mode, str(self.root)],
-                                        stdout=subprocess.PIPE, stderr=self.errors, text=True)
+        # Cocoa sends process arguments to the application as file-open events.
+        env = {**os.environ, "PAPERASSIST_TEST_MODE": mode, "PAPERASSIST_TEST_ROOT": str(self.root)}
+        self.process = subprocess.Popen([sys.executable, str(driver)], env=env, stdout=subprocess.PIPE,
+                                        stderr=self.errors, text=True)
         self.addCleanup(self.stop)
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.process.stdout, selectors.EVENT_READ)

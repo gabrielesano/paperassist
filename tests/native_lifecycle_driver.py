@@ -1,6 +1,7 @@
 """Disposable real-app process used by the native lifecycle tests."""
 import io
 import json
+import os
 import signal
 import sys
 import time
@@ -119,6 +120,6 @@ def run(mode, root):
 
 
 if __name__ == "__main__":
-    root = Path(sys.argv[2]).resolve()
+    root = Path(os.environ["PAPERASSIST_TEST_ROOT"]).resolve()
     with patch("paperassist.paths.config_file", return_value=root / "config.json"):
-        raise SystemExit(run(sys.argv[1], root))
+        raise SystemExit(run(os.environ["PAPERASSIST_TEST_MODE"], root))
