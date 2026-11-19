@@ -2,9 +2,11 @@
 from importlib import metadata
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel
 
 import paperassist
+
+from .dialogs import setup_dialog
 
 # PySide6 ships as PySide6-Essentials in minimal native installs and as PySide6 in full ones.
 COMPONENTS = (
@@ -37,9 +39,10 @@ def component_info(distributions):
 
 class AboutDialog(QDialog):
     def __init__(self, host):
-        super().__init__(host, objectName="about-dialog", windowTitle="About PaperAssist")
+        super().__init__(host, objectName="about-dialog")
         self.host = host
         self.setMinimumWidth(420)
+        layout, _ = setup_dialog(self, "About PaperAssist", spacing=8)
 
         self.summary_label = self._selectable(
             f"PaperAssist {paperassist.__version__}: a lightweight local reader and shared library "
@@ -53,11 +56,7 @@ class AboutDialog(QDialog):
         buttons.rejected.connect(self.reject)
         self._close_button = buttons.button(QDialogButtonBox.Close)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(8)
-        for widget in (QLabel("<b>About PaperAssist</b>"), self.summary_label,
-                       self.license_label, self.library_label, self.components_label, buttons):
+        for widget in (self.summary_label, self.license_label, self.library_label, self.components_label, buttons):
             layout.addWidget(widget)
 
         self.finished.connect(lambda _: host.activateWindow())
@@ -85,12 +84,3 @@ class AboutDialog(QDialog):
         self.open()
         self.activateWindow()
         self._close_button.setFocus()
-
-
-def install(window):
-    if existing := getattr(window, "about_dialog", None):
-        return existing
-    dialog = AboutDialog(window)
-    window.about_dialog = dialog
-    window.show_about = dialog.open_about
-    return dialog

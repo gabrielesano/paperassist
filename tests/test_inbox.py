@@ -47,7 +47,7 @@ class InboxTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         # No test may reach Crossref; a test that wants an identity sets the mock's return value.
-        patcher = mock.patch('paperassist.retrieval._identity', return_value=None)
+        patcher = mock.patch('paperassist.retrieval.resolve_identity', return_value=None)
         self.identify = patcher.start()
         self.addCleanup(patcher.stop)
         root = Path(self.tmp.name)
@@ -277,7 +277,7 @@ class InboxTests(unittest.TestCase):
         self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.folder.iterdir()}, before)
 
 
-@mock.patch('paperassist.retrieval._identity', return_value=None)
+@mock.patch('paperassist.retrieval.resolve_identity', return_value=None)
 class InboxWorkspaceTests(unittest.TestCase):
     def test_folder_job_and_explicit_link_use_stored_settings(self, identify):
         with tempfile.TemporaryDirectory() as directory:
@@ -310,4 +310,4 @@ class InboxWorkspaceTests(unittest.TestCase):
             linked = workspace.link_file(source, '0', 'scan.pdf')
             self.assertEqual(linked['retrieval']['status'], 'local')
             self.assertEqual(linked['local_document_id'], 2)
-            self.assertTrue(os.path.samefile(identify.call_args.args[2].inbox, folder))
+            self.assertTrue(os.path.samefile(identify.call_args.args[1].inbox, folder))

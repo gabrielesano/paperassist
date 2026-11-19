@@ -8,16 +8,16 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (ArrayObject, DecodedStreamObject, DictionaryObject,
                            FloatObject, NameObject, RectangleObject, TextStringObject)
 
-from test_native_support import make_pdf, needs_pdf
+from support import make_pdf, needs_pdf
 
 
 @needs_pdf
 class EngineTests(unittest.TestCase):
     def setUp(self):
-        from paperassist.native.engine import Pdf, PageRenderer, Rect
+        from paperassist.native.engine import Pdf, Rect
         from paperassist.native.document import PdfDocument
         from paperassist.native.source import FileSource
-        self.Pdf, self.PageRenderer, self.Rect = Pdf, PageRenderer, Rect
+        self.Pdf, self.Rect = Pdf, Rect
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.path = Path(tmp.name) / 'sample.pdf'
@@ -26,7 +26,7 @@ class EngineTests(unittest.TestCase):
         self.addCleanup(self.doc.close)
 
     def pixels(self, data):
-        renderer = self.PageRenderer(data)
+        renderer = self.Pdf(data)
         try:
             return bytes(renderer.render(0, .75).rgb)
         finally:

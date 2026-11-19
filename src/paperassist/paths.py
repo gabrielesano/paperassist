@@ -48,11 +48,32 @@ def load_config():
         return {}
 
 
-def saved_library():
+def format_size(count):
+    for unit in ('bytes', 'KB', 'MB', 'GB'):
+        if count < 1024 or unit == 'GB':
+            return f'{int(count)} bytes' if unit == 'bytes' else f'{count:.1f} {unit}'
+        count /= 1024
+
+
+def write_json_atomic(path, data, mode=None, **dump_kwargs):
+    """Write JSON through a sibling temporary file so a crash never leaves half a file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dump_kwargs.setdefault('indent', 2)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
+    temp = Path(name)
     try:
-        library = load_config()['library']
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+        with os.fdopen(fd, 'w', encoding='utf-8') as file:
+            json.dump(data, file, **dump_kwargs)
+        if mode is not None and os.name != 'nt':
+            os.chmod(temp, mode)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def saved_library():
+    library = load_config().get('library')
     return Path(library) if isinstance(library, str) and os.path.isabs(library) else None
 
 
@@ -63,18 +84,8 @@ def save_library(directory):
 def update_config(change):
     with _CONFIG_WRITE:
         data = change(load_config())
-        _save_config(data)
+        write_json_atomic(config_file(), data)
         return data
-
-
-def _save_config(data):
-    path = config_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Replace atomically so a crash never leaves half a file that hides the choice.
-    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix='config.', suffix='.tmp')
-    with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
-        json.dump(data, file, indent=2)
-    os.replace(name, path)
 
 
 def locate(option=None):

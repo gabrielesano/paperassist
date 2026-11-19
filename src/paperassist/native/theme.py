@@ -1,7 +1,9 @@
-"""Warm-paper visual tokens, HiDPI vector icons, QSS, and wrapping FlowLayout."""
+"""Warm-paper visual tokens, HiDPI vector icons, QSS, interface zoom, and wrapping FlowLayout."""
 from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QLayout
+from PySide6.QtWidgets import QApplication, QLayout
+
+from paperassist.settings import ZOOM_CHOICES
 
 INK = "#273b39"
 MUTED = "#5c6b65"
@@ -17,25 +19,60 @@ CANVAS = "#dce2dc"
 LINE = "#d7ded7"
 INPUT_BORDER = "#ccd7cd"
 ERROR_INK = "#8a3a1c"
+OK_INK = "#315c54"
 
 # AA-contrast status pairs: (3px left accent border, pale row background, status text color).
 TONE_LOCAL = (TEAL, "#eaf3ef", "#235c55")
 TONE_ACTION = ("#b7791f", "#fbf1dd", "#855510")
 TONE_CONFLICT = ("#b0482a", "#f9e8e1", "#7a3216")
 TONE_NEUTRAL = (LINE, PAPER, "#566661")
+TONES = {
+    "local": TONE_LOCAL,
+    "action": TONE_ACTION,
+    "conflict": TONE_CONFLICT,
+    "neutral": TONE_NEUTRAL,
+}
+
+_THEME_GENERATION = 0
+
+
+def reference_tone(ref):
+    """Semantic status tone name for a bibliography entry."""
+    if ref.get("local_conflict") or ref.get("local_invalid"):
+        return "conflict"
+    if ref.get("local_document_id"):
+        return "local"
+    retrieval = ref.get("retrieval") or {}
+    status = retrieval.get("status") if retrieval.get("version") == 2 else None
+    if ref.get("local_missing") or ref.get("legacy") or status in ("ambiguous", "blocked", "failed"):
+        return "action"
+    return "neutral"
 
 
 def reference_palette(ref):
     """Return (border_hex, fill_hex, text_hex) for a bibliography entry."""
-    if ref.get("local_conflict") or ref.get("local_invalid"):
-        return TONE_CONFLICT
-    if ref.get("local_document_id"):
-        return TONE_LOCAL
-    retrieval = ref.get("retrieval") or {}
-    status = retrieval.get("status") if retrieval.get("version") == 2 else None
-    if ref.get("local_missing") or ref.get("legacy") or status in ("ambiguous", "blocked", "failed"):
-        return TONE_ACTION
-    return TONE_NEUTRAL
+    return TONES[reference_tone(ref)]
+
+
+def parse_zoom(stored):
+    """Accept only the six validated zoom factors so stale config values fall back to 100%."""
+    return next((c for c in ZOOM_CHOICES if type(stored) in (int, float) and stored == c), 1)
+
+
+def set_props(widget, **props):
+    """Update Qt dynamic properties and repolish only when a value actually changes."""
+    changed = False
+    for key, value in props.items():
+        if widget.property(key) != value:
+            widget.setProperty(key, value)
+            changed = True
+    if changed:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+
+def theme_generation():
+    return _THEME_GENERATION
 
 
 def brand_icon(size=22):
@@ -213,6 +250,13 @@ class FlowLayout(QLayout):
             line_h = max(line_h, hint.height())
         return y + line_h - rect.y() + m.bottom()
 
+
+_TONE_CARD_RULES = "\n".join(
+    f"""QLabel[tone="{name}"] {{ color: {text_hex}; }}
+QWidget#expanded-card[tone="{name}"] {{ background: {fill_hex}; border: 1px solid #7e968d; border-left: 3px solid {border_hex}; }}
+QFrame#acquire-row[tone="{name}"] {{ background: {fill_hex}; border: 0; border-left: 3px solid {border_hex}; border-bottom: 1px solid {LINE}; }}"""
+    for name, (border_hex, fill_hex, text_hex) in TONES.items()
+)
 
 APP_STYLE = f"""
 QMainWindow {{
@@ -527,6 +571,9 @@ QToolBar#pane-bar {{
     border-bottom: 1px solid {LINE};
     padding: 2px 8px;
 }}
+QToolBar#pane-bar QLabel {{
+    font-weight: 600;
+}}
 QToolBar#pane-bar QToolButton {{
     color: {TEAL};
     font-weight: 600;
@@ -555,6 +602,15 @@ QLabel#welcome-eyebrow {{
 QLabel#muted-note {{
     color: {MUTED};
 }}
+QLabel[strong="true"], QCheckBox[strong="true"] {{
+    font-weight: 600;
+}}
+QLabel[tone="error"] {{
+    color: {ERROR_INK};
+}}
+QLabel[tone="ok"] {{
+    color: {OK_INK};
+}}
 QWidget#expanded-card {{
     border: 1px solid #7e968d;
     border-radius: 2px;
@@ -562,10 +618,18 @@ QWidget#expanded-card {{
 QWidget#comment-row {{
     border-bottom: 1px solid {LINE};
 }}
+QWidget#comment-row[selected="true"] {{
+    background: #e6eeeb;
+    border-left: 3px solid {TEAL};
+}}
 QLabel#comment-quote {{
     color: {MUTED};
     border-left: 2px solid #90aca0;
     padding-left: 8px;
+}}
+QTextBrowser#shortcuts-list {{
+    background: {DIALOG_BG};
+    border: 0;
 }}
 QMenu {{
     background: {DIALOG_BG};
@@ -615,4 +679,46 @@ QFrame#preferences-library-confirm {{
     border-left: 3px solid {TEAL};
     border-radius: 3px;
 }}
+{_TONE_CARD_RULES}
 """
+
+
+def _zoom_rules(font, zoom):
+    size = (f"{font.pointSizeF() * zoom:g}pt" if font.pointSizeF() > 0
+            else f"{max(1, round((font.pixelSize() or 13) * zoom))}px")
+    heading_size = (f"{font.pointSizeF() * zoom * 1.55:g}pt" if font.pointSizeF() > 0
+                    else f"{max(14, round((font.pixelSize() or 13) * zoom * 1.55))}px")
+    welcome_size = (f"{font.pointSizeF() * zoom * 2.05:g}pt" if font.pointSizeF() > 0
+                    else f"{max(14, round((font.pixelSize() or 13) * zoom * 2.05))}px")
+    return f"""
+QToolBar, QToolBar QWidget, QTabBar, QMenu, QStatusBar, QStatusBar QWidget,
+SideColumn, SideColumn QWidget, FindBar, FindBar QWidget, #pane-bar, #pane-bar QWidget,
+#welcome-screen, #welcome-screen QWidget, QDialog, QDialog QWidget {{ font-size: {size}; }}
+QLabel[headingScale="dialog"] {{ font-size: {heading_size}; }}
+QWidget#welcome-screen QLabel[headingScale="welcome"] {{ font-size: {welcome_size}; }}
+QToolBar {{ spacing: {round(2 * zoom)}px; padding: {round(3 * zoom)}px {round(6 * zoom)}px; }}
+QToolButton {{ padding: {round(4 * zoom)}px {round(6 * zoom)}px; border-radius: {round(3 * zoom)}px; }}
+QToolButton#brand-button {{ padding: {round(4 * zoom)}px {round(8 * zoom)}px {round(4 * zoom)}px {round(5 * zoom)}px; }}
+QToolButton#column-tab {{ padding: {round(6 * zoom)}px {round(8 * zoom)}px; }}
+QPushButton {{ padding: {round(5 * zoom)}px {round(11 * zoom)}px; border-radius: {round(3 * zoom)}px; }}
+QPushButton[link="true"] {{ padding: {round(2 * zoom)}px {round(2 * zoom)}px; }}
+QLineEdit, QTextEdit, QComboBox, QSpinBox {{ padding: {round(4 * zoom)}px {round(7 * zoom)}px; border-radius: {round(3 * zoom)}px; }}
+QTabBar::tab {{ padding: {round(6 * zoom)}px {round(12 * zoom)}px; }}"""
+
+
+def build_stylesheet(base_font=None, zoom=1.0):
+    """Compose APP_STYLE with optional interface zoom rules; PDF zoom stays independent."""
+    zoom = parse_zoom(zoom)
+    if zoom == 1 or base_font is None:
+        return APP_STYLE
+    return APP_STYLE + _zoom_rules(base_font, zoom)
+
+
+def apply_theme(app=None, base_font=None, zoom=1.0):
+    """Apply APP_STYLE + zoom once on QApplication so every window and dialog inherits it."""
+    global _THEME_GENERATION
+    app = app or QApplication.instance()
+    if app is None:
+        return
+    _THEME_GENERATION += 1
+    app.setStyleSheet(build_stylesheet(base_font or app.font(), zoom))

@@ -92,7 +92,6 @@ metadata_datas = (
     safe_copy_metadata("paperassist")
     + safe_copy_metadata("PySide6")
     + safe_copy_metadata("PySide6-Essentials")
-    + safe_copy_metadata("PySide6_Essentials")
     + safe_copy_metadata("shiboken6")
     + safe_copy_metadata("pypdfium2")
     + safe_copy_metadata("pypdf")

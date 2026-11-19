@@ -1,4 +1,4 @@
-"""The render process.
+"""The render process and its Qt client.
 
 PDFium is not thread-safe. Drawing lives in a separate process so a slow page
 cannot stall the Qt event loop or overlap a structural engine call in the UI.
@@ -7,20 +7,23 @@ It is started with multiprocessing's explicit "spawn" context and pipes. Unlike
 `sys.executable -m ...` this keeps working in a frozen app, where the executable is
 the app itself and `freeze_support()` routes the child to `serve`.
 
-Protocol, parent to child: ("open", id, path), ("close", id), ("want", id, jobs),
-("locate", req_id, id, ref) and ("quit",). A want list replaces the previous one for that
-document, most urgent first, so a fast scroll overtakes pages nobody looks at any more.
-Child to parent: ("page", id, page, scale, width, height, seconds) followed by raw RGB
-bytes, or ("citations", req_id, result, error).
+Protocol, parent to child: ("open", id, path_or_bytes[, inherit_from]), ("close", id),
+("want", id, jobs), ("locate", req_id, id, ref) and ("quit",). A want list replaces the
+previous one for that document, most urgent first, so a fast scroll overtakes pages nobody
+looks at any more. Child to parent: ("page", id, page, scale, width, height, seconds)
+followed by raw RGB bytes, or ("citations", req_id, result, error).
 """
+import gc
+import itertools
 import multiprocessing
 import threading
 import time
 from pathlib import Path
 
-from .citations import CitationIndex
-from .engine import PageRenderer, trim_caches
-from .trim import trim_heap
+from paperassist.citations import CitationIndex
+
+from .engine import Pdf
+from .platform import trim_heap
 
 IDLE_TRIM_SECONDS = 2
 
@@ -77,29 +80,36 @@ def serve(inbox, outbox):
             # Return freed pixels after a quiet moment instead of churning the allocator per page.
             woke = queue.cond.wait_for(lambda: queue.has_work(docs), timeout=None if trimmed else IDLE_TRIM_SECONDS)
             if not woke:
-                trim_caches()
+                gc.collect()
                 trim_heap()
                 trimmed = True
                 continue
             commands = queue.take_commands()
         for kind, *args in commands:
             if kind == "open":
+                doc_id, payload = args[0], args[1]
+                inherit = args[2] if len(args) > 2 else None
                 try:
-                    docs[args[0]] = PageRenderer(args[1] if isinstance(args[1], bytes) else Path(args[1]).read_bytes())
+                    pdf = Pdf(payload if isinstance(payload, bytes) else Path(payload).read_bytes())
+                    docs[doc_id] = pdf
+                    if inherit is not None and (index := indices.pop(inherit, None)) is not None:
+                        index._pdf = pdf
+                        indices[doc_id] = index
                 except Exception:  # a vanished or broken file leaves blank pages, not a dead process
-                    docs.pop(args[0], None)
+                    docs.pop(doc_id, None)
             elif kind == "close":
                 if document := docs.pop(args[0], None):
                     document.close()
                 if index := indices.pop(args[0], None):
                     index.close()
+                trimmed = False
             elif kind == "locate":
                 req_id, doc_id, ref = args
                 try:
                     if doc_id not in docs:
                         raise ValueError("Document is closed")
                     if doc_id not in indices:
-                        indices[doc_id] = CitationIndex(docs[doc_id].data)
+                        indices[doc_id] = CitationIndex(docs[doc_id])
                     outbox.send(("citations", req_id, indices[doc_id].locate(ref), ""))
                 except Exception as error:
                     outbox.send(("citations", req_id, None, str(error) or type(error).__name__))
@@ -140,3 +150,85 @@ def start():
     commands_in.close()  # the parent keeps only its own ends, so EOF reaches the child if we die
     results_out.close()
     return process, commands_out, results_in
+
+
+def _make_render_client():
+    # Imported lazily so the spawned worker process never loads Qt.
+    from PySide6.QtCore import QObject, Signal
+
+    class RenderClient(QObject):
+        page_ready = Signal(int, int, float, int, int, object, float)  # doc, page, scale, width, height, rgb, seconds
+        _arrived = Signal(object)
+
+        def __init__(self):
+            super().__init__()
+            self.process, self._commands, self._results = start()
+            self._ids = itertools.count(1)
+            self._pending = {}
+            self._arrived.connect(self._deliver)
+            threading.Thread(target=self._listen, daemon=True).start()
+
+        def _listen(self):
+            # recv blocks in a read that releases the GIL; the signal hops to the UI thread.
+            while True:
+                try:
+                    message = self._results.recv()
+                    if message[0] == "page":
+                        _, doc_id, page, scale, width, height, seconds = message
+                        self._arrived.emit(("page", doc_id, page, scale, width, height, self._results.recv_bytes(), seconds))
+                    elif message[0] == "citations":
+                        self._arrived.emit(message)
+                except (EOFError, OSError):
+                    return
+
+        def _deliver(self, message):
+            if message[0] == "page":
+                self.page_ready.emit(*message[1:])
+            elif callback := self._pending.pop(message[1], None):
+                callback(message[2], message[3])
+
+        def _send(self, *message):
+            try:
+                self._commands.send(message)
+                return True
+            except (BrokenPipeError, OSError):
+                return False  # the render process is gone; the pages stay as they are
+
+        def open(self, path, *, inherit_from=None):
+            doc_id = next(self._ids)
+            payload = path if isinstance(path, bytes) else str(path)
+            if inherit_from is not None:
+                self._send("open", doc_id, payload, inherit_from)
+            else:
+                self._send("open", doc_id, payload)
+            return doc_id
+
+        def close(self, doc_id):
+            self._send("close", doc_id)
+
+        def want(self, doc_id, jobs):
+            """Replace the queue of (page, scale) jobs for one document, most urgent first."""
+            self._send("want", doc_id, jobs)
+
+        def locate(self, doc_id, ref, callback):
+            req_id = next(self._ids)
+            self._pending[req_id] = callback
+            if not self._send("locate", req_id, doc_id, ref):
+                self._pending.pop(req_id, None)
+                callback(None, "Render process unavailable")
+
+        def shutdown(self):
+            self._send("quit")
+            self.process.join(5)
+            if self.process.is_alive():
+                self.process.terminate()
+
+    return RenderClient
+
+
+def __getattr__(name):
+    if name == "RenderClient":
+        global RenderClient
+        RenderClient = _make_render_client()
+        return RenderClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

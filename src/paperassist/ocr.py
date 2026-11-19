@@ -19,6 +19,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .paths import write_json_atomic
+
 VERSION = 2
 MAX_PIXELS = 12_000_000
 MAX_PAGES = 2
@@ -27,7 +29,15 @@ TOTAL_SECONDS = 60
 ATTEMPTS = ((200, 3), (300, 11))
 MAX_WORDS = 4000
 MAX_TSV_BYTES = 8 * 1024 * 1024
+LANGUAGE = re.compile(r"[a-z]{3}(?:\+[a-z]{3})*")
 _LOCK = threading.Lock()
+_PROBE_LOCK = threading.Lock()
+_PROBE_CACHE: dict[tuple, dict] = {}
+
+
+def clear_probe_cache():
+    with _PROBE_LOCK:
+        _PROBE_CACHE.clear()
 
 
 def _result(status, message, pages=None, **extra):
@@ -226,15 +236,43 @@ def _launch(task, arguments, cancel, deadline, progress=None):
         send.close()
         receive.close()
         if process.pid is not None:
-            _terminate(process)
+            if process.is_alive():
+                _terminate(process)
+            else:
+                process.join(timeout=0)
             process.close()
+
+
+def _probe_cache_key(language):
+    engine = _engine()
+    mtime = None
+    if engine:
+        try:
+            mtime = Path(engine).stat().st_mtime_ns
+        except OSError:
+            mtime = None
+    return (language, engine, mtime, os.environ.get("TESSDATA_PREFIX"),
+            os.environ.get("PATH"), bool(getattr(sys, "frozen", False)), str(_bundled_directory()))
+
+
+def _cached_probe(language, cancel, deadline):
+    key = _probe_cache_key(language)
+    with _PROBE_LOCK:
+        cached = _PROBE_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    info = _launch("probe", {"language": language}, cancel, deadline)
+    if info.get("available"):
+        with _PROBE_LOCK:
+            _PROBE_CACHE[key] = dict(info)
+    return info
 
 
 def capabilities(language="eng"):
     """Check local OCR without loading PDFium or changing the app's DLL search path."""
-    if not re.fullmatch(r"[a-z]{3}(?:\+[a-z]{3})*", language):
+    if not LANGUAGE.fullmatch(language):
         return {"available": False, "message": "Choose installed OCR language codes such as eng or eng+ita.", "languages": []}
-    result = _launch("probe", {"language": language}, threading.Event(), time.monotonic() + 8)
+    result = _cached_probe(language, threading.Event(), time.monotonic() + 8)
     if "available" not in result:
         return {"available": False, "message": result["message"], "languages": []}
     return result
@@ -260,18 +298,6 @@ def _read_cache(path, key):
     return None
 
 
-def _write_cache(path, report):
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, suffix=".part", delete=False) as output:
-            temporary = Path(output.name)
-            json.dump(report, output, ensure_ascii=False, allow_nan=False)
-        os.replace(temporary, path)
-    finally:
-        if temporary:
-            temporary.unlink(missing_ok=True)
-
-
 def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, progress=None):
     """Read at most two identifying pages; source PDF bytes are never rewritten.
 
@@ -286,9 +312,9 @@ def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, pro
         return _result("busy", "Another offline OCR task is already running.")
     deadline = time.monotonic() + TOTAL_SECONDS
     try:
-        if not re.fullmatch(r"[a-z]{3}(?:\+[a-z]{3})*", language):
+        if not LANGUAGE.fullmatch(language):
             return _result("unavailable", "Choose installed OCR language codes such as eng or eng+ita.")
-        info = _launch("probe", {"language": language}, cancel, min(deadline, time.monotonic() + 8))
+        info = _cached_probe(language, cancel, min(deadline, time.monotonic() + 8))
         if not info.get("available"):
             return info if info.get("status") in ("cancelled", "timeout") else _result("unavailable", info["message"])
         config = _config(language)
@@ -309,7 +335,7 @@ def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, pro
             report = _launch("ocr", arguments, cancel, deadline, progress)
         report.update(cache_key=key, engine_version=info["engine_version"], config=config, sha256=sha256.lower())
         if info["cacheable"] and report["status"] in ("completed", "empty") and not cancel.is_set():
-            _write_cache(destination, report)
+            write_json_atomic(destination, report, indent=None, ensure_ascii=False, allow_nan=False)
         return report
     except (OSError, ValueError, RuntimeError) as error:
         return _result("failed", f"Offline OCR failed: {error}")
@@ -374,7 +400,7 @@ def _parse_tsv(path, page_number, size, pixels):
         lines.append({"text": " ".join(word["text"] for word in members), "bbox": box,
                       "confidence": statistics.mean(word["confidence"] for word in members), "words": indexes})
     return {"page": page_number, "size": size, "pixels": pixels, "words": words, "lines": lines,
-            "text": "\n".join(line["text"] for line in lines), "ocr_rotation": 0}
+            "text": "\n".join(line["text"] for line in lines)}
 
 
 def _quality(page):
@@ -418,7 +444,8 @@ def _recognize(arguments, page, number, send):
         recognized = _parse_tsv(output.with_suffix(".tsv"), number, size, pixels)
         recognized.update(dpi=round(actual_dpi, 2), rotation=page.get_rotation(), attempt=attempt)
         attempts.append(recognized)
-        if _quality(recognized)[0] >= 80 and _quality(recognized)[1] >= 65:
+        chars, confidence = _quality(recognized)
+        if chars >= 80 and confidence >= 65:
             break
     if not attempts:
         raise TimeoutError("Tesseract reached the OCR time limit" if timed_out else "Offline OCR reached its time limit")

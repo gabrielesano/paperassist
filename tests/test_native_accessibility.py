@@ -3,7 +3,7 @@ import os
 import unittest
 
 from test_library_window import LibraryWindowCase
-from test_native_support import needs_qt, pdf_available
+from support import needs_qt, pdf_available
 
 if pdf_available:
     from PySide6.QtCore import QCoreApplication, QEvent, Qt
@@ -28,7 +28,7 @@ class AccessibilityTests(LibraryWindowCase):
 
     def test_tab_close_buttons_identify_their_papers_after_rename_and_reorder(self):
         self.open_document(self.window, self.docs[1])
-        self.window.shortcuts.set_label(self.window.tab(), "My reference")
+        self.window.set_tab_label(self.window.tab(), "My reference")
         bar = self.window.tabs.tabBar()
         bar.moveTab(1, 0)
         for index in range(self.window.tabs.count()):
@@ -132,8 +132,8 @@ class AccessibilityTests(LibraryWindowCase):
         self.assertIs(self.app.focusWidget(), self.view)
 
     def test_preferences_return_to_the_document_if_the_invoking_editor_was_deleted(self):
-        self.window.shortcuts.rename_tab(0)
-        editor = self.window.shortcuts.editor
+        self.window.rename_tab(0)
+        editor = self.window.tab_editor
         self.window.show_preferences()
         self.pump(seconds=0.05)
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)

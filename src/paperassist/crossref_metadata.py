@@ -1,16 +1,14 @@
 """Conservative, bounded Crossref identification for locally imported PDFs."""
 
-import json
 import re
 from urllib.error import HTTPError
 
 from . import citation, retrieval
-from .citation import first_surname, same_surname
 from .metadata import useful
 
 
 def _distinct(title):
-    words = retrieval._words(title)
+    words = retrieval.title_words(title)
     return useful(title) and len(set(words)) >= 3 and sum(map(len, words)) >= 18
 
 
@@ -28,13 +26,6 @@ def _author(document):
     return re.split(r"[,;]|\band\b", re.sub(r"\bet\s+al\b\.?", "", document.get("authors") or "", flags=re.I), maxsplit=1)[0].strip()
 
 
-def _author_agrees(document, record, header):
-    surname = record.get("first_author") or ""
-    if document.get("authors"):
-        return same_surname(surname, first_surname(document["authors"]))
-    return retrieval.surname_in_header(surname, header, record.get("title") or "")
-
-
 def _agrees(document, record, titles, printed):
     title = record.get("title") or ""
     metadata = document.get("metadata", {})
@@ -47,7 +38,7 @@ def _agrees(document, record, titles, printed):
     year_source = metadata.get("sources", {}).get("year")
     if document.get("year") and year_source not in ("arxiv_submission_date", "ocr_arxiv_submission_date") and record.get("year") != document["year"]:
         return False
-    return _author_agrees(document, record, header)
+    return retrieval.author_agrees(document, record, header)
 
 
 def _queries(document, titles, printed):
@@ -93,19 +84,13 @@ def lookup(document, cfg, cancel, fresh=True):
     if not (document.get("authors") or document.get("metadata", {}).get("header_text")):
         return None
     for query in _queries(document, titles, printed):
-        url = retrieval._crossref_url(cfg, "works", **query, select=retrieval.CROSSREF_FIELDS, rows=5)
-        try:
-            items = json.loads(retrieval._get(url, cfg, fresh=fresh))["message"]["items"]
-        except HTTPError as error:
-            if error.code == 404:
-                continue
-            raise
+        items = retrieval.crossref_works(cfg, fresh=fresh, rows=5, **query)
         for item in items[:5]:
             if cancel.is_set():
                 return None
             if not item.get("DOI"):
                 continue
-            record = retrieval._crossref_record(item)
+            record = retrieval.crossref_record(item)
             if _agrees(document, record, titles, printed):
                 matches[record["doi"]] = record
         if matches:

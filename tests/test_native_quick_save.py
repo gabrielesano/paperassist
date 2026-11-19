@@ -3,15 +3,15 @@ import hashlib
 from unittest.mock import patch
 
 from test_library_window import LibraryWindowCase
-from test_native_support import needs_qt, pdf_available
+from support import needs_qt, pdf_available
 
 if pdf_available:
     from paperassist import settings
     from paperassist.native.document import SaveState
     from paperassist.native.engine import Rect
-    from paperassist.native.library_source import LibrarySource
     from paperassist.native.positions import CSS_PER_POINT, current_page
     from paperassist.native.rules import CANCEL, DISCARD, SAVE
+    from paperassist.native.source import LibrarySource
 
 
 @needs_qt

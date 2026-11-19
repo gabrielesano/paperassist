@@ -1,34 +1,54 @@
 """Main window: one paper per tab, save state everywhere, and the Save/Discard/Cancel rules."""
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QMainWindow, QMessageBox, QPushButton, QSplitter,
-                               QStackedWidget, QTabBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
+                               QLineEdit, QMainWindow, QMessageBox, QPushButton, QSplitter,
+                               QStackedWidget, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from paperassist import settings
+from paperassist.library import MAX_LABEL
 
+from .about import AboutDialog
 from .acquisition import AcquisitionController
-from .annotation_bar import install as install_annotation_bar
-from .app_menu import install as install_app_menu
-from .comments import install as install_comments
+from .annotation_bar import AnnotationBar
+from .app_menu import BrandButton
+from .comments import CommentsController
 from .document import SaveState
 from .library_dialog import LibraryDialog
-from .library_source import LibrarySource
-from .outline import OutlinePanel, read_outline
+from .outline import OutlinePanel
 from .pane import Pane
 from .positions import PositionKeeper, current_page
+from .preferences_dialog import PreferencesDialog
 from .references_panel import ReferencesPanel
 from .rules import CANCEL, DISCARD, SAVE, apply_decisions, collect_decisions, locked_by_other
-from .shortcuts import install as install_shortcuts
+from .shortcuts import Shortcuts
 from .sidebar import DetailsPanel, SideColumn
-from .source import FileSource
+from .source import FileSource, LibrarySource
 from .tab import DocTab
-from .theme import APP_STYLE, INK, MUTED, icon, serif_heading_font
-from .toolbar import install_overflow, reserve_zoom_width
+from .theme import INK, MUTED, icon, serif_heading_font, set_props
+from .toolbar import PageField, install_overflow, reserve_zoom_width, step_page
 
 MARKERS = {SaveState.UNSAVED: " ●", SaveState.SAVING: " …", SaveState.FAILED: " !"}
 WORST_FIRST = [SaveState.FAILED, SaveState.SAVING, SaveState.UNSAVED, SaveState.SAVED]
-STYLE = APP_STYLE
+
+
+class RenameEdit(QLineEdit):
+    done = Signal(bool)  # True keeps the text
+
+    def __init__(self, bar, text):
+        super().__init__(text, bar, maxLength=MAX_LABEL)
+        self.setAccessibleName("Paper tab name")
+        self.returnPressed.connect(lambda: self.done.emit(True))
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.done.emit(False)
+        else:
+            super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.done.emit(True)
 
 
 class WelcomeView(QWidget):
@@ -92,31 +112,46 @@ class WelcomeView(QWidget):
 
 
 class MainWindow(QMainWindow):
-    refreshed = Signal()  # documents, panes or save states changed; the page field follows it
+    refreshed = Signal()  # documents, panes or save states changed
+    pane_added = Signal(object)  # emitted whenever a new Pane is created
 
     def __init__(self, client, workspace=None):
         """workspace is the opened library, or None for loose files."""
         super().__init__()
         self.client, self.workspace, self.library_dialog, self.switch_target = client, workspace, None, None
         self.annotation_bar = None
-        saved = settings.preferences()  # shared with the web reader
+        self.tab_editor = None
+        saved = settings.preferences()
         self.side_by_side = saved.get("quick_view_layout") == "side"
         self.resize(1400, 900)
         self.setMinimumSize(800, 600)
-        self.setStyleSheet(STYLE)
         self.tabs = QTabWidget(tabsClosable=False, movable=True, documentMode=True)
         self.tabs.currentChanged.connect(lambda _: self.refresh())
+        bar = self.tabs.tabBar()
+        bar.installEventFilter(self)
+        bar.setFocusPolicy(Qt.StrongFocus)  # a clicked title holds the focus that F2 needs
+        rename = QShortcut(QKeySequence("F2"), bar, lambda: self.rename_tab(self.tabs.currentIndex()))
+        rename.setContext(Qt.WidgetShortcut)
+
         self._build_columns(saved)
         self.state_label = QLabel()
         self.statusBar().setSizeGripEnabled(False)
         self.statusBar().addWidget(self.state_label)
         self._build_actions()
-        self.annotation_bar = install_annotation_bar(self)
-        for toolbar in self.findChildren(QToolBar):
-            install_overflow(toolbar)
-        install_shortcuts(self)
-        install_app_menu(self)  # also Preferences, which applies the saved interface size, and About
-        self.comments.draft_changed.connect(self.refresh)
+
+        self.annotation_bar = AnnotationBar(self)
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.addToolBar(Qt.TopToolBarArea, self.annotation_bar)
+        install_overflow(self.main_bar)
+        install_overflow(self.annotation_bar)
+
+        self.preferences_dialog = PreferencesDialog(self)
+        self.about_dialog = AboutDialog(self)
+        self._build_app_menu()
+        self.shortcuts = Shortcuts(self)
+        self.preferences_dialog.apply_zoom(saved.get("ui_zoom"))
+
+        self.comments.draft_changed.connect(self.refresh_save_state)
         QApplication.instance().focusChanged.connect(self._focus_pane)
         self.refresh()
 
@@ -134,9 +169,22 @@ class MainWindow(QMainWindow):
         self._action(bar, "Find", ["Ctrl+F"], lambda: self._on_pane(lambda p: p.find_bar.open()), glyph="find")
         bar.addSeparator()
 
-        zoom_out = self._action(bar, "Zoom out", [], lambda: self._on_main(lambda p: p.view.zoom_by(0.8)), glyph="minus")
-        self.page_anchor_action = zoom_out
+        prev = QAction(icon("chevron_left", INK, 15), "Main paper: previous page", self)
+        prev.triggered.connect(lambda: step_page(self.main_view(), -1))
+        self.page_field = PageField("Main paper")
+        following = QAction(icon("chevron_right", INK, 15), "Main paper: next page", self)
+        following.triggered.connect(lambda: step_page(self.main_view(), 1))
+        self.page_field.toolbar_actions = [
+            bar.addAction(prev) or prev,
+            bar.addWidget(self.page_field),
+            bar.addAction(following) or following,
+            bar.addSeparator(),
+        ]
+
+        self._action(bar, "Zoom out", [], lambda: self._on_main(lambda p: p.view.zoom_by(0.8)), glyph="minus")
         self.fit_action = self._action(bar, "Fit width", [], lambda: self._on_main(lambda p: p.view.fit_width()))
+        if btn := bar.widgetForAction(self.fit_action):
+            btn.setAccessibleName("Main paper: fit width")
         self._action(bar, "Zoom in", [], lambda: self._on_main(lambda p: p.view.zoom_by(1.25)), glyph="plus")
         for text, keys, operation in (("Zoom out", ["Ctrl+-"], lambda p: p.view.zoom_by(0.8)),
                                       ("Fit width", ["Ctrl+0"], lambda p: p.view.fit_width()),
@@ -155,19 +203,40 @@ class MainWindow(QMainWindow):
         ):
             self._window_action(text, keys, slot)
 
+    def _build_app_menu(self):
+        button = BrandButton(self)
+        first = self.main_bar.actions()[0] if self.main_bar.actions() else None
+        if first is not None:
+            self.main_bar.insertWidget(first, button)
+            self.main_bar.insertSeparator(first)
+        else:
+            self.main_bar.addWidget(button)
+        self.app_menu_button = button
+        self.app_menu = button.menu()
+        self.preferences_action = button.preferences_action
+        self.sources_action = button.sources_action
+        self.shortcuts_action = button.shortcuts_action
+        self.about_action = button.about_action
+
+    def show_preferences(self, focus="zoom"):
+        self.preferences_dialog.open_preferences(focus)
+
+    def show_about(self):
+        self.about_dialog.open_about()
+
     # ---- side columns ----------------------------------------------------------------------
     def _build_columns(self, saved):
         self.outline = OutlinePanel()
         self.outline.navigate.connect(lambda page, y: self.tab() and self.tab().main.view.goto(page, y))
         self.details = ReferencesPanel(self.workspace)
         self.details.open_requested.connect(self.open_library_document_in_quick_view)
-        self.comments = install_comments(self)
+        self.comments = CommentsController(self)
         self.detail_switch = DetailsPanel(self.details, self.comments.panel)
         self.acquisition = AcquisitionController(self)
         self.details.set_acquisition(self.acquisition)
         self.details.references_loaded.connect(self.acquisition.set_reference_data)
         self.acquisition.open_requested.connect(self.open_library_document_in_quick_view)
-        self.acquisition.preferences_requested.connect(self._acquisition_preferences)
+        self.acquisition.preferences_requested.connect(self.show_preferences)
         self.details.reveal_requested.connect(lambda: self.comments.show_mode("references"))
         self.outline_column = SideColumn("Outline", self.outline)
         self.details_column = SideColumn("References / Comments", self.detail_switch, header_widget=self.detail_switch.tab_bar)
@@ -238,19 +307,12 @@ class MainWindow(QMainWindow):
         self.details.bind_view(main.view if main else None)
         if self._shown_for.get("details", False) != key:
             self._shown_for["details"] = key
-            self.details.show_for(getattr(main.view.doc.source, "document_id", None) if main else None)
+            self.details.show_for(main.view.doc.source.document_id if main else None)
         self.comments.refresh()
 
-    def _acquisition_preferences(self, field):
-        callback = getattr(self, "show_preferences", None)
-        if callback:
-            callback(field)
-        else:
-            self.statusBar().showMessage("Configure the downloads folder in Preferences before checking it.", 8000)
-
     def _outline_entries(self, main):
-        if main.key not in self.outlines:  # reading a big PDF's bookmarks takes a moment; edits never change them
-            self.outlines[main.key] = read_outline(main.view.doc.pdf.data)
+        if main.key not in self.outlines:
+            self.outlines[main.key] = main.view.doc.pdf.outline()
         return self.outlines[main.key]
 
     # ---- library --------------------------------------------------------------------------
@@ -272,13 +334,14 @@ class MainWindow(QMainWindow):
     def open_library_document(self, document_id):
         return self.open_source(self.library_source(document_id))
 
-    def open_library_document_in_quick_view(self, document_id):
+    def open_library_document_in_quick_view(self, document_id, *, tab=None):
         source = self.library_source(document_id)
-        if not self.tab():
+        tab = self.tab() if tab is None else tab
+        if tab is None:
             return self.open_source(source)
-        if self.tab().quick and self.tab().quick.key == source.key:
-            return self.tab().quick  # clicking the paper that is already there changes nothing
-        return self.open_quick(source)
+        if tab.quick and tab.quick.key == source.key:
+            return tab.quick  # clicking the paper that is already there changes nothing
+        return self.open_quick(source, tab=tab)
 
     def _focus_pane(self, previous, current):
         if current is not None and (tab := self.tab()):
@@ -318,6 +381,9 @@ class MainWindow(QMainWindow):
     def tab(self):
         return self.tabs.currentWidget()
 
+    def main_view(self):
+        return self.tab().main.view if self.tab() else None
+
     def pane(self):
         """The pane the toolbar acts on: the one last clicked in the current tab, or None."""
         return self.tab().active if self.tab() else None
@@ -329,10 +395,16 @@ class MainWindow(QMainWindow):
         pane = Pane(source, self.client)
         pane.view.highlighting = self.highlight_action.isChecked()
         pane.view.edited.connect(self.refresh)
-        self.comments.bind(pane)
-        if self.workspace and hasattr(source, "document_id"):
+        pane.view.moved.connect(self._on_view_moved)
+        if self.workspace and source.document_id is not None:
             PositionKeeper(pane, self.workspace).failed.connect(lambda message: self.statusBar().showMessage(message, 8000))
+        self.pane_added.emit(pane)
         return pane
+
+    def _on_view_moved(self):
+        if self.sender() is self.main_view():
+            self.page_field.show_page(self.main_view())
+            self.sync_zoom_label()
 
     def _add_tab(self, tab):
         index = self.tabs.addTab(tab, "")
@@ -344,7 +416,7 @@ class MainWindow(QMainWindow):
         self.tabs.tabBar().setTabButton(index, QTabBar.RightSide, close_btn)
         self.tabs.setCurrentIndex(index)
         self.refresh()
-        document_id = getattr(tab.main.view.doc.source, "document_id", None)
+        document_id = tab.main.view.doc.source.document_id
         if document_id is not None:
             self.acquisition.main_opened(document_id)
         return tab
@@ -388,6 +460,44 @@ class MainWindow(QMainWindow):
             else:
                 self.open_source(FileSource(path))
 
+    # ---- renaming a tab --------------------------------------------------------------------
+    def rename_tab(self, index):
+        tab = self.tabs.widget(index)
+        if tab is None or self.tab_editor:
+            return
+        bar = self.tabs.tabBar()
+        self.tab_editor = RenameEdit(bar, tab.title)
+        self.tab_editor.setGeometry(bar.tabRect(index))
+        self.tab_editor.done.connect(lambda keep, editor=self.tab_editor: self._renamed(editor, tab, keep))
+        self.tab_editor.show()
+        self.tab_editor.setFocus()
+        self.tab_editor.selectAll()
+
+    def _renamed(self, editor, tab, keep):
+        if editor is not self.tab_editor:  # Enter hides the editor, whose focus loss reports a second time
+            return
+        self.tab_editor = None
+        text, had_focus = editor.text(), editor.hasFocus()
+        editor.hide()
+        editor.deleteLater()
+        if had_focus:
+            self.tabs.tabBar().setFocus()
+        if keep and self.tabs.indexOf(tab) >= 0:
+            self.set_tab_label(tab, text)
+
+    def set_tab_label(self, tab, text):
+        """Set a session-only name for this tab without changing its paper."""
+        tab.label = " ".join(text.split())
+        self.refresh_save_state()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.MouseButtonDblClick and watched is self.tabs.tabBar():
+            index = watched.tabAt(event.position().toPoint())
+            if index >= 0:
+                self.rename_tab(index)
+                return True
+        return super().eventFilter(watched, event)
+
     # ---- quick view -----------------------------------------------------------------------
     def quick_dialog(self):
         path, _ = QFileDialog.getOpenFileName(self, "Quick view", "", "PDF (*.pdf)")
@@ -397,15 +507,17 @@ class MainWindow(QMainWindow):
             else:
                 self.open_quick(FileSource(path))
 
-    def open_quick(self, source):
-        tab = self.tab()
+    def open_quick(self, source, *, tab=None):
+        tab = self.tab() if tab is None else tab
         if tab.quick and not self.confirm([tab.quick]):  # replacing a modified quick view asks first
             return None
         pane = self._open_pane(source)
         if pane is None:
             return None
         if tab.quick:
-            self.close_quick(ask=False)
+            old_quick = tab.quick
+            tab.close_quick()
+            self._evict_closed([old_quick])
         pane.quick_layout_toggled.connect(self.toggle_quick_layout)
         pane.promote_requested.connect(self.promote_quick)
         pane.close_requested.connect(self.close_quick)
@@ -416,7 +528,9 @@ class MainWindow(QMainWindow):
     def close_quick(self, ask=True):
         tab = self.tab()
         if tab and tab.quick and (not ask or self.confirm([tab.quick])):
+            old_quick = tab.quick
             tab.close_quick()
+            self._evict_closed([old_quick])
             self.refresh()
 
     def toggle_quick_layout(self):
@@ -446,21 +560,13 @@ class MainWindow(QMainWindow):
 
     def sync_zoom_label(self):
         pane = self.tab().main if self.tab() else None
-        if hasattr(self, "fit_action"):
-            text = "Fit width" if not pane or pane.view.fit else f"{round(pane.view.zoom * 100)}%"
-            if btn := self.main_bar.widgetForAction(self.fit_action):
-                btn.setAccessibleName("Main paper: fit width")
-                reserve_zoom_width(self.fit_action, btn, text)
+        text = "Fit width" if not pane or pane.view.fit else f"{round(pane.view.zoom * 100)}%"
+        if btn := self.main_bar.widgetForAction(self.fit_action):
+            reserve_zoom_width(self.fit_action, btn, text)
 
     # ---- save state -----------------------------------------------------------------------
-    def refresh(self, *_):
-        """Recompute locks, tab labels, window title and status line from the documents."""
-        panes = self.all_panes()
-        for pane in panes:
-            locked = locked_by_other(pane, panes)
-            if pane.view.locked and not locked:
-                pane.view.reload()  # the other view saved: this one showed an older version
-            pane.set_locked(locked)
+    def refresh_save_state(self, *_):
+        """Lightweight update of tab markers, save button, status bar, and window title."""
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
             state = min((p.state for p in tab.panes()), key=WORST_FIRST.index)
@@ -472,21 +578,12 @@ class MainWindow(QMainWindow):
             for side in (QTabBar.LeftSide, QTabBar.RightSide):
                 if button := self.tabs.tabBar().tabButton(i, side):
                     button.setAccessibleName(f"Close {tab.title}")
-        if self.annotation_bar is not None:  # refresh can run while the window is being built
-            self.annotation_bar.refresh()
-        self._update_columns()
-        self.refreshed.emit()
-        self.sync_zoom_label()
         pane = self.pane()
         self.reader_stack.setCurrentWidget(self.tabs if pane else self.welcome)
         dirty = bool(pane and pane.modified and not pane.view.locked)
-        if hasattr(self, "save_action"):
-            self.save_action.setEnabled(dirty)
-            if save_btn := self.main_bar.widgetForAction(self.save_action):
-                if save_btn.property("dirty") != dirty:
-                    save_btn.setProperty("dirty", dirty)
-                    save_btn.style().unpolish(save_btn)
-                    save_btn.style().polish(save_btn)
+        self.save_action.setEnabled(dirty)
+        if save_btn := self.main_bar.widgetForAction(self.save_action):
+            set_props(save_btn, dirty=dirty)
         if pane is None:
             self.setWindowTitle("PaperAssist")
             self.state_label.clear()
@@ -499,6 +596,28 @@ class MainWindow(QMainWindow):
         self.state_label.setText(f"{pane.title} — {detail}")
         marker = MARKERS.get(pane.state, "").strip()
         self.setWindowTitle(f"{marker} {pane.title} — PaperAssist".strip() if marker else f"{pane.title} — PaperAssist")
+
+    def refresh(self, *_):
+        """Recompute locks, columns, toolbars, tab labels, window title and status line."""
+        panes = self.all_panes()
+        for pane in panes:
+            locked = locked_by_other(pane, panes)
+            if pane.view.locked and not locked:
+                try:
+                    pane.view.reload()  # the other view saved: this one showed an older version
+                except (OSError, ValueError) as error:
+                    self.statusBar().showMessage(f"Could not reload {pane.title}: {error}", 8000)
+                    continue
+            pane.set_locked(locked)
+            if pane.quick:
+                pane.refresh_navigation()
+        self.refresh_save_state()
+        if self.annotation_bar is not None:
+            self.annotation_bar.refresh()
+        self._update_columns()
+        self.page_field.show_page(self.main_view())
+        self.sync_zoom_label()
+        self.refreshed.emit()
 
     def save(self):
         pane = self.pane()
@@ -516,6 +635,18 @@ class MainWindow(QMainWindow):
                             "Your changes are still open. Fix the problem and save again.")
 
     # ---- closing ----------------------------------------------------------------------------
+    def _evict_closed(self, closed_panes):
+        remaining = self.all_panes()
+        open_keys = {pane.key for pane in remaining}
+        open_docs = {pane.view.doc.source.document_id for pane in remaining if pane.view.doc.source.document_id is not None}
+        for pane in closed_panes:
+            if pane.key not in open_keys:
+                self.outlines.pop(pane.key, None)
+            doc_id = pane.view.doc.source.document_id
+            if doc_id is not None and doc_id not in open_docs:
+                self.details.evict(doc_id)
+                self.acquisition.evict(doc_id)
+
     def ask_decision(self, pane):
         box = QMessageBox(QMessageBox.Question, "Unsaved changes", f"Save changes to {pane.title}?",
                           QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, self)
@@ -547,9 +678,11 @@ class MainWindow(QMainWindow):
         tab = self.tabs.widget(index)
         if tab is None or not self.confirm(tab.panes()):
             return False
+        panes = tab.panes()
         self.tabs.removeTab(index)
-        for pane in tab.panes():
+        for pane in panes:
             pane.release()
+        self._evict_closed(panes)
         tab.deleteLater()
         self.refresh()
         return True

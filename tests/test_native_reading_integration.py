@@ -2,7 +2,7 @@
 from unittest.mock import patch
 
 from test_library_window import LibraryWindowCase
-from test_native_support import needs_qt, pdf_available
+from support import needs_qt, pdf_available
 
 if pdf_available:
     from paperassist.native.engine import Link, Rect

@@ -14,7 +14,7 @@ from paperassist import paths
 from paperassist.native import app as native_app
 from paperassist.native.window import MainWindow
 from paperassist.workspace import LibraryInUse, Workspace, library_lock
-from test_native_support import make_pdf
+from support import make_pdf
 
 
 def emit(kind, **values):

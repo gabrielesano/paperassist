@@ -5,34 +5,30 @@ from pathlib import Path
 import tempfile
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest.mock import patch
 
-from test_native_support import make_pdf, needs_qt, pdf_available
+from support import QtTestCase, make_pdf, needs_qt, pdf_available
 
 if pdf_available:
     from PySide6.QtCore import QCoreApplication, QEvent, QUrl
     from PySide6.QtGui import QFileOpenEvent
-    from PySide6.QtWidgets import QApplication
+    from paperassist.native.engine import Rect
     from paperassist.native.instance import InstanceServer, absolute_paths, forward, server_name
     from paperassist.native.open_files import FileOpenEvents, OpenFiles
-    from paperassist.native.renderer import RenderClient
     from paperassist.native.window import MainWindow
     from paperassist.workspace import Workspace, library_lock
-    from paperassist.native.engine import Rect
 
 
 @needs_qt
-class InstanceTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
+class InstanceTests(QtTestCase):
+    use_client = False
 
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        self.root = Path(folder.name).resolve()
+        super().setUp()
+        self.root = self.dir.resolve()
         patcher = patch('paperassist.native.instance.config_file', return_value=self.root / 'config.json')
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -173,22 +169,12 @@ with patch('paperassist.native.instance.config_file', return_value=Path(sys.argv
 
 
 @needs_qt
-class ManagedWindowOpeningTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
+class ManagedWindowOpeningTests(QtTestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        self.root = Path(folder.name).resolve()
-        patcher = patch('paperassist.paths.config_file', return_value=self.root / 'config.json')
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        super().setUp()
+        self.root = self.dir.resolve()
         self.workspace = Workspace(self.root / 'library')
         self.addCleanup(self.workspace.close)
-        self.client = RenderClient()
-        self.addCleanup(self.client.shutdown)
         self.window = MainWindow(self.client, self.workspace)
         self.window.acquisition.main_opened = lambda document_id: None
         self.window.file_opener = OpenFiles(self.window)
@@ -200,14 +186,7 @@ class ManagedWindowOpeningTests(unittest.TestCase):
         self.window.confirm = lambda panes: True
         self.window.close()
         self.window.deleteLater()
-        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-
-    def pump(self, until):
-        deadline = time.monotonic() + 10
-        while not until() and time.monotonic() < deadline:
-            self.app.processEvents()
-            time.sleep(.002)
-        self.assertTrue(until(), 'PDF opening did not finish')
+        self.flush_deletes()
 
     def test_reopening_selects_the_dirty_pane_and_retains_a_comment_draft(self):
         path = make_pdf(self.root / 'Original è.pdf', pages=2)
@@ -247,6 +226,47 @@ class ManagedWindowOpeningTests(unittest.TestCase):
         self.pump(lambda: not opener.busy)
         self.assertIs(self.window.pane(), pane)
         self.assertIn('Could not open PDF', self.window.statusBar().currentMessage())
+
+    def test_quick_view_targets_its_origin_while_another_tab_is_active(self):
+        library = self.workspace.library
+        first, second = [self.window.open_library_document(library.open_file(
+            make_pdf(self.root / f'main-{count}.pdf', pages=count))['id']) for count in (2, 3)]
+        old_quick = self.window.open_library_document_in_quick_view(first.main.view.doc.source.document_id)
+        self.window.tabs.setCurrentWidget(first)
+        preview = make_pdf(self.root / 'preview.pdf', pages=5)
+        entered, release = threading.Event(), threading.Event()
+        importer = library.open_file
+
+        def import_preview(path):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('Timed out waiting for the tab switch')
+            return importer(path)
+
+        opener = self.window.file_opener
+        with patch.object(library, 'open_file', side_effect=import_preview):
+            opener.receive([str(preview)], quick=True)
+            try:
+                self.assertTrue(entered.wait(3))
+                self.window.tabs.setCurrentWidget(second)
+            finally:
+                release.set()
+            self.pump(lambda: not opener.busy)
+        self.assertIs(self.window.tab(), second)
+        self.assertIs(second.quick, old_quick)
+        self.assertEqual(len(first.quick.view.doc), 5)
+
+    def test_closing_the_quick_view_origin_leaves_the_import_available_in_library(self):
+        library = self.workspace.library
+        origin = self.window.open_library_document(library.open_file(make_pdf(self.root / 'origin.pdf'))['id'])
+        preview = make_pdf(self.root / 'preview.pdf', pages=2)
+        opener = self.window.file_opener
+        opener.receive([str(preview)], quick=True)
+        self.assertTrue(self.window.close_tab(self.window.tabs.indexOf(origin)))
+        self.pump(lambda: not opener.busy)
+        self.assertEqual(self.window.tabs.count(), 0)
+        self.assertEqual(len(library.list_documents()), 2)
+        self.assertIn('tab was closed', self.window.statusBar().currentMessage())
 
     def test_unreadable_pdf_error_is_not_replaced_with_a_success_message(self):
         path = self.root / 'broken.pdf'

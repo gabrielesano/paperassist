@@ -1,5 +1,4 @@
 """The references column: the main paper's bibliography, filterable, with local availability."""
-import unicodedata
 import weakref
 from html import escape
 
@@ -10,12 +9,13 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListView, QListW
                                QStyleOptionButton, QStyleOptionViewItem, QVBoxLayout, QWidget, QSizePolicy)
 
 from paperassist import references
+from paperassist.citation import fold
+from paperassist.citations import bibliography_destination, citation_matches, next_citation_index
 
 from .acquisition import reference_status, status_tone
-from .citations import (bibliography_destination, citation_matches, citation_position, next_citation_index,
-                        reading_position, reveal_citation)
+from .citations import citation_position, reading_position, reveal_citation
 from .jobs import JobWatcher
-from .theme import FlowLayout, INK, LINE, TEAL, TONE_NEUTRAL, reference_palette
+from .theme import FlowLayout, INK, LINE, TEAL, TONE_NEUTRAL, reference_palette, reference_tone, set_props
 
 SHOWN_CHARS = 240  # one bibliography entry can run to a page; the tooltip keeps the whole text
 PAD_X = 11
@@ -46,11 +46,6 @@ def _load_or_analyze(library, document_id):
     return references.analyze(library, document_id) if payload["status"] == "not_analyzed" else payload
 
 
-def fold(text):
-    """Case- and accent-insensitive, so "Antolín" is found by typing "antolin"."""
-    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.category(c).startswith("M")).lower()
-
-
 def reference_matcher(query):
     """Every word must match somewhere in the entry, in any order."""
     words = fold(query).split()
@@ -67,32 +62,33 @@ class CardDelegate(QStyledItemDelegate):
     def __init__(self, view):
         super().__init__(view)
         self.view = view
+        self._font_cache = None  # (font_key, meta_font, title_font, title_metrics, meta_line, body_line)
 
     def _lines(self, index):
         title, count, status = index.data().split("\n")
         return title, count, status
 
-    def _fonts(self, base):
+    def _typography(self, base):
+        key = base.toString()
+        if self._font_cache is not None and self._font_cache[0] == key:
+            return self._font_cache[1:]
         meta = QFont(base)
         meta.setBold(True)
         title = QFont(base)
         title.setWeight(QFont.DemiBold)
-        return meta, title
-
-    def _heights(self, base_font, width, title):
-        meta_font, title_font = self._fonts(base_font)
-        title_metrics = QFontMetrics(title_font)
-        meta_metrics = QFontMetrics(meta_font)
-        body_metrics = QFontMetrics(base_font)
-        wrapped = title_metrics.boundingRect(QRect(0, 0, width, 10000), Qt.TextWordWrap, title).height()
-        return wrapped, meta_metrics.lineSpacing(), body_metrics.lineSpacing()
+        title_metrics = QFontMetrics(title)
+        meta_line = QFontMetrics(meta).lineSpacing()
+        body_line = QFontMetrics(base).lineSpacing()
+        self._font_cache = (key, meta, title, title_metrics, meta_line, body_line)
+        return meta, title, title_metrics, meta_line, body_line
 
     def sizeHint(self, option, index):
         if (expanded := index.data(Qt.SizeHintRole)) is not None:  # set while the card holds its widgets
             return expanded
         width = max(self.view.viewport().width() - PAD_X - 8, 40)
         title, _, _ = self._lines(index)
-        wrapped, meta_line, status_line = self._heights(option.font, width, title)
+        _, _, title_metrics, meta_line, status_line = self._typography(option.font)
+        wrapped = title_metrics.boundingRect(QRect(0, 0, width, 10000), Qt.TextWordWrap, title).height()
         return QSize(width + PAD_X + 8, wrapped + meta_line + status_line + 2 * PAD_Y + 6)
 
     def paint(self, painter, option, index):
@@ -112,8 +108,8 @@ class CardDelegate(QStyledItemDelegate):
 
         title, count, status = self._lines(index)
         area = option.rect.adjusted(PAD_X, PAD_Y, -8, -PAD_Y)
-        meta_font, title_font = self._fonts(option.font)
-        wrapped, meta_line, status_line = self._heights(option.font, area.width(), title)
+        meta_font, title_font, title_metrics, meta_line, status_line = self._typography(option.font)
+        wrapped = title_metrics.boundingRect(QRect(0, 0, area.width(), 10000), Qt.TextWordWrap, title).height()
 
         top = area.top()
         painter.setFont(meta_font)
@@ -153,12 +149,12 @@ class Card(QWidget):
 class ReferencesPanel(QWidget):
     open_requested = Signal(int)  # id of a reference's PDF that is in the library
     references_loaded = Signal(int, object)
-    refs_changed = Signal(int, object)
     reveal_requested = Signal()  # a citation needs the right column, possibly in Comments mode
 
     def __init__(self, workspace):
         super().__init__()
-        self.workspace, self.document_id, self.refs = workspace, None, []
+        self.workspace, self.document_id = workspace, None
+        self._refs, self._refs_by_id = [], {}
         self.view, self.acquisition = None, None
         self.loaded = {}
         self.series, self.located = weakref.WeakKeyDictionary(), weakref.WeakKeyDictionary()
@@ -226,6 +222,15 @@ class ReferencesPanel(QWidget):
         self._set_busy(False)
         self._set_actions_visible(False)
 
+    @property
+    def refs(self):
+        return self._refs
+
+    @refs.setter
+    def refs(self, value):
+        self._refs = value
+        self._refs_by_id = {ref["id"]: ref for ref in value}
+
     def _set_actions_visible(self, visible):
         self.acquire.setVisible(visible)
         self.repair.setVisible(visible)
@@ -271,6 +276,14 @@ class ReferencesPanel(QWidget):
         self.view = view
         if view is not None:
             view.internal_link_handler = lambda link, target=weakref.ref(view): self._citation_link(target(), link)
+
+    def evict(self, document_id):
+        """Drop per-document cached bibliography state when its last tab closes."""
+        self.loaded.pop(document_id, None)
+        self.filters.pop(document_id, None)
+        self.revisions.pop(document_id, None)
+        self.pending_reload.discard(document_id)
+        self.followed_citations = {pair for pair in self.followed_citations if pair[0] != document_id}
 
     def reload(self, document_id):
         self._invalidate_citations(document_id)
@@ -319,7 +332,8 @@ class ReferencesPanel(QWidget):
         cached = self.loaded.get(document_id)
         if (cached and cached.get("extraction_version") == references.EXTRACTION_VERSION
                 and cached.get("destination_version") == references.DESTINATION_VERSION):
-            self.refs, self.payload_status = cached["references"], cached["status"]
+            self.refs = cached["references"]
+            self.payload_status = cached["status"]
             self._fill()
             self.references_loaded.emit(document_id, self.refs)
             return
@@ -347,8 +361,6 @@ class ReferencesPanel(QWidget):
         return f"{label}{text[:SHOWN_CHARS]}\n{self._count(ref)}\n{reference_status(ref)}"
 
     def _fill(self):
-        if self.acquisition:
-            self.acquisition.set_reference_data(self.document_id, self.refs, self.payload_status)
         matches = reference_matcher(self.filter.text())
         self.list.clear()
         self.analysis_note.setVisible(self.payload_status == "partial")
@@ -384,7 +396,7 @@ class ReferencesPanel(QWidget):
                      if self.list.item(i).data(Qt.UserRole + 1) == ref_id), None)
 
     def _ref(self, ref_id):
-        return next((ref for ref in self.refs if ref["id"] == ref_id), None)
+        return self._refs_by_id.get(ref_id)
 
     def _expand(self, item, focus=False):
         """Only the card being worked on gets buttons; the others stay painted text."""
@@ -396,12 +408,8 @@ class ReferencesPanel(QWidget):
         self.expanded = ref["id"]
         self.list.setCurrentItem(item)
         if self.list.itemWidget(item) is None:
-            border_hex, fill_hex, _ = reference_palette(ref)
             card = Card()
-            card.setStyleSheet(
-                f"QWidget#expanded-card {{ background: {fill_hex}; border: 1px solid #7e968d; "
-                f"border-left: 3px solid {border_hex}; }}"
-            )
+            set_props(card, tone=reference_tone(ref))
             card.collapse_requested.connect(self._collapse_current)
             layout = QVBoxLayout(card)
             layout.setContentsMargins(PAD_X, PAD_Y, 8, PAD_Y)
@@ -471,6 +479,8 @@ class ReferencesPanel(QWidget):
         for index in range(self.list.count()):
             item = self.list.item(index)
             ref = self._ref(item.data(Qt.UserRole + 1))
+            if ref is None:
+                continue
             item.setText(self._text(ref))
             if ref["id"] == self.expanded and (card := self.list.itemWidget(item)):
                 card.count.setText(self._count(ref))
@@ -645,7 +655,8 @@ class ReferencesPanel(QWidget):
         self._invalidate_citations(document_id)
         self.loaded[document_id] = payload
         if document_id == self.document_id:
-            self.refs, self.payload_status = payload["references"], payload["status"]
+            self.refs = payload["references"]
+            self.payload_status = payload["status"]
             self._fill()
             if self.pending_citation:
                 _, target, link = self.pending_citation
@@ -653,7 +664,6 @@ class ReferencesPanel(QWidget):
                 if (view := target()) is not None and view is self.view and not self._citation_link(view, link):
                     self._message("This citation was not found among the extracted references.")
         self.references_loaded.emit(document_id, payload["references"])
-        self.refs_changed.emit(document_id, payload["references"])
 
     def close(self):
         for watcher in self.analyzing.values():

@@ -159,14 +159,33 @@ def detect_margin_line_numbers(words, page_width):
 class PdfDocument:
     def __init__(self, source):
         self.source = source
-        self.pdf = source.open()
-        self.sizes = self.pdf.sizes
+        self._pdf = source.open()
+        self.sizes = self._pdf.sizes
         self.state, self.error = SaveState.SAVED, ""
-        self.pending = {}  # page -> highlighted rects the render process has not drawn yet
         self._words, self._links, self._line_numbers = {}, {}, {}
         self._undo, self._redo = [], []
         self._saved = {}  # page -> annotation state at the last save, for every page edited since
         self._annotations = {}
+
+    @property
+    def pdf(self):
+        if self._pdf is None:
+            self._pdf = self.source.open()
+        return self._pdf
+
+    @pdf.setter
+    def pdf(self, value):
+        self._pdf = value
+
+    def hibernate(self):
+        """Release the UI-side PDF handle and text caches while an unmodified tab is hidden."""
+        if not self.modified and not self._undo and not self._redo and self._pdf is not None:
+            self._pdf.close()
+            self._pdf = None
+            self._words.clear()
+            self._links.clear()
+            self._line_numbers.clear()
+            self._annotations.clear()
 
     def __len__(self):
         return len(self.sizes)
@@ -266,9 +285,12 @@ class PdfDocument:
 
     def _remember_saved(self, pages):
         # A page that was not edited since the last save still shows its saved annotations.
-        for page in pages:
-            if page not in self._saved:
-                self._saved[page] = self._state(page)
+        unseen = [page for page in pages if page not in self._saved]
+        missing = [page for page in unseen if page not in self._annotations]
+        if missing:
+            self._annotations.update(self.pdf.annotations_for_pages(missing))
+        for page in unseen:
+            self._saved[page] = self._state(page)
 
     def _change(self, pages, apply):
         self._remember_saved(pages)
@@ -277,11 +299,13 @@ class PdfDocument:
         # Only offsets are retained: every previous revision is already a prefix of these bytes.
         self._undo.append((before, len(self.pdf.data), pages))
         self._redo.clear()
-        self._changed()
+        self._changed(pages)
 
-    def _changed(self):
+    def _changed(self, pages):
         # Like the web reader's serialized hash: changing something back is not a change.
         self._annotations.clear()
+        if len(pages) > 1:
+            self._annotations.update(self.pdf.annotations_for_pages(self._saved))
         clean = all(same(self._state(page), saved) for page, saved in self._saved.items())
         self.state = SaveState.SAVED if clean else SaveState.UNSAVED
         self.error = ''
@@ -289,13 +313,10 @@ class PdfDocument:
     def add_highlight(self, page, rects, color=None):
         options = {} if color is None else {'color': color}
         self._change([page], lambda: self.pdf.add_highlight(page, rects, **options))
-        self.pending.setdefault(page, []).extend(rects)
 
     def add_highlights(self, pages, color):
-        def apply():
-            for page, rects in pages.items():
-                self.pdf.add_highlight(page, rects, color=color)
-        self._change(list(pages), apply)
+        if pages:
+            self._change(list(pages), lambda: self.pdf.add_highlights(pages, color))
 
     def add_ink(self, page, strokes, color=(0, 0, 0), width=2, freehand=False):
         self._change([page], lambda: self.pdf.add_ink(page, strokes, color, width, freehand))
@@ -334,8 +355,7 @@ class PdfDocument:
         self.pdf.restore_annotations(self.pdf.data[:entry[revision]], entry[2])
         source.pop()
         target.append(entry)
-        self.pending.clear()
-        self._changed()
+        self._changed(entry[2])
         return entry[2]
 
     def save(self, on_saving=lambda: None):
@@ -344,7 +364,6 @@ class PdfDocument:
         on_saving()
         try:
             self.source.save(self.pdf)
-            self.reload(keep_history=True)
         except Exception as error:  # the disk, permissions or the PDF engine: all are shown to the user
             self.state, self.error = SaveState.FAILED, str(error) or type(error).__name__
             return False
@@ -354,12 +373,13 @@ class PdfDocument:
 
     def reload(self, keep_history=False):
         """Read the saved file again."""
-        previous = self.pdf.data
+        previous = self._pdf.data if self._pdf is not None else None
         replacement = self.source.open()
-        self.pdf.close()
-        self.pdf = replacement
+        if self._pdf is not None:
+            self._pdf.close()
+        self._pdf = replacement
         self._annotations.clear()
-        if not keep_history or self.pdf.data != previous:
+        if not keep_history or self._pdf.data != previous:
             self._undo.clear()
             self._redo.clear()
             self._saved.clear()
@@ -368,4 +388,6 @@ class PdfDocument:
         self._line_numbers.clear()
 
     def close(self):
-        self.pdf.close()
+        if self._pdf is not None:
+            self._pdf.close()
+            self._pdf = None

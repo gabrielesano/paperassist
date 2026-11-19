@@ -39,9 +39,7 @@ class NativeBootstrapTests(unittest.TestCase):
                 output = io.StringIO()
                 with patch.object(entry.multiprocessing, "freeze_support"), \
                         patch.object(entry, "import_module", side_effect=load), redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as result:
-                        entry.main()
-                self.assertEqual(result.exception.code, 1)
+                    self.assertEqual(entry.main(), 1)
                 self.assertIn(missing, output.getvalue())
                 self.assertIn('python -m pip install -e .', output.getvalue())
                 self.assertNotIn("Traceback", output.getvalue())
@@ -52,9 +50,7 @@ class NativeBootstrapTests(unittest.TestCase):
                 output = io.StringIO()
                 with patch.object(entry.multiprocessing, "freeze_support"), \
                         patch.object(entry, "import_module", side_effect=error), redirect_stderr(output):
-                    with self.assertRaises(SystemExit) as result:
-                        entry.main()
-                self.assertEqual(result.exception.code, 1)
+                    self.assertEqual(entry.main(), 1)
                 self.assertIn(str(error), output.getvalue())
                 self.assertNotIn("Traceback", output.getvalue())
 
@@ -63,8 +59,7 @@ class NativeBootstrapTests(unittest.TestCase):
         with patch.object(entry.multiprocessing, "freeze_support"), \
                 patch.object(entry, "import_module", side_effect=ImportError("Missing Qt")), \
                 patch.object(sys, "frozen", True, create=True), redirect_stderr(output):
-            with self.assertRaises(SystemExit):
-                entry.main()
+            self.assertEqual(entry.main(), 1)
         self.assertIn("Reinstall a complete PaperAssist build", output.getvalue())
         self.assertNotIn("pip install", output.getvalue())
 

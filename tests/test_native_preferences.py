@@ -2,14 +2,12 @@
 from collections import Counter
 from importlib import metadata
 import io
-import tempfile
-import time
 import unittest
 import weakref
 from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import make_pdf, needs_qt, pdf_available
+from support import QtTestCase, make_pdf, needs_qt, pdf_available
 
 if pdf_available:
     import paperassist
@@ -22,12 +20,12 @@ if pdf_available:
     )
 
     from paperassist import paths, references, settings
-    from paperassist.native import app as native_app, app_menu, preferences_dialog, shortcuts
+    from paperassist.native import app as native_app, preferences_dialog
     from paperassist.native.engine import Rect
     from paperassist.native.layout import MARGIN
-    from paperassist.native.renderer import RenderClient
     from paperassist.native.source import FileSource
     from paperassist.native.sources_dialog import SourcesDialog
+    from paperassist.native.theme import APP_STYLE, build_stylesheet
     from paperassist.native.window import MainWindow
     from paperassist.workspace import LibraryInUse, Workspace, library_lock
 
@@ -46,24 +44,7 @@ def _installed_version_and_license(distributions):
 
 
 @needs_qt
-class NativePreferencesTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
-    def setUp(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        self.dir = Path(folder.name).resolve()
-        config = patch("paperassist.paths.config_file", return_value=self.dir / "config.json")
-        config.start()
-        self.addCleanup(config.stop)
-
+class NativePreferencesTests(QtTestCase):
     def assert_buttons_fit(self, root, context):
         checked = 0
         for cls in (QPushButton, QToolButton):
@@ -77,10 +58,8 @@ class NativePreferencesTests(unittest.TestCase):
                 checked += 1
         return checked
 
-    def make_window(self, workspace=None, install_menu=True, size=(1200, 800)):
+    def make_window(self, workspace=None, size=(1200, 800)):
         window = MainWindow(self.client, workspace)
-        if install_menu:
-            app_menu.install(window)
         window.resize(*size)
         window.show()
         window.activateWindow()
@@ -91,20 +70,7 @@ class NativePreferencesTests(unittest.TestCase):
     def close_window(self, window):
         if getattr(window, "app_menu", None):
             window.app_menu.close()
-        for dialog in window.findChildren(QDialog):
-            dialog.reject()
-        for pane in window.all_panes():
-            pane.release()
-        window.hide()
-        window.deleteLater()
-        self.app.processEvents()
-
-    def pump(self, until=None, seconds=0.15):
-        end = time.perf_counter() + (10 if until else seconds)
-        while time.perf_counter() < end and not (until and until()):
-            self.app.processEvents()
-            time.sleep(0.002)
-        self.assertTrue(until() if until else True, "timed out")
+        self.cleanup_window(window)
 
     def open_pdf(self, window, name="paper", **kwargs):
         path = make_pdf(self.dir / f"{self.id()}-{name}.pdf", **kwargs)
@@ -116,12 +82,10 @@ class NativePreferencesTests(unittest.TestCase):
         return next(bar for bar in window.findChildren(QToolBar) if bar.windowTitle() == "Main")
 
     # ---- brand menu, entries and shortcuts ------------------------------------------------
-    def test_single_install_wires_web_menu_entries_and_has_no_shortcut_conflicts(self):
+    def test_single_install_wires_menu_entries_and_has_no_shortcut_conflicts(self):
         workspace = Workspace(self.dir / "menu-library")
         self.addCleanup(workspace.close)
-        window = self.make_window(workspace=workspace, install_menu=False)
-        shortcuts.install(window)
-        app_menu.install(window)
+        window = self.make_window(workspace=workspace)
         self.pump()
 
         bar = self.main_toolbar(window)
@@ -279,25 +243,18 @@ class NativePreferencesTests(unittest.TestCase):
         for invalid in (None, "", "1.25", True, False, 0, -1, 1.3, 2.0):
             self.assertEqual(preferences_dialog.parse_zoom(invalid), 1)
 
-    def test_stylesheet_changes_made_after_install_survive_size_change_and_return_to_100(self):
+    def test_application_stylesheet_applies_zoom_and_returns_to_base_at_100(self):
         window = self.make_window()
-        base = window.styleSheet()
-        after_install = "\n#added-after-install { border-bottom: 1px solid #123456; }"
-        window.setStyleSheet(base + after_install)
-
         window.show_preferences()
         self.pump()
         dialog = window.preferences_dialog
+        self.assertEqual(self.app.styleSheet(), APP_STYLE)
         dialog.size_combo.setCurrentIndex(5)  # 150%
         self.pump()
-        self.assertIn(after_install, window.styleSheet())
-
-        while_scaled = "\n#added-while-scaled { color: #654321; }"
-        window.setStyleSheet(window.styleSheet() + while_scaled)
-
+        self.assertEqual(self.app.styleSheet(), build_stylesheet(dialog.base_font, 1.5))
         dialog.size_combo.setCurrentIndex(2)  # 100%
         self.pump()
-        self.assertEqual(window.styleSheet(), base + after_install + while_scaled)
+        self.assertEqual(self.app.styleSheet(), APP_STYLE)
 
     def test_round_trip_150_to_100_restores_exact_original_fonts_and_sizes(self):
         window = self.make_window()
@@ -619,7 +576,11 @@ class NativePreferencesTests(unittest.TestCase):
         seen = {}
 
         def drive_first_window():
-            active = next(w for w in self.app.topLevelWidgets() if isinstance(w, MainWindow) and w.isVisible())
+            windows = [w for w in self.app.topLevelWidgets() if isinstance(w, MainWindow) and w.isVisible()]
+            if not windows:
+                QTimer.singleShot(20, drive_first_window)
+                return
+            active = windows[0]
             seen["first_window"] = weakref.ref(active)
             seen["first_workspace"] = active.workspace
             seen["first_dir"] = active.workspace.data_dir

@@ -452,9 +452,12 @@ class ReadableNameTests(unittest.TestCase):
         doc = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')
         self.legacy(doc['id'])
         with self.library._connect() as db:
+            db.execute('DROP INDEX documents_stored_name')
             db.execute('ALTER TABLE documents DROP COLUMN stored_name')
         library = Library(self.root)
-        self.assertEqual(library.get_path(doc['id'], False).name, 'paper.pdf')
+        path = library.get_path(doc['id'], False)
+        self.assertEqual(path.name, 'paper.pdf')
+        self.assertEqual(library.open_file(path)['id'], doc['id'])
 
     def test_repairing_a_missing_original_gives_it_a_readable_name(self):
         doc = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')

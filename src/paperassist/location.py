@@ -8,8 +8,10 @@ import os
 import shutil
 from pathlib import Path
 
-# Markers of a running server; the copy is a plain library that no server holds yet.
-SKIP = {'.server.lock', '.server.json'}
+from .paths import format_size
+
+# Lock marker of an active instance; the copy is a plain library that no instance holds yet.
+SKIP = {'.server.lock'}
 ROOT = Path('.')
 MISMATCH = 'The copy does not match the original, or the library changed while it was copied. Nothing was changed.'
 NOT_A_FOLDER = 'Enter the full path of a folder.'
@@ -29,14 +31,6 @@ def _tree(root):
             if relative != ROOT or name not in SKIP:
                 files[relative / name] = (Path(folder) / name).stat().st_size
     return folders, files
-
-
-def _size(count):
-    for unit in ('bytes', 'KB', 'MB'):
-        if count < 1000:
-            return f'{count:.0f} {unit}'
-        count /= 1000
-    return f'{count:.1f} GB'
 
 
 def classify(current, text):
@@ -63,7 +57,7 @@ def classify(current, text):
         return _answer('refuse', f'That folder cannot be read: {error.strerror or error}.')
     except RuntimeError:
         return _answer('refuse', NOT_A_FOLDER)
-    return _answer('move', f'Move the library to {target}? PaperAssist copies {len(files)} files ({_size(sum(files.values()))}), '
+    return _answer('move', f'Move the library to {target}? PaperAssist copies {len(files)} files ({format_size(sum(files.values()))}), '
                    'checks the copy and then uses it. The current folder is kept; you can delete it yourself afterwards.',
                    files=len(files), bytes=sum(files.values()))
 

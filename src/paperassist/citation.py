@@ -4,6 +4,27 @@ import html
 import re
 import unicodedata
 
+_RANGE_DASHES = '–—−-'
+_NUMBER_GROUP = rf'\d+(?:\s*[,;{_RANGE_DASHES}]\s*\d+)*'
+NUMERIC_MARKER = re.compile(rf'\[\s*({_NUMBER_GROUP})\s*\]')
+_RANGE_SEPARATOR = re.compile(rf'\s*[{_RANGE_DASHES}]\s*')
+
+
+def citation_numbers(group):
+    """Expand a numeric marker's contents in order, once per reference number."""
+    numbers = {}
+    for part in re.split(r'\s*[,;]\s*', group):
+        try:
+            ends = [int(value) for value in _RANGE_SEPARATOR.split(part)]
+        except ValueError:
+            return []
+        first, last = ends[0], ends[-1]
+        if len(ends) > 2 or not 0 <= last - first <= 100:
+            return []
+        numbers.update(dict.fromkeys(range(first, last + 1)))
+    return list(numbers)
+
+
 # ADS-style journal codes and the spellings found in reference lists, page headers
 # and publisher metadata. Periods and spacing are ignored when matching.
 JOURNALS = {
@@ -141,10 +162,51 @@ def describe(fingerprint):
     return f'{_DISPLAY[journal]} {volume}, {article} ({year})'
 
 
+DOI = re.compile(r'10\.\d{4,9}/[-._;()/:A-Za-z0-9]+')
+ARXIV_ID_PATTERN = r'(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z]{2})?/\d{7})(?:v\d+)?'
+ARXIV_ID = re.compile(ARXIV_ID_PATTERN, re.I)
+ARXIV_REF = re.compile(rf'(?:\barxiv\s*:\s*|(?:https?://(?:www\.)?)?arxiv\.org/(?:abs|pdf)/)({ARXIV_ID_PATTERN})', re.I)
+
+
+def normalize_doi(value, *, strict=True):
+    """Strip DOI URL/prefix and lowercase; return None when empty (or invalid if strict=False)."""
+    value = re.sub(r'^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)', '', str(value or '').strip(), flags=re.I).strip().lower()
+    if not value:
+        return None
+    if not re.fullmatch(r'10\.\d{4,9}/\S+', value):
+        if strict:
+            raise ValueError('Invalid DOI')
+        return None
+    return value
+
+
+def strip_arxiv_version(identifier):
+    return re.sub(r'v\d+$', '', str(identifier or '').strip().lower())
+
+
+def arxiv_id(ref):
+    raw = ' '.join(str(ref.get(key) or '') for key in ('arxiv_id', 'title', 'raw'))
+    if match := ARXIV_REF.search(raw):
+        return match.group(1)
+    bare = str(ref.get('arxiv_id') or '').strip()
+    return bare if ARXIV_ID.fullmatch(bare) else ''
+
+
 def fold(text):
     """Case-, accent- and ligature-insensitive form for comparing names."""
     text = unicodedata.normalize('NFKD', unicodedata.normalize('NFKC', text or ''))
     return ' '.join(''.join(c for c in text if not unicodedata.combining(c)).casefold().split())
+
+
+def squash(text):
+    """Letters and digits only, folded, for matching text across line breaks and small caps."""
+    return re.sub(r'[^a-z0-9]', '', fold(text))
+
+
+def has_surname(text, surname):
+    """Whether `surname` appears as a whole word in `text` (case- and accent-insensitive)."""
+    target = fold(surname)
+    return bool(target) and bool(re.search(r'(?<!\w)' + re.escape(target) + r'(?!\w)', fold(text)))
 
 
 def same_surname(a, b):

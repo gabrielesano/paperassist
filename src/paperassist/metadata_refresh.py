@@ -3,6 +3,7 @@
 from . import arxiv_metadata, crossref_metadata, ocr
 from .library import manual_fields
 from .metadata import extract_ocr_metadata, useful
+from .settings import PROVIDER_NAMES
 
 OCR_MODES = ("off", "auto", "force")
 # A title plus authors needs roughly 100 characters; a born-digital first page has far more
@@ -28,7 +29,7 @@ def _lookup(document, cfg, cancel, progress):
             if record:
                 return record, errors
         except Exception as error:
-            errors.append(f"{'arXiv' if name == 'arxiv' else 'Crossref'}: {error}")
+            errors.append(f"{PROVIDER_NAMES.get(name, name)}: {error}")
     return None, errors
 
 
@@ -120,7 +121,7 @@ def refresh(library, document_ids, cfg, online, job, cancel, ocr_mode="auto"):
                     document = library.apply_verified(document_id, record, refresh=True)
                     result["verified"] += document["metadata_status"] == "verified"
                     status = "verified"
-                    provider = "arXiv" if record["provider"].lower() == "arxiv" else "Crossref"
+                    provider = PROVIDER_NAMES.get(record["provider"].lower(), record["provider"])
                     message = f"Verified using {provider}" + (f"; {kept}." if kept else ".")
                 elif errors and not cancel.is_set():
                     status, message = "failed", "Local data kept. " + "; ".join(errors)

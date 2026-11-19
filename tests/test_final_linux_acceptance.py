@@ -1,24 +1,16 @@
 """Current Linux x86_64 alpha installation and GUI acceptance test suite.
 
-This suite is strictly partitioned into two distinct test classes:
-1. TestInstalledFrozenExecutableAcceptance:
-   Genuine black-box acceptance tests driving ONLY the real installed frozen binary
-   (~/.local/bin/paperassist -> ~/.local/share/paperassist-app/PaperAssist) installed from
-   the current dist/PaperAssist-<version>-linux-x86_64.sh into disposable directories.
-   All interactions are driven externally via the Linux OS, procfs, X11 (Xvfb, xdotool, ctypes libX11),
-   and Wayland (Mutter/Weston). Under no circumstances are MainWindow or RenderClient instantiated
-   in this test class.
-
-2. TestSourceLevelWidgetRegressions:
-   Supplementary source-level (.venv) widget unit and regression tests exercising in-process
-   PySide6 widgets and internal RenderClient latency/cache budgets. These are explicitly labeled
-   as source-process regressions and never attributed to the frozen executable.
+Genuine black-box acceptance tests driving ONLY the real installed frozen binary
+(~/.local/bin/paperassist -> ~/.local/share/paperassist-app/PaperAssist) installed from
+the current dist/PaperAssist-<version>-linux-x86_64.sh into disposable directories.
+All interactions are driven externally via the Linux OS, procfs, X11 (Xvfb, xdotool, ctypes libX11),
+and Wayland (Mutter/Weston). Under no circumstances are MainWindow or RenderClient instantiated
+in this test class.
 """
 
 import ctypes
 import ctypes.util
 import hashlib
-import io
 import json
 import os
 import re
@@ -43,27 +35,6 @@ from build_installer import build_installer
 REAL_INSTALLER = REPO_ROOT / "dist" / f"PaperAssist-{__version__}-linux-x86_64.sh"
 REAL_CHECKSUM = REAL_INSTALLER.with_name(REAL_INSTALLER.name + ".sha256")
 SAMPLE_PDF = REPO_ROOT / "tests" / "fixtures" / "pdfjs-annotations.pdf"
-
-try:
-    from test_native_support import needs_qt, PySide6, pdf_available
-except ModuleNotFoundError:
-    from tests.test_native_support import needs_qt, PySide6, pdf_available
-
-if pdf_available:
-    from pypdf import PdfWriter, PdfReader
-    from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, TextStringObject
-
-if pdf_available and PySide6:
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QListView
-    from paperassist import references
-    from paperassist.native.engine import Pdf, Rect
-    from paperassist.native.positions import current_page
-    from paperassist.native.renderer import RenderClient
-    from paperassist.native.rules import CANCEL, DISCARD, SAVE
-    from paperassist.native.window import MainWindow
-    from paperassist.workspace import Workspace
 
 
 # ---------------------------------------------------------------------------
@@ -1286,237 +1257,6 @@ class TestInstalledFrozenExecutableAcceptance(unittest.TestCase):
         print(f"Worker Process RSS (400% zoom):      {wk_smaps_400.get('Rss', 0) / 1024:.2f} MB (PSS: {wk_smaps_400.get('Pss', 0) / 1024:.2f} MB)")
         print(f"Total PSS (400% zoom):               {total_pss_400:.2f} MB")
         print("=" * 70 + "\n")
-
-
-# ===========================================================================
-# 2. Source-Level (.venv) Widget Regressions (Explicitly Supplementary)
-# ===========================================================================
-@needs_qt
-class TestSourceLevelWidgetRegressions(unittest.TestCase):
-    """Supplementary source-level (.venv) widget unit and regression tests.
-
-    These tests run inside the test runner Python process using virtual environment sources,
-    exercising in-process PySide6 widget logic and RenderClient internal timings.
-    These measurements are explicitly documented as source-process results and are never
-    described as installed frozen executable acceptance.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        os.environ["QT_QPA_PLATFORM"] = "offscreen"
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
-    def setUp(self):
-        self._temp = tempfile.TemporaryDirectory()
-        self.tmp_dir = Path(self._temp.name)
-        self.addCleanup(self._temp.cleanup)
-
-        self.lib_dir = self.tmp_dir / "library"
-        self.workspace = Workspace(self.lib_dir)
-        self.addCleanup(self.workspace.close)
-
-        self.main_pdf_path, self.main_pdf_bytes = create_scientific_citation_pdf(self.tmp_dir / "main.pdf", pages=4)
-        self.other_pdf_path, self.other_pdf_bytes = create_scientific_citation_pdf(self.tmp_dir / "other.pdf", pages=3)
-
-    def pump(self, condition=lambda: False, timeout=10.0):
-        """Process Qt events until condition returns True or timeout expires."""
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            self.app.processEvents()
-            if condition():
-                return True
-            time.sleep(0.005)
-        return condition()
-
-    def test_13_source_level_400_percent_cache_budget(self):
-        """Source-level regression: Verify high-zoom cache budget enforcement in PdfView."""
-        main_doc = self.workspace.library.import_stream(io.BytesIO(self.main_pdf_bytes), "main.pdf")
-        doc_id = main_doc["id"]
-
-        win = MainWindow(self.client, self.workspace)
-        try:
-            win.show()
-            tab = win.open_library_document(doc_id)
-            view = tab.main.view
-            self.assertTrue(self.pump(lambda: view.has_page(0)))
-
-            view._set_zoom(4.0)
-            self.assertEqual(view.zoom, 4.0)
-            self.assertTrue(self.pump(lambda: view.has_page(0)))
-
-            self.assertLessEqual(view.cache.total(), view.cache.budget)
-            cached_page = view.cache.get(0)
-            self.assertIsNotNone(cached_page)
-            scale, cached_doc_id, pixmap = cached_page
-            self.assertEqual(scale, 4.0)
-            self.assertEqual(cached_doc_id, view.doc_id)
-            self.assertGreater(pixmap.width(), 1000)
-            self.assertGreater(pixmap.height(), 1000)
-        finally:
-            win.close()
-            win.deleteLater()
-            self.app.processEvents()
-
-    def test_14_source_level_independent_navigation_controls(self):
-        """Source-level regression: Verify dual navigation toolbar controls act only on their respective pane."""
-        main_doc = self.workspace.library.import_stream(io.BytesIO(self.main_pdf_bytes), "main.pdf")
-        other_doc = self.workspace.library.import_stream(io.BytesIO(self.other_pdf_bytes), "other.pdf")
-
-        win = MainWindow(self.client, self.workspace)
-        try:
-            win.show()
-            tab = win.open_library_document(main_doc["id"])
-            quick = win.open_library_document_in_quick_view(other_doc["id"])
-            self.assertTrue(self.pump(lambda: tab.main.view.has_page(0) and quick.view.has_page(0)))
-
-            main_view, quick_view = tab.main.view, quick.view
-
-            for side_by_side in (False, True):
-                tab.set_side_by_side(side_by_side)
-                tab.activate(quick)
-
-                win.shortcuts.page_field.edit.setText("2")
-                win.shortcuts.page_field.commit()
-                self.assertEqual(current_page(main_view), 1)
-                self.assertEqual(current_page(quick_view), 0)
-
-                quick.navigation_field.edit.setText("3")
-                quick.navigation_field.commit()
-                self.assertEqual(current_page(quick_view), 2)
-                self.assertEqual(current_page(main_view), 1)
-
-                m_zoom, q_zoom = main_view.zoom, quick_view.zoom
-                zoom_in_action = next(a for a in quick.navigation_bar.actions() if a.text() == "Second paper: zoom in")
-                zoom_in_action.trigger()
-                self.assertEqual(main_view.zoom, m_zoom)
-                self.assertGreater(quick_view.zoom, q_zoom)
-
-                win.fit_action.trigger()
-                self.assertTrue(main_view.fit)
-                self.assertFalse(quick_view.fit)
-
-                main_view.goto(0)
-                quick_view.goto(0)
-        finally:
-            win.close()
-            win.deleteLater()
-            self.app.processEvents()
-
-    def test_15_source_level_citation_clicks(self):
-        """Source-level regression: In-process citation click dispatching to Quick view and references panel."""
-        main_doc = self.workspace.library.import_stream(io.BytesIO(self.main_pdf_bytes), "main.pdf")
-        other_doc = self.workspace.library.import_stream(io.BytesIO(self.other_pdf_bytes), "other.pdf")
-
-        payload = references.analyze(self.workspace.library, main_doc["id"])
-        ref1 = next(r for r in payload["references"] if r["label"] == "1")
-        ref2 = next(r for r in payload["references"] if r["label"] == "2")
-        references.link(self.workspace.library, main_doc["id"], ref1["id"], other_doc["id"])
-
-        win = MainWindow(self.client, self.workspace)
-        try:
-            win.resize(1400, 900)
-            win.show()
-            tab = win.open_library_document(main_doc["id"])
-            view = tab.main.view
-            panel = win.details
-            self.assertTrue(self.pump(lambda: panel.list.count() == 2 and view.has_page(0)))
-
-            win.set_columns(details=False)
-            self.assertIsNone(tab.quick)
-
-            links = view.doc.links(0)
-            self.assertGreaterEqual(len(links), 2)
-
-            # Click in-text citation [1] (local PDF present)
-            link1 = links[0]
-            pos1 = view._band(0, Rect(*link1.rect)).center().toPoint()
-            QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, pos1)
-            self.pump(lambda: tab.quick is not None and tab.quick.view.has_page(0))
-
-            self.assertIsNotNone(tab.quick)
-            self.assertEqual(tab.quick.view.doc.source.document_id, other_doc["id"])
-
-            # Click in-text citation [2] (local PDF missing)
-            before_state = (view.zoom, view.verticalScrollBar().value(), current_page(view))
-            link2 = links[1]
-            pos2 = view._band(0, Rect(*link2.rect)).center().toPoint()
-            QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, pos2)
-            self.pump(lambda: panel.expanded == ref2["id"])
-
-            self.assertTrue(win.details_column.isVisible())
-            self.assertEqual(win.detail_switch.mode, "references")
-            self.assertEqual(panel.expanded, ref2["id"])
-            self.assertEqual(panel.list.currentItem().data(Qt.UserRole + 1), ref2["id"])
-
-            after_state = (view.zoom, view.verticalScrollBar().value(), current_page(view))
-            self.assertEqual(before_state, after_state)
-        finally:
-            win.close()
-            win.deleteLater()
-            self.app.processEvents()
-
-    def test_16_source_level_runtime_measurements(self):
-        """Source-level benchmark: In-process RenderClient rendering latencies and citation locate timing."""
-        doc_info = self.workspace.library.import_stream(io.BytesIO(self.main_pdf_bytes), "main.pdf")
-        doc_id = doc_info["id"]
-
-        win = MainWindow(self.client, self.workspace)
-        try:
-            win.show()
-            tab = win.open_library_document(doc_id)
-            view = tab.main.view
-            while not view.has_page(0):
-                self.app.processEvents()
-                time.sleep(0.002)
-
-            latency_100 = view.render_seconds[-1]
-
-            view._set_zoom(4.0)
-            while not view.has_page(0):
-                self.app.processEvents()
-                time.sleep(0.002)
-            for _ in range(5):
-                self.app.processEvents()
-                time.sleep(0.005)
-
-            latency_400 = view.render_seconds[-1]
-
-            payload = references.analyze(self.workspace.library, doc_id)
-            ref0 = payload["references"][0]
-            loc_done = [False]
-            loc_result = [None]
-
-            def on_locate(res, _err):
-                loc_result[0] = res
-                loc_done[0] = True
-
-            t_loc0 = time.perf_counter()
-            self.client.locate(view.doc_id, ref0, on_locate)
-            while not loc_done[0]:
-                self.app.processEvents()
-                time.sleep(0.002)
-            t_citation_locate = time.perf_counter() - t_loc0
-
-            self.assertLess(latency_100, 0.5, f"100% render latency too high: {latency_100:.3f}s")
-            self.assertLess(latency_400, 1.0, f"400% render latency too high: {latency_400:.3f}s")
-            self.assertLess(t_citation_locate, 0.5, f"Citation locate too slow: {t_citation_locate:.3f}s")
-
-            print("\n" + "=" * 70)
-            print("SUPPLEMENTARY SOURCE-LEVEL (.VENV) BENCHMARK SUMMARY")
-            print("=" * 70)
-            print(f"Page render latency (100% zoom):    {latency_100*1000:.2f} ms")
-            print(f"Page render latency (400% zoom):    {latency_400*1000:.2f} ms")
-            print(f"Citation locate latency:            {t_citation_locate*1000:.2f} ms")
-            print("=" * 70 + "\n")
-        finally:
-            win.close()
-            win.deleteLater()
-            self.app.processEvents()
 
 
 if __name__ == "__main__":

@@ -1,40 +1,27 @@
 """Metadata correction and import estimates in the native Library window, on disposable libraries."""
 import io
 import os
-import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import make_pdf, needs_qt, pdf_available
+from support import QtTestCase, make_pdf, needs_qt, pdf_available
 from test_ocr import needs_ocr, scan_pdf
 
 if pdf_available:
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
 
-    from paperassist.native.library_dialog import LibraryDialog, pdf_files, size_text
-    from paperassist.native.metadata_dialog import MetadataDialog
-    from paperassist.native.renderer import RenderClient
+    from paperassist.paths import format_size
+    from paperassist.native.library_dialog import LibraryDialog, MetadataDialog, pdf_files
     from paperassist.native.window import MainWindow
     from paperassist.workspace import Workspace
 
 
 @needs_qt
-class MetadataCase(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
+class MetadataCase(QtTestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        self.dir = Path(folder.name).resolve()
-        config = patch("paperassist.paths.config_file", return_value=self.dir / "config.json")
-        config.start()
-        self.addCleanup(config.stop)
+        super().setUp()
         self.workspace = Workspace(self.dir / "library")
         self.addCleanup(self.workspace.close)
         self.library = self.workspace.library
@@ -44,11 +31,7 @@ class MetadataCase(unittest.TestCase):
         return self.library.import_stream(io.BytesIO(path.read_bytes()), name), path
 
     def pump(self, until, seconds=10):
-        end = time.perf_counter() + seconds
-        while time.perf_counter() < end and not until():
-            self.app.processEvents()
-            time.sleep(0.002)
-        self.assertTrue(until(), "timed out")
+        return super().pump(until, timeout=seconds)
 
 
 class CorrectionTests(MetadataCase):
@@ -177,7 +160,7 @@ class LibraryDialogTests(MetadataCase):
         expected = sum(p.stat().st_size for p in (folder / "one.pdf", folder / "deep" / "TWO.PDF"))
         self.dialog.show()
         self.dialog.select_import([str(folder)])
-        self.assertIn(f"2 PDFs, {size_text(expected)}", self.dialog.estimate.text())
+        self.assertIn(f"2 PDFs, {format_size(expected)}", self.dialog.estimate.text())
         self.assertIn("extra storage", self.dialog.estimate.text())
         self.assertFalse(self.dialog.import_button.isEnabled())
         self.assertEqual(self.library.list_documents(), [])  # nothing is copied yet
@@ -262,7 +245,7 @@ class LibraryDialogTests(MetadataCase):
         self.assertEqual(sorted(p.name for p in pdf_files([folder])), ["TWO.PDF", "one.pdf"])
 
     def test_sizes_read_naturally(self):
-        self.assertEqual([size_text(n) for n in (12, 2048, 5 * 1024**2, 3 * 1024**3)], ["12 bytes", "2.0 KB", "5.0 MB", "3.0 GB"])
+        self.assertEqual([format_size(n) for n in (12, 2048, 5 * 1024**2, 3 * 1024**3)], ["12 bytes", "2.0 KB", "5.0 MB", "3.0 GB"])
 
     def test_single_import_can_open_a_new_or_duplicate_pdf_while_import_only_stays_in_library(self):
         path = make_pdf(self.dir / "single.pdf", pages=3)
@@ -347,15 +330,6 @@ class LibraryDialogTests(MetadataCase):
 
 
 class WindowRefreshTests(MetadataCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
     def test_a_correction_reaches_open_tabs_and_the_references_panel(self):
         document, _ = self.add("a.pdf", 3)
         window = MainWindow(self.client, self.workspace)

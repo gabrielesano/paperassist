@@ -88,3 +88,21 @@ class CitationTests(unittest.TestCase):
         self.assertEqual(publication('Bareford, P. K. 2015, RSPTA, 373, 20140266', '2015'), ['RSPTA', '373', '20140266', '2015'])
         thesis = 'Tam, K. V. 2014, PhD thesis, St Andrews Univ., http://hdl.handle.net/ 10023/6373'
         self.assertIsNone(generic_publication(thesis))
+
+    def test_shared_identifier_and_text_helpers(self):
+        from paperassist.citation import (ARXIV_ID, DOI, PARTICLES, arxiv_id, has_surname,
+                                          normalize_doi, squash, strip_arxiv_version)
+        self.assertEqual(normalize_doi('https://doi.org/10.1088/0004-637X/771/2/76'), '10.1088/0004-637x/771/2/76')
+        self.assertEqual(normalize_doi('doi: 10.1234/ABC'), '10.1234/abc')
+        self.assertIsNone(normalize_doi(''))
+        self.assertIsNone(normalize_doi('not-a-doi', strict=False))
+        with self.assertRaises(ValueError):
+            normalize_doi('not-a-doi')
+        self.assertEqual(DOI.findall('See 10.1234/abc.1 and 10.5678/xy'), ['10.1234/abc.1', '10.5678/xy'])
+        self.assertTrue(ARXIV_ID.fullmatch('2401.12345v2'))
+        self.assertEqual(strip_arxiv_version('2401.12345V2'), '2401.12345')
+        self.assertEqual(arxiv_id({'raw': 'arXiv:astro-ph/0601001v3'}), 'astro-ph/0601001v3')
+        self.assertEqual(squash('Coronal Heating: Török et al.'), 'coronalheatingtoroketal')
+        self.assertTrue(has_surname('By A. Török and B. Smith', 'Torok'))
+        self.assertFalse(has_surname('Smithson et al.', 'Smith'))
+        self.assertIn('van', PARTICLES)

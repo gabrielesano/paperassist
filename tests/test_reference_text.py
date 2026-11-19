@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from paperassist import references
+from paperassist.library import Library
 from paperassist.references import extract
 
 
@@ -100,15 +101,15 @@ class BibliographyTextTests(unittest.TestCase):
         text = ('References\n[1] Alice Author. First work. arXiv:2101.00001,\n2021. 6\n'
                 '[2] Bob Writer. Second work. Journal 4, 2020.\n[3] Carol Researcher. A new work. 2022.')
         with TemporaryDirectory() as directory:
-            library = SimpleNamespace(db_path=Path(directory) / 'library.sqlite',
-                                      get_path=lambda *args, **kwargs: 'unused.pdf', list_documents=lambda: [])
+            library = Library(Path(directory) / 'library')
             references._save(library, 1, {'status': 'partial', 'references': [
                 {'id': '0', 'label': '1', 'raw': 'Alice Author. First work. arXiv:2101.00001,',
                  'retrieval': {'status': 'not_found'}},
                 {'id': '1', 'label': '2021', 'raw': '6'},
                 {'id': '2', 'label': '2', 'raw': 'Bob Writer. Second work. Journal 4, 2020.'}]})
             reader = SimpleNamespace(pages=[SimpleNamespace(extract_text=lambda: text)], named_destinations={})
-            with patch('paperassist.references.PdfReader', return_value=reader):
+            with patch.object(library, 'read_pdf', return_value=(b'', 0)), \
+                 patch('paperassist.references.PdfReader', return_value=reader):
                 refs = references.analyze(library, 1)['references']
             self.assertEqual({ref['label']: ref['id'] for ref in refs}, {'1': '0', '2': '2', '3': '3'})
             self.assertEqual(refs[0]['retrieval']['status'], 'not_found')

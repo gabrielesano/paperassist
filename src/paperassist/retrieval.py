@@ -1,163 +1,39 @@
-"""Search links, Crossref identification and conservative open-access retrieval."""
+"""Crossref identification and conservative open-access retrieval."""
 
 import difflib
 import html
-import http.client
-import ipaddress
 import json
-import os
 import re
-import xml.etree.ElementTree as ET
-import socket
-import sys
-import threading
-import time
 import unicodedata
-import ssl
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from pathlib import Path
-from urllib.error import HTTPError
-from urllib.parse import quote, urlencode, urljoin, urlsplit
-from urllib.request import Request, urlopen
 from io import BytesIO
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode
 
 from pypdf import PdfReader
 
-from paperassist.citation import fingerprint, fold, generic_publication, journal_code, journal_name, pdf_name, publication, same_surname
-from paperassist.settings import Settings
+from paperassist import http_client
+from paperassist.citation import (
+    DOI,
+    arxiv_id,
+    fingerprint,
+    first_surname,
+    fold,
+    generic_publication,
+    journal_code,
+    journal_name,
+    pdf_name,
+    publication,
+    same_surname,
+    squash,
+    strip_arxiv_version,
+)
+from paperassist.http_client import Blocked, MAX_PDF, configure_ssl_env  # re-exported for packaging/entry.py & callers
+from paperassist.settings import PROVIDER_NAMES, Settings
 
-MAX_PDF = 100 * 1024 * 1024
-# Minimum seconds between requests per host; arXiv asks for three.
-_INTERVALS = {'export.arxiv.org': 3, 'api.crossref.org': 1, 'api.adsabs.harvard.edu': 1, 'api.semanticscholar.org': 1.1, 'api.core.ac.uk': 1}
-_LOCK = threading.Lock()
-_CACHE = {}
-_LAST_REQUEST = {}
-DOI_PATTERN = re.compile(r'10\.\d{4,9}/[-._;()/:A-Za-z0-9]+')
 CROSSREF_FIELDS = 'DOI,title,author,container-title,volume,page,article-number,issued,published-print,published-online'
-_LINUX_CA_FILES = (
-    '/etc/ssl/certs/ca-certificates.crt',
-    '/etc/pki/tls/certs/ca-bundle.crt',
-    '/etc/ssl/ca-bundle.pem',
-    '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem',
-    '/etc/ssl/cert.pem',
-)
-_LINUX_CA_DIRS = (
-    '/etc/ssl/certs',
-    '/etc/pki/tls/certs',
-)
-
-
-def _fallback_ca_paths():
-    """Locate host CA certificates on Linux when bundled OpenSSL's compiled-in path is absent."""
-    if not sys.platform.startswith('linux'):
-        return None, None
-    paths = ssl.get_default_verify_paths()
-    if paths.cafile or paths.capath:
-        return None, None
-    if os.environ.get(paths.openssl_cafile_env) or os.environ.get(paths.openssl_capath_env):
-        return None, None
-    cafile = next((path for path in _LINUX_CA_FILES if Path(path).is_file()), None)
-    capath = None if cafile else next((path for path in _LINUX_CA_DIRS if Path(path).is_dir()), None)
-    return cafile, capath
-
-
-def configure_ssl_env():
-    """Populate SSL_CERT_FILE/SSL_CERT_DIR for standalone Linux builds whose OpenSSL dir differs from host."""
-    cafile, capath = _fallback_ca_paths()
-    paths = ssl.get_default_verify_paths()
-    if cafile:
-        os.environ.setdefault(paths.openssl_cafile_env, cafile)
-    elif capath:
-        os.environ.setdefault(paths.openssl_capath_env, capath)
-
-
-def _ssl_context():
-    cafile, capath = _fallback_ca_paths()
-    if cafile or capath:
-        return ssl.create_default_context(cafile=cafile, capath=capath)
-    return ssl.create_default_context()
-
-
-def search_urls(ref):
-    query = ' '.join(str(ref.get(k) or '') for k in ('title', 'authors', 'year', 'doi')).strip()
-    return {'google': 'https://www.google.com/search?' + urlencode({'q': query}),
-            'pdf': 'https://www.google.com/search?' + urlencode({'q': query + ' filetype:pdf'})}
-
-
-class Blocked(Exception):
-    """A PDF link exists but the site will not hand it to an automated client; retrying cannot help."""
-
-    def __init__(self, message, url=None):
-        super().__init__(message)
-        self.url = url
-
-
-def _download_pdf(url):
-    # Connect to the address already checked, so DNS rebinding cannot reach a local host.
-    for _ in range(6):
-        parts = urlsplit(url)
-        if parts.scheme != 'https' or not parts.hostname or parts.username or parts.password or parts.port not in (None, 443):
-            raise ValueError('Only public HTTPS downloads are allowed')
-        addresses = socket.getaddrinfo(parts.hostname, 443, type=socket.SOCK_STREAM)
-        if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
-            raise ValueError('Download host is not public')
-        address = addresses[0][4][0]
-        connection = http.client.HTTPSConnection(parts.hostname, timeout=30)
-        raw_socket = socket.create_connection((address, 443), timeout=30)
-        try:
-            connection.sock = _ssl_context().wrap_socket(raw_socket, server_hostname=parts.hostname)
-            path = parts.path or '/'
-            if parts.query:
-                path += '?' + parts.query
-            connection.request('GET', path, headers={'User-Agent': 'PaperAssist/0.1'})
-            response = connection.getresponse()
-            if response.status in (301, 302, 303, 307, 308):
-                location = response.getheader('Location')
-                if not location:
-                    raise ValueError('Redirect has no destination')
-                url = urljoin(url, location)
-                if not url.startswith('https://'):
-                    # Publisher DOI links often pass through plain HTTP; that is a page for the browser, not an error.
-                    raise Blocked('The link redirects to an address that cannot be fetched automatically.')
-                continue
-            if response.status in (401, 403):
-                raise Blocked(f'The site refused the automatic download (HTTP {response.status}).')
-            if response.status != 200:
-                raise ValueError(f'Download returned HTTP {response.status}')
-            return response.read(MAX_PDF + 1)
-        finally:
-            connection.close()
-            raw_socket.close()
-    raise ValueError('Too many redirects')
-
-
-
-
-
-def _get(url, cfg, headers=None, fresh=False):
-    """Fetch with per-host throttling. Credentials travel in `headers`, never in the cache key or messages."""
-    host = urlsplit(url).hostname
-    with _LOCK:
-        if not fresh and url in _CACHE:
-            return _CACHE[url]
-        delay = _INTERVALS.get(host, 0) - (time.monotonic() - _LAST_REQUEST.get(host, float('-inf')))
-        if delay > 0:
-            time.sleep(delay)
-        agent = 'PaperAssist/0.1' + (f' (mailto:{cfg.email})' if cfg.email else '')
-        cafile, capath = _fallback_ca_paths()
-        kwargs = {'timeout': 15}
-        if cafile or capath:
-            kwargs['context'] = ssl.create_default_context(cafile=cafile, capath=capath)
-        try:
-            with urlopen(Request(url, headers={'User-Agent': agent, **(headers or {})}), **kwargs) as response:
-                data = response.read(2 * 1024 * 1024)
-        finally:
-            _LAST_REQUEST[host] = time.monotonic()
-        if not fresh:
-            if len(_CACHE) >= 200:
-                _CACHE.pop(next(iter(_CACHE)))
-            _CACHE[url] = data
-        return data
+ARXIV_NS = {'atom': 'http://www.w3.org/2005/Atom', 'arxiv': 'http://arxiv.org/schemas/atom'}
 
 
 def _crossref_url(cfg, path, **params):
@@ -181,7 +57,7 @@ def _crossref_pages(item):
     return {value.upper() for value in (first, str(item.get('article-number') or '')) if value}
 
 
-def _crossref_record(item):
+def crossref_record(item):
     authors = item.get('author') or []
     containers = item.get('container-title') or []
     years = _crossref_years(item)
@@ -197,8 +73,19 @@ def _crossref_record(item):
 def crossref_metadata(doi, cfg=None, *, fresh=False):
     """Retrieve metadata only for an explicit DOI, not an unverified search hit."""
     cfg = cfg or Settings()
-    item = json.loads(_get(_crossref_url(cfg, 'works/' + quote(doi, safe='/')), cfg, fresh=fresh))['message']
-    return {**_crossref_record(item), 'provider': 'Crossref'}
+    item = json.loads(http_client.get(_crossref_url(cfg, 'works/' + quote(doi, safe='/')), cfg, fresh=fresh))['message']
+    return crossref_record(item)
+
+
+def crossref_works(cfg, *, fresh=False, **query):
+    """Query Crossref /works with our standard field projection; 404 yields an empty list."""
+    url = _crossref_url(cfg, 'works', **query, select=CROSSREF_FIELDS)
+    try:
+        return json.loads(http_client.get(url, cfg, fresh=fresh))['message']['items']
+    except HTTPError as error:
+        if error.code != 404:
+            raise
+        return []
 
 
 def _candidates(ref):
@@ -233,13 +120,7 @@ def identify(ref, cfg=None):
 
 
 def _crossref_items(cfg, year, **query):
-    query = {**query, 'select': CROSSREF_FIELDS, 'filter': f'type:journal-article,from-pub-date:{int(year) - 1},until-pub-date:{int(year) + 1}'}
-    try:
-        return json.loads(_get(_crossref_url(cfg, 'works', **query), cfg))['message']['items']
-    except HTTPError as error:
-        if error.code != 404:
-            raise
-        return []
+    return crossref_works(cfg, **query, filter=f'type:journal-article,from-pub-date:{int(year) - 1},until-pub-date:{int(year) + 1}')
 
 
 def _crossref_lookup(cfg, raw, surname, year, volume, page, journal):
@@ -259,7 +140,7 @@ def _crossref_lookup(cfg, raw, surname, year, volume, page, journal):
         return 'not_found', f'Crossref has no record matching year {year}, volume {volume}, page {page} and first author {surname}.', None
     if len(agreeing) > 1:
         return 'ambiguous', 'Several Crossref records match; choose the PDF manually.', None
-    record = _crossref_record(next(iter(agreeing.values())))
+    record = crossref_record(next(iter(agreeing.values())))
     record.update(year=int(year), publication=fingerprint(journal, volume, page, year), checked_at=datetime.now(timezone.utc).isoformat(),
                   evidence={'year': year, 'volume': volume, 'page': page, 'first_author': record['first_author']})
     if relaxed:
@@ -281,11 +162,11 @@ def _science_electronic(cfg, surname, year, volume):
             and same_surname((item.get('author') or [{}])[0].get('family', ''), surname)}
 
 
-def _squash(text):
-    return re.sub(r'[^a-z0-9]', '', fold(_text(text)))
+def _squash_text(text):
+    return squash(_text(text))
 
 
-def _words(title):
+def title_words(title):
     """Title tokens that survive typesetting: LaTeX, Greek letters, hyphens and punctuation drop out."""
     text = unicodedata.normalize('NFKC', _text(title))
     text = re.sub(r'\\(?:mathrm|mathit|mathbf|textrm|textit|textbf|text|emph|rm|it|bf)\b', ' ', text)
@@ -307,10 +188,10 @@ def _similar(a, b):
 
 def same_title(a, b):
     """Equal up to typesetting, a trailing period, or a subtitle that only one source prints."""
-    if _similar(_words(a), _words(b)):
+    if _similar(title_words(a), title_words(b)):
         return True
     # Compare the part before the first colon only when it is long enough to be distinctive.
-    heads = [_words(re.split(r'\s*[:\u2014]\s+', title, maxsplit=1)[0]) for title in (a, b)]
+    heads = [title_words(re.split(r'\s*[:\u2014]\s+', title, maxsplit=1)[0]) for title in (a, b)]
     return min(map(len, heads)) >= 4 and _similar(*heads)
 
 
@@ -320,13 +201,13 @@ MIN_SQUASHED_TITLE = 20
 def title_in_header(title, header):
     """A title that line breaks or typesetting split differently still reads the same once spacing,
     case and punctuation are dropped. Short titles are too generic to find that way."""
-    squashed = _squash(title)
+    squashed = _squash_text(title)
     if len(squashed) < MIN_SQUASHED_TITLE:
         return False
     # "... gas. I" must not match inside "... gas. II": a title ending in a numeral or a letter
     # may not run on into one.
     open_end = re.search(r'(?:^|[^a-z0-9])(?:[ivx]+|\d+|[a-z])\W*$', fold(_text(title)))
-    return re.search(re.escape(squashed) + (r'(?![ivx0-9])' if open_end else ''), _squash(header)) is not None
+    return re.search(re.escape(squashed) + (r'(?![ivx0-9])' if open_end else ''), _squash_text(header)) is not None
 
 
 def title_agrees(record_title, candidates, header):
@@ -355,6 +236,15 @@ def surname_in_header(surname, header, title):
     return False
 
 
+def author_agrees(document, record, header=None):
+    """Whether the record's first author matches the document's authors or first-page header."""
+    surname = record.get('first_author') or ''
+    if document.get('authors'):
+        return same_surname(surname, first_surname(document['authors']))
+    text = document.get('metadata', {}).get('header_text', '') if header is None else header
+    return surname_in_header(surname, text, record.get('title') or '')
+
+
 def _all_caps(text):
     letters = [c for c in text if c.isalpha()]
     return len(letters) >= 4 and not any(c.islower() for c in letters)
@@ -367,21 +257,33 @@ def _restore_case(identity, spelling):
     spells exactly the same letters. Otherwise the title stays as deposited.
     """
     spelling, title = ' '.join(spelling.split()), identity.get('title') or ''
-    if _all_caps(title) and not _all_caps(spelling) and _squash(spelling) == _squash(title):
+    if _all_caps(title) and not _all_caps(spelling) and _squash_text(spelling) == _squash_text(title):
         identity['title'] = spelling  # in place: the caller reports and stores this same identity
 
 
-def _arxiv_id(ref):
-    raw = ' '.join(str(ref.get(key) or '') for key in ('arxiv_id', 'title', 'raw'))
-    match = re.search(r'(?i)(?:arxiv\s*:\s*|arxiv\.org/(?:abs|pdf)/)((?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?)', raw)
-    if match:
-        return match.group(1)
-    bare = str(ref.get('arxiv_id') or '')
-    return bare if re.fullmatch(r'(?i)(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?', bare) else ''
+def parse_arxiv_atom(data):
+    """Parse an arXiv Atom XML response into normalized entry dicts and total result count."""
+    feed = ET.fromstring(data)
+    total = feed.findtext('{http://a9.com/-/spec/opensearch/1.1/}totalResults')
+    entries = []
+    for entry in feed.findall('atom:entry', ARXIV_NS):
+        entries.append({
+            'id': entry.findtext('atom:id', '', ARXIV_NS).rsplit('/abs/', 1)[-1].strip(),
+            'title': entry.findtext('atom:title', '', ARXIV_NS),
+            'authors': [author.findtext('atom:name', '', ARXIV_NS) for author in entry.findall('atom:author', ARXIV_NS)],
+            'published': entry.findtext('atom:published', '', ARXIV_NS),
+            'doi': entry.findtext('arxiv:doi', '', ARXIV_NS),
+            'journal_ref': entry.findtext('arxiv:journal_ref', '', ARXIV_NS),
+        })
+    return entries, int(total) if total and total.isdigit() else len(entries)
+
+
+def query_arxiv(params, cfg, *, fresh=False):
+    return parse_arxiv_atom(http_client.get('https://export.arxiv.org/api/query?' + urlencode(params), cfg, fresh=fresh))
 
 
 def _arxiv_pdf(ref, cfg):
-    arxiv_id = _arxiv_id(ref)
+    ref_arxiv_id = arxiv_id(ref)
     doi = str(ref.get('doi') or '').strip()
     surname = str(ref.get('authors') or '').strip()
     cited = publication(ref.get('raw') or '', str(ref.get('year') or '')[:4])
@@ -390,13 +292,13 @@ def _arxiv_pdf(ref, cfg):
     year = int(identity.get('year') or (cited[3] if cited else 0)) or None
     ascii_surname = fold(surname).encode('ascii', 'ignore').decode()
     queries = []
-    if arxiv_id:
-        queries.append({'id_list': arxiv_id})
+    if ref_arxiv_id:
+        queries.append({'id_list': ref_arxiv_id})
     else:
         if doi:
             queries.append({'search_query': 'all:"' + doi + '"', 'max_results': 20})
         # A phrase would miss typesetting variants, so ask for the longest plain words instead.
-        words = sorted({w for w in _words(title) if len(w) > 3 and w.isascii() and w not in GREEK_NAMES}, key=lambda w: (-len(w), w))[:6]
+        words = sorted({w for w in title_words(title) if len(w) > 3 and w.isascii() and w not in GREEK_NAMES}, key=lambda w: (-len(w), w))[:6]
         if words and ascii_surname:
             queries.append({'search_query': ' AND '.join([f'au:"{ascii_surname}"', *(f'ti:{w}' for w in words)]), 'max_results': 20})
         elif ascii_surname and cited:
@@ -404,28 +306,25 @@ def _arxiv_pdf(ref, cfg):
             queries.append({'search_query': f'au:"{ascii_surname}" AND jr:"{cited[1]}"', 'max_results': 100})
     if not queries:
         return 'skipped', 'Needs a DOI, arXiv ID or identified title.', None
-    ns = {'atom': 'http://www.w3.org/2005/Atom', 'arxiv': 'http://arxiv.org/schemas/atom'}
     status, message = 'not_found', 'No matching arXiv record found.'
     for params in queries:
-        feed = ET.fromstring(_get('https://export.arxiv.org/api/query?' + urlencode(params), cfg))
-        total = feed.findtext('{http://a9.com/-/spec/opensearch/1.1/}totalResults')
-        if not arxiv_id and total and int(total) > 100:
+        entries, total = query_arxiv(params, cfg)
+        if not ref_arxiv_id and total > 100:
             status, message = 'ambiguous', 'Too many arXiv results to choose from; search the web.'
             continue
         matches = {}
-        for entry in feed.findall('atom:entry', ns):
-            entry_id = entry.findtext('atom:id', default='', namespaces=ns).rsplit('/abs/', 1)[-1]
-            first = fold(entry.findtext('atom:author/atom:name', default='', namespaces=ns))
+        for entry in entries:
+            entry_id = entry['id']
+            first = fold(entry['authors'][0]) if entry['authors'] else ''
             first_author = bool(surname and re.search(r'(?<!\w)' + re.escape(fold(surname)) + r'$', first))
-            published = int(entry.findtext('atom:published', default='0000', namespaces=ns)[:4])
-            by_id = bool(arxiv_id) and re.sub(r'v\d+$', '', entry_id.lower()) == re.sub(r'v\d+$', '', arxiv_id.lower())
-            by_doi = bool(doi) and entry.findtext('arxiv:doi', default='', namespaces=ns).strip().casefold() == doi.casefold()
+            published = int(entry['published'][:4]) if entry['published'][:4].isdigit() else 0
+            by_id = bool(ref_arxiv_id) and strip_arxiv_version(entry_id) == strip_arxiv_version(ref_arxiv_id)
+            by_doi = bool(doi) and entry['doi'].strip().casefold() == doi.casefold()
             by_title = bool(title) and first_author and year is not None and abs(published - year) <= 1 \
-                and same_title(entry.findtext('atom:title', default='', namespaces=ns), title)
-            journal_ref = entry.findtext('arxiv:journal_ref', default='', namespaces=ns)
-            by_journal = bool(cited) and first_author and publication(journal_ref, cited[3]) == cited
+                and same_title(entry['title'], title)
+            by_journal = bool(cited) and first_author and publication(entry['journal_ref'], cited[3]) == cited
             if by_id or by_doi or by_title or by_journal:
-                matches[re.sub(r'v\d+$', '', entry_id)] = (entry_id, entry.findtext('atom:title', default='', namespaces=ns))
+                matches[strip_arxiv_version(entry_id)] = (entry_id, entry['title'])
         if len(matches) == 1:
             entry_id, spelling = next(iter(matches.values()))
             _restore_case(identity, spelling)
@@ -448,7 +347,7 @@ def _https(urls):
 def _keyed_get(url, cfg, headers):
     """GET with credentials in headers; a refusal becomes a message that never echoes them."""
     try:
-        return _get(url, cfg, headers)
+        return http_client.get(url, cfg, headers)
     except HTTPError as error:
         if error.code in (401, 403):
             raise ValueError(REJECTED) from None
@@ -514,7 +413,7 @@ def _openalex_pdf(ref, cfg):
     key = cfg.key('openalex')
     params = {'select': 'locations', **({'api_key': key} if key else {}), **({'mailto': cfg.email} if cfg.email else {})}
     try:
-        info = json.loads(_get('https://api.openalex.org/works/doi:' + quote(doi, safe='/') + '?' + urlencode(params), cfg))
+        info = json.loads(http_client.get('https://api.openalex.org/works/doi:' + quote(doi, safe='/') + '?' + urlencode(params), cfg))
     except HTTPError as error:
         if error.code == 404:
             return 'not_found', 'OpenAlex does not know this DOI.', None
@@ -537,15 +436,15 @@ def _semantic_scholar_pdf(ref, cfg):
     key = cfg.key('semantic_scholar')
     try:
         url = 'https://api.semanticscholar.org/graph/v1/paper/DOI:' + quote(doi, safe='/') + '?fields=openAccessPdf,externalIds'
-        info = json.loads(_get(url, cfg, {'x-api-key': key} if key else None))
+        info = json.loads(http_client.get(url, cfg, {'x-api-key': key} if key else None))
     except HTTPError as error:
         if error.code == 404:
             return 'not_found', 'Semantic Scholar does not know this DOI.', None
         if error.code in (401, 403) and key:
             raise ValueError(REJECTED) from None
         raise  # 429 from the shared anonymous limit is temporary and reported as a failure
-    arxiv_id = (info.get('externalIds') or {}).get('ArXiv')
-    urls = _https([*(['https://arxiv.org/pdf/' + quote(arxiv_id, safe='/')] if arxiv_id else []), (info.get('openAccessPdf') or {}).get('url') or ''])
+    arxiv_val = (info.get('externalIds') or {}).get('ArXiv')
+    urls = _https([*(['https://arxiv.org/pdf/' + quote(arxiv_val, safe='/')] if arxiv_val else []), (info.get('openAccessPdf') or {}).get('url') or ''])
     return ('found', 'Open-access PDF found.', urls) if urls else ('not_found', 'Semantic Scholar lists no open PDF.', None)
 
 
@@ -565,7 +464,7 @@ def _unpaywall_pdf(ref, cfg):
     if not doi:
         return 'skipped', 'Needs a DOI.', None
     try:
-        info = json.loads(_get('https://api.unpaywall.org/v2/' + quote(doi, safe='/') + '?' + urlencode({'email': cfg.email}), cfg))
+        info = json.loads(http_client.get('https://api.unpaywall.org/v2/' + quote(doi, safe='/') + '?' + urlencode({'email': cfg.email}), cfg))
     except HTTPError as error:
         if error.code == 404:
             return 'not_found', 'Unpaywall does not know this DOI.', None
@@ -595,7 +494,7 @@ def check(cfg):
             results[name] = {'ok': False, 'message': 'Disabled in Settings.'}
             continue
         try:
-            _get(url, cfg, headers, fresh=True)
+            http_client.get(url, cfg, headers, fresh=True)
             results[name] = {'ok': True, 'message': 'Accepted.'}
         except HTTPError as error:
             message = {401: 'Key rejected.', 403: 'Key rejected.', 422: 'Email rejected.', 429: 'Rate limit reached; try again later.'}
@@ -613,12 +512,12 @@ def _names_author(data, surname):
     """Whether the first two pages name the author; None when they hold no text to check (a scan)."""
     if not surname:
         return True
-    squash = lambda text: re.sub(r'[\W_]', '', fold(text))  # also joins small caps such as "H OOD"
+    compact = lambda text: re.sub(r'[\W_]', '', fold(text))  # also joins small caps such as "H OOD"
     try:
-        text = squash(' '.join(page.extract_text() or '' for page in PdfReader(BytesIO(data)).pages[:2]))
+        text = compact(' '.join(page.extract_text() or '' for page in PdfReader(BytesIO(data)).pages[:2]))
     except Exception:
         return None
-    return squash(surname) in text if len(text) >= 40 else None
+    return compact(surname) in text if len(text) >= 40 else None
 
 
 def _fetch_pdf(urls, surname=None):
@@ -626,7 +525,7 @@ def _fetch_pdf(urls, surname=None):
     errors = []
     for url in urls:
         try:
-            data = _download_pdf(url)
+            data = http_client.download_pdf(url)
             if len(data) > MAX_PDF:
                 raise ValueError('Download exceeds the size limit')
             if data.startswith(b'%PDF-'):
@@ -657,8 +556,9 @@ def _disabled(name):
     return {'provider': name, 'status': 'skipped', 'message': f'{NAMES[name]} is disabled in Settings.'}
 
 
-def _identity(ref, attempts, cfg):
+def resolve_identity(ref, cfg, attempts=None):
     """Reuse a stored identity, read metadata of a given DOI, or search Crossref and then ADS."""
+    attempts = [] if attempts is None else attempts
     if ref.get('identity'):
         return ref['identity']
     if ref.get('doi'):
@@ -669,7 +569,7 @@ def _identity(ref, attempts, cfg):
             record = crossref_metadata(ref['doi'], cfg)
         except Exception:
             return None  # DOI-based providers can still work without the metadata
-        return {**record, 'provider': 'crossref', 'evidence': {'doi': 'given in the reference'},
+        return {**record, 'evidence': {'doi': 'given in the reference'},
                 'checked_at': datetime.now(timezone.utc).isoformat()}
     status = 'skipped'
     if cfg.enabled('crossref'):
@@ -695,8 +595,7 @@ def _identity(ref, attempts, cfg):
     return None
 
 
-NAMES = {'crossref': 'Crossref', 'ads': 'ADS', 'arxiv': 'arXiv', 'openalex': 'OpenAlex',
-         'semantic_scholar': 'Semantic Scholar', 'core': 'CORE', 'unpaywall': 'Unpaywall'}
+NAMES = {**PROVIDER_NAMES, 'ads': 'ADS'}
 SETUP = {'ads': 'a NASA ADS token', 'core': 'a CORE API key', 'unpaywall': 'your email address'}
 PROVIDERS = (('ads', _ads_pdf), ('arxiv', _arxiv_pdf), ('openalex', _openalex_pdf),
              ('semantic_scholar', _semantic_scholar_pdf), ('core', _core_pdf), ('unpaywall', _unpaywall_pdf))
@@ -745,14 +644,14 @@ def _result(status, lead, attempts, identity, **fields):
             **({'identity': identity} if identity else {})}
 
 
-def _lead(ref, identity, arxiv_id):
+def _lead(ref, identity, ref_arxiv_id):
     doi = ref.get('doi')
     if identity and not (identity.get('evidence') or {}).get('doi'):
         what = f'DOI {doi}' if doi else f'bibcode {identity.get("bibcode")}'
         return f'Identified via {NAMES.get(identity["provider"], "Crossref")} ({what}).'
     if doi:
         return f'Using DOI {doi}.'
-    return f'Using arXiv ID {arxiv_id}.' if arxiv_id else ''
+    return f'Using arXiv ID {ref_arxiv_id}.' if ref_arxiv_id else ''
 
 
 def download(library, ref, progress=None, settings=None):
@@ -772,10 +671,10 @@ def download(library, ref, progress=None, settings=None):
     attempts = []
     if progress:
         progress('crossref')
-    identity = _identity(ref, attempts, cfg)
+    identity = resolve_identity(ref, cfg, attempts)
     if identity:
         ref = {**ref, 'doi': ref.get('doi') or identity['doi'], 'identity': identity}
-    lead = _lead(ref, identity, _arxiv_id(ref))
+    lead = _lead(ref, identity, arxiv_id(ref))
     identified = bool(lead)
     if ref.get('doi'):
         for document in (library.find_by_doi(ref['doi']) if library else []):

@@ -2,13 +2,14 @@
 import unittest
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 
-from paperassist.native.interface_zoom import window_style
-from paperassist.native.theme import APP_STYLE, DIALOG_BG, MUTED, PAPER, SURFACE, TEAL_SOFT, WELCOME_BG, serif_heading_font
+from support import qt_app
+from paperassist.native.theme import (APP_STYLE, DIALOG_BG, MUTED, PAPER, SURFACE, TEAL_SOFT,
+                                      WELCOME_BG, build_stylesheet, serif_heading_font)
 
 
-app = QApplication.instance() or QApplication([])
+app = qt_app()
 
 
 def contrast(foreground, background):
@@ -40,11 +41,11 @@ class NativeThemeTest(unittest.TestCase):
         dialog.show()
         app.processEvents()
         original = heading.font().pointSizeF()
-        dialog.setStyleSheet(window_style(APP_STYLE, base_font, 1.5))
+        dialog.setStyleSheet(build_stylesheet(base_font, 1.5))
         app.processEvents()
         self.assertAlmostEqual(heading.font().pointSizeF(), base_font.pointSizeF() * 1.5 * 1.55, places=2)
         self.assertGreater(heading.font().pointSizeF(), body.font().pointSizeF())
-        dialog.setStyleSheet(window_style(dialog.styleSheet(), base_font, 1))
+        dialog.setStyleSheet(build_stylesheet(base_font, 1))
         app.processEvents()
         self.assertAlmostEqual(heading.font().pointSizeF(), original, places=2)
         dialog.close()
@@ -60,7 +61,7 @@ class NativeThemeTest(unittest.TestCase):
         inner.addWidget(heading)
         layout.addWidget(welcome)
         base_font = dialog.font()
-        dialog.setStyleSheet(window_style(APP_STYLE, base_font, 1.5))
+        dialog.setStyleSheet(build_stylesheet(base_font, 1.5))
         dialog.show()
         app.processEvents()
         self.assertAlmostEqual(heading.font().pointSizeF(), base_font.pointSizeF() * 1.5 * 2.05, places=2)

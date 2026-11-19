@@ -7,9 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from pypdf.generic import (ArrayObject, DecodedStreamObject, DictionaryObject,
+                           FloatObject, NameObject, NullObject, NumberObject, RectangleObject)
 
-from test_native_support import make_pdf, needs_pdf, needs_qt, pdf_available
+from support import QtTestCase, make_pdf, needs_pdf, needs_qt, pdf_available, pdf_bytes
 
 if pdf_available:
     from PySide6.QtCore import QPoint, Qt
@@ -17,10 +18,8 @@ if pdf_available:
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QToolButton
 
-    from paperassist.native.annotation_bar import install
     from paperassist.native.document import PdfDocument, SaveState
     from paperassist.native.engine import Pdf, Rect
-    from paperassist.native.renderer import RenderClient
     from paperassist.native.source import FileSource
     from paperassist.native.window import MainWindow
 
@@ -282,49 +281,46 @@ class DocumentTests(unittest.TestCase):
 
 
 @needs_qt
-class WindowEditingTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-        cls._files = tempfile.TemporaryDirectory()
-        cls.dir = Path(cls._files.name)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-        cls._files.cleanup()
-
+class WindowEditingTests(QtTestCase):
     def setUp(self):
-        config = patch("paperassist.paths.config_file", return_value=self.dir / f"{self.id()}-config.json")
-        config.start()
-        self.addCleanup(config.stop)
+        super().setUp()
         self.window = MainWindow(self.client)
         self.window.resize(1200, 800)
         self.window.show()
         self.window.activateWindow()
-        self.bar = install(self.window)
-        self.addCleanup(self.close_window)
-
-    def close_window(self):
-        for pane in self.window.all_panes():
-            pane.release()
-        self.window.hide()
-        self.window.deleteLater()
-
-    def pump(self, until=None, seconds=0.2):
-        import time
-        end = time.perf_counter() + (10 if until else seconds)
-        while time.perf_counter() < end and not (until and until()):
-            self.app.processEvents()
-            time.sleep(0.002)
-        self.assertTrue(until() if until else True, "timed out")
+        self.bar = self.window.annotation_bar
+        self.addCleanup(lambda: self.cleanup_window(self.window))
 
     def open(self, name, maker=make_pdf):
         path = maker(self.dir / f"{self.id()}-{name}.pdf")
         tab = self.window.open_source(FileSource(path))
         self.pump(lambda: tab.main.view.has_page(0))
         return tab.main.view
+
+    def test_multipage_selection_writes_and_reopens_once_with_one_undo_step(self):
+        from paperassist.native import annotations
+
+        view = self.open('multipage', lambda path: make_pdf(path, pages=4, rotate=90))
+        doc = view.doc
+        original = doc.pdf.data
+        expected = [view.doc.links(page) for page in range(len(doc))]
+        view.select_all()
+        with patch.object(annotations, 'incremental_writer', wraps=annotations.incremental_writer) as writer, \
+             patch.object(doc.pdf, '_replace', wraps=doc.pdf._replace) as reopen:
+            view.highlight_selection()
+        writer.assert_called_once_with(original)
+        reopen.assert_called_once()
+        pages = list(range(4))
+        self.assertTrue(all(len(doc.annotations(page)) == 1 for page in pages))
+        self.assertTrue(doc.pdf.data.startswith(original))
+        self.assertEqual(doc.undo(), pages)
+        self.assertEqual(doc.undo(), [])
+        self.assertFalse(doc.modified)
+        self.assertTrue(all(not doc.annotations(page) for page in pages))
+        self.assertEqual(doc.redo(), pages)
+        self.assertTrue(all(len(doc.annotations(page)) == 1 for page in pages))
+        self.assertEqual([doc.pdf.links(page) for page in pages], expected)
+        self.assertEqual(doc.source.path.read_bytes(), original)
 
     def point(self, view, page, x, y):
         return view._band(page, Rect(x, y, x, y)).topLeft().toPoint()
@@ -359,8 +355,7 @@ class WindowEditingTests(unittest.TestCase):
 
     # ---- freehand highlights, strokes and the Save rule --------------------------------------
     def test_foreign_indirect_ink_can_be_recolored_resized_and_saved_in_the_window(self):
-        from test_native_annotation_edges import foreign_ink
-        original = foreign_ink(True, (True, False), 'indirect-null', True)
+        original = _foreign_ink(True, (True, False), 'indirect-null', True)
         path = self.dir / f'{self.id()}-foreign.pdf'
         path.write_bytes(original)
         tab = self.window.open_source(FileSource(path))
@@ -690,3 +685,127 @@ class WindowEditingTests(unittest.TestCase):
         highlights = [a for a in view.doc.annotations(0) if a["subtype"] == "highlight"]
         self.assertEqual(len(highlights), 1)
         self.assertGreaterEqual(highlights[0]["rect"].x0, 318)
+
+
+_FOREIGN_STROKES = [[(10, 20), (110, 120)], [(30, 140), (130, 240)]]
+
+
+def _foreign_ink(indirect_outer, indirect_strokes, normal='missing', indirect_ap=False):
+    writer = PdfWriter()
+    writer.add_blank_page(600, 700)
+    strokes = ArrayObject()
+    for points, indirect in zip(_FOREIGN_STROKES, indirect_strokes):
+        stroke = ArrayObject(FloatObject(value) for point in points for value in point)
+        strokes.append(writer._add_object(stroke) if indirect else stroke)
+    annotation = DictionaryObject({
+        NameObject('/Type'): NameObject('/Annot'),
+        NameObject('/Subtype'): NameObject('/Ink'), NameObject('/F'): NumberObject(4),
+        NameObject('/Rect'): RectangleObject((0, 0, 150, 250)),
+        NameObject('/InkList'): writer._add_object(strokes) if indirect_outer else strokes,
+        NameObject('/C'): ArrayObject([FloatObject(0)] * 3),
+        NameObject('/BS'): DictionaryObject({NameObject('/W'): FloatObject(2)}),
+    })
+    if normal != 'missing':
+        if normal == 'stream':
+            appearance = DecodedStreamObject()
+            appearance.set_data(b'0 0 0 RG 2 w 10 20 m 110 120 l S 30 140 m 130 240 l S')
+            appearance.update({
+                NameObject('/Type'): NameObject('/XObject'),
+                NameObject('/Subtype'): NameObject('/Form'),
+                NameObject('/BBox'): RectangleObject((0, 0, 150, 250)),
+                NameObject('/Resources'): DictionaryObject(),
+            })
+            normal_value = writer._add_object(appearance)
+        else:
+            normal_value = writer._add_object(NullObject()) if normal == 'indirect-null' else NullObject()
+        appearances = DictionaryObject({NameObject('/N'): normal_value})
+        annotation[NameObject('/AP')] = writer._add_object(appearances) if indirect_ap else appearances
+    writer.add_annotation(0, annotation)
+    return pdf_bytes(writer)
+
+
+@needs_pdf
+class IndirectInkTests(unittest.TestCase):
+    def variants(self, normal='missing'):
+        for indirect_outer in (False, True):
+            for indirect_strokes in ((False, True), (True, False), (True, True)):
+                yield indirect_outer, indirect_strokes, _foreign_ink(indirect_outer, indirect_strokes, normal)
+
+    def assert_revision(self, original, changed):
+        self.assertTrue(changed.startswith(original))
+        self.assertGreater(len(changed), len(original))
+        annotation = PdfReader(io.BytesIO(changed)).pages[0]['/Annots'][0].get_object()
+        appearance = annotation['/AP']['/N']
+        self.assertEqual(appearance['/Subtype'], '/Form')
+        self.assertEqual(appearance.get_data().split().count(b'S'), 2)
+        renderer = Pdf(changed)
+        try:
+            self.assertLess(min(bytes(renderer.render(0, .5).rgb)), 240)
+        finally:
+            renderer.close()
+        return annotation
+
+    def test_width_edit_resolves_indirect_outer_and_mixed_stroke_arrays(self):
+        from paperassist.native.annotations import apply, read
+        for outer, strokes, original in self.variants():
+            with self.subTest(indirect_outer=outer, indirect_strokes=strokes):
+                self.assertEqual(read(original, 0)[0]['strokes'], _FOREIGN_STROKES)
+                changed = apply(original, 'update', 0, index=0, width=5)
+                self.assert_revision(original, changed)
+                item = read(changed, 0)[0]
+                self.assertEqual(item['strokes'], _FOREIGN_STROKES)
+                self.assertEqual(item['width'], 5)
+                self.assertEqual(item['rect'], (7.5, 17.5, 132.5, 242.5))
+
+    def test_recolor_without_appearance_regenerates_all_indirect_strokes(self):
+        from paperassist.native.annotations import apply, read
+        for outer, strokes, original in self.variants():
+            with self.subTest(indirect_outer=outer, indirect_strokes=strokes):
+                changed = apply(original, 'update', 0, index=0, color=(.2, .4, .6))
+                annotation = self.assert_revision(original, changed)
+                item = read(changed, 0)[0]
+                self.assertEqual(item['strokes'], _FOREIGN_STROKES)
+                self.assertEqual(item['color'], (.2, .4, .6))
+                self.assertIn(b'0.200000 0.400000 0.600000 RG', annotation['/AP']['/N'].get_data())
+
+    def test_transform_resolves_indirect_strokes_and_keeps_original_appearance(self):
+        from paperassist.native.annotations import apply, read
+        expected = [[(10 + x * 2, 20 + y * 2) for x, y in stroke] for stroke in _FOREIGN_STROKES]
+        for outer, strokes, original in self.variants(normal='stream'):
+            with self.subTest(indirect_outer=outer, indirect_strokes=strokes):
+                before = PdfReader(io.BytesIO(original)).pages[0]['/Annots'][0].get_object()['/AP']['/N'].get_data()
+                changed = apply(original, 'transform', 0, index=0, rect=(10, 20, 310, 520))
+                annotation = self.assert_revision(original, changed)
+                item = read(changed, 0)[0]
+                self.assertEqual(item['strokes'], expected)
+                self.assertEqual(item['width'], 4)
+                self.assertEqual(item['rect'], (10, 20, 310, 520))
+                self.assertEqual(annotation['/AP']['/N'].get_data(), before)
+
+    def test_direct_and_indirect_null_normal_appearances_regenerate_on_recolor(self):
+        from paperassist.native.annotations import apply, read
+        for indirect_ap in (False, True):
+            for normal in ('null', 'indirect-null'):
+                with self.subTest(indirect_ap=indirect_ap, normal=normal):
+                    original = _foreign_ink(True, (True, False), normal, indirect_ap)
+                    changed = apply(original, 'update', 0, index=0, color=(1, 0, 0))
+                    annotation = self.assert_revision(original, changed)
+                    self.assertEqual(read(changed, 0)[0]['strokes'], _FOREIGN_STROKES)
+                    self.assertIn(b'1.000000 0.000000 0.000000 RG', annotation['/AP']['/N'].get_data())
+
+    def test_document_edit_leaves_source_untouched_until_explicit_incremental_save(self):
+        original = _foreign_ink(True, (True, False), 'indirect-null', True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'external.pdf'
+            path.write_bytes(original)
+            document = PdfDocument(FileSource(path))
+            try:
+                document.update_annotation(0, 0, color=(0, 0, 1), width=6)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertTrue(document.modified)
+                self.assert_revision(original, document.pdf.data)
+                self.assertTrue(document.save())
+                self.assertEqual(path.read_bytes(), document.pdf.data)
+                self.assertTrue(path.read_bytes().startswith(original))
+            finally:
+                document.close()

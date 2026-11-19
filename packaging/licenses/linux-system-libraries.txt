@@ -1,0 +1,113 @@
+--------------------------------------------------------------------------------
+Bundled System and C/C++ Shared Libraries
+--------------------------------------------------------------------------------
+
+The PaperAssist standalone bundle packages specific runtime support libraries to
+ensure standalone execution across diverse Linux distributions:
+
+1. SQLite (libsqlite3)
+   Status: Public Domain (https://www.sqlite.org/copyright.html)
+   All of the code and documentation in SQLite has been dedicated to the public domain.
+
+2. OpenSSL (libcrypto, libssl)
+   License: Apache License 2.0 (https://www.openssl.org/source/license.html)
+   Copyright 1998-2024 The OpenSSL Project Authors.
+
+3. zlib (libz)
+   License: zlib License (https://zlib.net/zlib_license.html)
+   Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler.
+
+4. bzip2 (libbz2)
+   License: BSD-like (https://sourceware.org/bzip2/)
+   Copyright (C) 1996-2019 Julian Seward.
+
+5. XZ / liblzma
+   License: Public Domain / 0BSD (https://tukaani.org/xz/)
+   Original author: Lasse Collin.
+
+6. Zstandard (libzstd)
+   License: BSD-3-Clause (https://github.com/facebook/zstd)
+   Copyright (c) 2016-present, Facebook, Inc.
+
+7. GLib & GThread (libglib-2.0, libgthread-2.0)
+   License: GNU Lesser General Public License version 2.1 or later (LGPL-2.1-or-later)
+   Copyright (C) 1995-2024 GLib Team and contributors.
+
+8. D-Bus (libdbus-1)
+   License: Academic Free License version 2.1 / GPL-2.0-or-later
+   Copyright (C) 2002, 2003, 2004 Red Hat Inc.
+
+9. Expat XML Parser (libexpat)
+   License: MIT License (https://libexpat.github.io/)
+   Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper.
+   Copyright (c) 2001-2024 Expat contributors.
+
+10. libffi
+    License: MIT License (https://sourceware.org/libffi/)
+    Copyright (c) 1996-2024 Anthony Green, Red Hat, Inc. and contributors.
+
+11. Fontconfig (libfontconfig)
+    License: HPND / MIT-like (https://www.freedesktop.org/wiki/Software/fontconfig/)
+    Copyright (C) 2000, 2001, 2002, 2003 Keith Packard.
+
+12. FreeType (libfreetype)
+    License: The FreeType Project License / FTL (https://www.freetype.org/)
+    Copyright (C) 1996-2024 David Turner, Robert Wilhelm, and Werner Lemberg.
+
+13. HarfBuzz (libharfbuzz)
+    License: Old MIT / HPND (https://harfbuzz.github.io/)
+    Copyright (C) 2010, 2011, 2012 Google, Inc.; Behdad Esfahbod.
+
+14. Graphite2 (libgraphite2)
+    License: GNU Lesser General Public License version 2.1 or later (LGPL-2.1-or-later)
+    Copyright (C) 2010 SIL International.
+
+15. libpng (libpng16)
+    License: libpng License (http://www.libpng.org/pub/png/src/libpng-LICENSE.txt)
+    Copyright (c) 1995-2024 The PNG Reference Library Authors.
+
+16. ICU - International Components for Unicode (libicudata, libicui18n, libicuuc)
+    License: Unicode-DFS-2016 / ICU License (https://icu.unicode.org/)
+    Copyright (c) 1991-2024 Unicode, Inc.
+
+17. PCRE2 (libpcre2-8)
+    License: BSD-3-Clause (https://www.pcre.org/)
+    Copyright (c) 1997-2024 University of Cambridge.
+
+18. mpdecimal (libmpdec)
+    License: BSD-2-Clause (http://www.bytereef.org/mpdecimal/)
+    Copyright (c) 2008-2024 Stefan Krah.
+
+19. Brotli (libbrotlicommon, libbrotlidec)
+    License: MIT License (https://github.com/google/brotli)
+    Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
+
+20. libxml2
+    License: MIT License (https://gitlab.gnome.org/GNOME/libxml2)
+    Copyright (C) 1998-2024 Daniel Veillard and contributors.
+
+21. xkbcommon & xkbcommon-x11
+    License: MIT / HPND (https://xkbcommon.org/)
+    Copyright (C) 2009-2024 Daniel Stone, Ran Benita and contributors.
+
+22. X11 & XCB Client Libraries (libX11, libXau, libXext, libxcb, libxcb-*)
+    License: MIT / X11 (https://www.x.org/)
+    Copyright (C) The Open Group, Keith Packard, Jamey Sharp, and contributors.
+
+23. GCC Runtime Libraries (libgcc_s, libstdc++)
+    License: GNU General Public License v3.0 with GCC Runtime Library Exception
+    Copyright (C) Free Software Foundation, Inc.
+    Under the GCC Runtime Library Exception, you have permission to propagate
+    a work of Target Code formed by combining the Runtime Library with Independent Modules.
+
+24. GNU Readline (libreadline)
+    License: GNU General Public License v3.0 or later (GPL-3.0-or-later)
+    Copyright (C) Free Software Foundation, Inc.
+
+25. ncurses / terminfo (libtinfo)
+    License: MIT-like / X11 (https://invisible-island.net/ncurses/)
+    Copyright (c) 1998-2024 Free Software Foundation, Inc.
+
+26. util-linux libuuid
+    License: BSD-3-Clause (https://github.com/util-linux/util-linux)
+    Copyright (C) 1996, 1997, 1998 Theodore Ts'o.

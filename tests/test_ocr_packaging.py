@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,3 +79,24 @@ class OcrPackagingTests(unittest.TestCase):
             self.assertIn(f'Bundled OCR: {name}', text)
             self.assertIn(f'Synthetic LICENSE.{name}', text)
             self.assertIn(builder.SOURCES[name]['sha256'], text)
+
+    def test_notices_gate_linux_libraries_and_parameterize_pdfium_per_platform(self):
+        with patch.object(notices.sys, 'platform', 'linux'), patch.object(notices.platform, 'machine', return_value='x86_64'):
+            linux_text = notices.generate_notices()
+        self.assertIn('libsqlite3', linux_text)
+        self.assertIn('libpdfium.so', linux_text)
+        self.assertIn('linux_x64/BUILD_LICENSES/', linux_text)
+
+        with patch.object(notices.sys, 'platform', 'win32'), patch.object(notices.platform, 'machine', return_value='AMD64'):
+            win_text = notices.generate_notices()
+        self.assertNotIn('libsqlite3', win_text)
+        self.assertNotIn('libpdfium.so', win_text)
+        self.assertIn('pdfium.dll', win_text)
+        self.assertIn('win_x64/BUILD_LICENSES/', win_text)
+
+        with patch.object(notices.sys, 'platform', 'darwin'), patch.object(notices.platform, 'machine', return_value='arm64'):
+            mac_text = notices.generate_notices()
+        self.assertNotIn('libsqlite3', mac_text)
+        self.assertNotIn('libpdfium.so', mac_text)
+        self.assertIn('libpdfium.dylib', mac_text)
+        self.assertIn('darwin_arm64/BUILD_LICENSES/', mac_text)

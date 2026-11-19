@@ -2,27 +2,24 @@
 import collections
 import hashlib
 import sys
-import tempfile
-import time
 import unittest
-
-from pypdf import PdfReader
 from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
-from test_native_support import make_pdf, needs_qt, pdf_available
+from pypdf import PdfReader
+
+from support import QtTestCase, make_pdf, needs_qt, pdf_available, qt_app
 
 if pdf_available:
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtGui import QPixmap
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QLabel
+    from PySide6.QtWidgets import QLabel
 
     from paperassist import settings
     from paperassist.native.document import SaveState
-    from paperassist.native.engine import Link, Rect
+    from paperassist.native.engine import Link, Pdf, Rect
     from paperassist.native.positions import current_page
-    from paperassist.native.renderer import RenderClient
     from paperassist.native.rules import CANCEL, DISCARD, SAVE
     from paperassist.native.source import FileSource
     from paperassist.native.tab import KEY_STEP
@@ -40,47 +37,20 @@ if pdf_available:
 
 
 @needs_qt
-class WindowTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-        cls._files = tempfile.TemporaryDirectory()
-        cls.dir = Path(cls._files.name)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-        cls._files.cleanup()
-
+class WindowTests(QtTestCase):
     def setUp(self):
-        config = patch("paperassist.paths.config_file", return_value=self.dir / f"{self.id()}-config.json")
-        config.start()
-        self.addCleanup(config.stop)
+        super().setUp()
         self.window = MainWindow(self.client)
         self.window.resize(1200, 800)
         self.window.show()
         self.answers, self.asked, self.failures = collections.deque(), [], []
         self.window.ask_decision = lambda pane: self.asked.append(pane.title) or self.answers.popleft()
         self.window.report_failure = lambda pane: self.failures.append(pane.view.doc.error)
-        self.addCleanup(self.close_window)
-
-    def close_window(self):
-        for pane in self.window.all_panes():
-            pane.release()
-        self.window.hide()
-        self.window.deleteLater()
+        self.addCleanup(lambda: self.cleanup_window(self.window))
 
     # ---- helpers ------------------------------------------------------------------------
     def pdf(self, name, **kwargs):
         return make_pdf(self.dir / f"{self.id()}-{name}.pdf", **kwargs)
-
-    def pump(self, until=None, seconds=0.2):
-        end = time.perf_counter() + (10 if until else seconds)
-        while time.perf_counter() < end and not (until and until()):
-            self.app.processEvents()
-            time.sleep(0.002)
-        self.assertTrue(until() if until else True, "timed out")
 
     def open(self, name, **kwargs):
         tab = self.window.open_source(FileSource(self.pdf(name, **kwargs)))
@@ -424,7 +394,6 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(self.window.tabs.tabText(0).endswith(" ●"))
         self.assertIn("Saved", self.window.state_label.text())
         self.pump(lambda: tab.main.view.has_page(0))
-        self.assertEqual(tab.main.view.doc.pending.get(0), None)  # the render process draws it now
 
     def test_a_failed_save_keeps_the_unsaved_state_shows_why_and_can_be_retried(self):
         source = FailingSource(self.pdf("a"))
@@ -578,7 +547,7 @@ class WindowTests(unittest.TestCase):
         self.assertIn("Last saved version", quick.title_label.text())
         self.drag(quick.view, 1, 3, 20)  # the highlight tool is still on
         self.assertIs(quick.state, SaveState.SAVED)
-        self.assertEqual(quick.view.doc.pending, {})
+        self.assertEqual(quick.view.doc.annotations(0), [])
         tab.activate(tab.main)
         self.window.save()
         self.assertFalse(quick.view.locked)
@@ -799,10 +768,9 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(changed, [path])
 
     def test_annotation_toolbar_palette_undo_and_exact_revision_rendering(self):
-        from paperassist.native.annotation_bar import COLORS, install
-        from paperassist.native.engine import PageRenderer
+        from paperassist.native.annotation_bar import COLORS
         from PySide6.QtGui import QImage
-        bar = install(self.window)
+        bar = self.window.annotation_bar
         view = self.open('palette').main.view
         original = view.doc.source.path.read_bytes()
         for index in range(5):
@@ -819,7 +787,7 @@ class WindowTests(unittest.TestCase):
         actual = bytes(image.constBits())
         packed = b''.join(actual[y * image.bytesPerLine():y * image.bytesPerLine() + image.width() * 3]
                           for y in range(image.height()))
-        renderer = PageRenderer(view.doc.pdf.data)
+        renderer = Pdf(view.doc.pdf.data)
         self.addCleanup(renderer.close)
         self.assertEqual(packed, bytes(renderer.render(0, view._scale()).rgb))
         view.setFocus()
@@ -830,8 +798,7 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(view.doc.source.path.read_bytes(), original)
 
     def test_annotation_toolbar_draw_select_recolor_thickness_delete_and_undo(self):
-        from paperassist.native.annotation_bar import install
-        bar = install(self.window)
+        bar = self.window.annotation_bar
         view = self.open('ink').main.view
         bar.refresh()
         bar.draw.trigger()
@@ -905,9 +872,7 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(save_btn.property('dirty'))
 
     def test_contextual_annotation_bar_auto_shows_and_color_chips_pick_colors(self):
-        from paperassist.native.annotation_bar import install as install_annotation_bar
-
-        bar = install_annotation_bar(self.window)
+        bar = self.window.annotation_bar
         view = self.open('contextual-bar').main.view
         self.assertFalse(bar.isVisibleTo(self.window))
 
@@ -936,7 +901,7 @@ class BindingTests(unittest.TestCase):
     @unittest.skipIf(sys.version_info >= (3, 12), "None is immortal from Python 3.12")
     def test_qt_calls_keep_their_reference_to_none(self):
         # PySide6 6.12.0 lost one reference to None per void call and crashed Python 3.11 within minutes.
-        QApplication.instance() or QApplication([])
+        qt_app()
         label = QLabel()
         before = sys.getrefcount(None)
         for _ in range(1000):

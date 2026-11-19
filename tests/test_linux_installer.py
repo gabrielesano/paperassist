@@ -12,7 +12,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "packaging" / "installer"))
 
-from build_installer import build_installer, assemble_installer, create_payload_archive
+from build_installer import build_installer
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer tests require Linux")
@@ -116,6 +116,21 @@ class LinuxInstallerTestCase(unittest.TestCase):
             version=version,
         )
         return installer_path
+
+    def _reset_install_state(self) -> None:
+        """Remove default installation, adjacent maintenance artifacts, and desktop/CLI integration."""
+        app_dir = self.data_dir / "paperassist-app"
+        if app_dir.exists():
+            shutil.rmtree(app_dir)
+        for p in self.data_dir.glob("paperassist-app.*"):
+            if p.is_dir():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+        (self.bin_dir / "paperassist").unlink(missing_ok=True)
+        for folder in (self.data_dir / "icons", self.data_dir / "applications"):
+            if folder.exists():
+                shutil.rmtree(folder)
 
     def test_existing_empty_target_and_trailing_slashes_install_upgrade_and_uninstall(self):
         bundle = self._create_synthetic_bundle()
@@ -450,43 +465,6 @@ class LinuxInstallerTestCase(unittest.TestCase):
         self.assertEqual(res_check.returncode, 0)
         self.assertIn("PaperAssist 0.1.0a0", res_check.stdout)
 
-    def test_failed_upgrade_fault_injections_rollback(self):
-        """Test rollback handlers under fault injection after_stage, after_backup, launcher_write."""
-        b0 = self._create_synthetic_bundle("b_fi_v0", version="0.1.0a0")
-        b1 = self._create_synthetic_bundle("b_fi_v1", version="0.1.0a1")
-
-        inst0 = self._build_test_installer(b0, "inst_fi_v0.sh", None, "0.1.0a0")
-        inst1 = self._build_test_installer(b1, "inst_fi_v1.sh", None, "0.1.0a1")
-
-        subprocess.run([str(inst0)], env=self.base_env, check=True)
-        launcher = self.bin_dir / "paperassist"
-
-        # 1. Fault: after_stage
-        env_fault1 = self.base_env.copy()
-        env_fault1["__PAPERASSIST_INSTALLER_FAULT_INJECT"] = "after_stage"
-        res1 = subprocess.run([str(inst1)], env=env_fault1, capture_output=True, text=True)
-        self.assertNotEqual(res1.returncode, 0)
-        res_v0 = subprocess.run([str(launcher), "--version"], capture_output=True, text=True)
-        self.assertIn("PaperAssist 0.1.0a0", res_v0.stdout)
-
-        # 2. Fault: after_backup
-        env_fault2 = self.base_env.copy()
-        env_fault2["__PAPERASSIST_INSTALLER_FAULT_INJECT"] = "after_backup"
-        res2 = subprocess.run([str(inst1)], env=env_fault2, capture_output=True, text=True)
-        self.assertNotEqual(res2.returncode, 0)
-        self.assertIn("Rolling back", res2.stderr)
-        res_v0_2 = subprocess.run([str(launcher), "--version"], capture_output=True, text=True)
-        self.assertIn("PaperAssist 0.1.0a0", res_v0_2.stdout)
-
-        # 3. Fault: launcher_write
-        env_fault3 = self.base_env.copy()
-        env_fault3["__PAPERASSIST_INSTALLER_FAULT_INJECT"] = "launcher_write"
-        res3 = subprocess.run([str(inst1)], env=env_fault3, capture_output=True, text=True)
-        self.assertNotEqual(res3.returncode, 0)
-        self.assertIn("Rolling back", res3.stderr)
-        res_v0_3 = subprocess.run([str(launcher), "--version"], capture_output=True, text=True)
-        self.assertIn("PaperAssist 0.1.0a0", res_v0_3.stdout)
-
     def test_recovery_after_simulated_sigkill(self):
         """Test auto-recovery and --repair when a prior run was interrupted by SIGKILL."""
         b0 = self._create_synthetic_bundle("b_kill_v0", version="0.1.0a0")
@@ -731,45 +709,21 @@ class LinuxInstallerTestCase(unittest.TestCase):
         expected_backup = backup_sentinel.read_bytes()
         expected_staging = staging_sentinel.read_bytes()
 
-        # Run installer -> must fail, leave everything unchanged
-        res_inst = subprocess.run(
-            [str(installer), "--install-dir", str(library_dir), "--no-launcher", "--no-desktop"],
-            env=self.base_env,
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(res_inst.returncode, 0)
-        self.assertIn("library catalog (library.sqlite3)", res_inst.stderr)
-        self.assertEqual((library_dir / "library.sqlite3").read_bytes(), expected_lib_catalog)
-        self.assertEqual((library_dir / "paper.pdf").read_bytes(), expected_lib_paper)
-        self.assertEqual(backup_sentinel.read_bytes(), expected_backup)
-        self.assertEqual(staging_sentinel.read_bytes(), expected_staging)
-
-        # Run --repair -> must fail, leave everything unchanged
-        res_rep = subprocess.run(
-            [str(installer), "--install-dir", str(library_dir), "--repair"],
-            env=self.base_env,
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(res_rep.returncode, 0)
-        self.assertIn("library catalog (library.sqlite3)", res_rep.stderr)
-        self.assertEqual((library_dir / "library.sqlite3").read_bytes(), expected_lib_catalog)
-        self.assertEqual(backup_sentinel.read_bytes(), expected_backup)
-        self.assertEqual(staging_sentinel.read_bytes(), expected_staging)
-
-        # Run --uninstall -> must fail, leave everything unchanged
-        res_un = subprocess.run(
-            [str(installer), "--install-dir", str(library_dir), "--uninstall"],
-            env=self.base_env,
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(res_un.returncode, 0)
-        self.assertIn("library catalog (library.sqlite3)", res_un.stderr)
-        self.assertEqual((library_dir / "library.sqlite3").read_bytes(), expected_lib_catalog)
-        self.assertEqual(backup_sentinel.read_bytes(), expected_backup)
-        self.assertEqual(staging_sentinel.read_bytes(), expected_staging)
+        actions = (["--no-launcher", "--no-desktop"], ["--repair"], ["--uninstall"])
+        for action in actions:
+            with self.subTest(target="library", action=action):
+                res = subprocess.run(
+                    [str(installer), "--install-dir", str(library_dir), *action],
+                    env=self.base_env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn("library catalog (library.sqlite3)", res.stderr)
+                self.assertEqual((library_dir / "library.sqlite3").read_bytes(), expected_lib_catalog)
+                self.assertEqual((library_dir / "paper.pdf").read_bytes(), expected_lib_paper)
+                self.assertEqual(backup_sentinel.read_bytes(), expected_backup)
+                self.assertEqual(staging_sentinel.read_bytes(), expected_staging)
 
         # 2. Target with foreign unmanaged files and adjacent unowned .backup.* and .staging.*
         foreign_dir = self.test_root / "foreign-app"
@@ -790,41 +744,18 @@ class LinuxInstallerTestCase(unittest.TestCase):
         expected_foreign_backup = foreign_backup_file.read_bytes()
         expected_foreign_staging = foreign_staging_file.read_bytes()
 
-        # Run installer
-        res_f_inst = subprocess.run(
-            [str(installer), "--install-dir", str(foreign_dir), "--no-launcher", "--no-desktop"],
-            env=self.base_env,
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(res_f_inst.returncode, 0)
-        self.assertEqual((foreign_dir / "custom.txt").read_bytes(), expected_foreign_custom)
-        self.assertEqual(foreign_backup_file.read_bytes(), expected_foreign_backup)
-        self.assertEqual(foreign_staging_file.read_bytes(), expected_foreign_staging)
-
-        # Run --repair
-        res_f_rep = subprocess.run(
-            [str(installer), "--install-dir", str(foreign_dir), "--repair"],
-            env=self.base_env,
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(res_f_rep.returncode, 0)
-        self.assertEqual((foreign_dir / "custom.txt").read_bytes(), expected_foreign_custom)
-        self.assertEqual(foreign_backup_file.read_bytes(), expected_foreign_backup)
-        self.assertEqual(foreign_staging_file.read_bytes(), expected_foreign_staging)
-
-        # Run --uninstall
-        res_f_un = subprocess.run(
-            [str(installer), "--install-dir", str(foreign_dir), "--uninstall"],
-            env=self.base_env,
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(res_f_un.returncode, 0)
-        self.assertEqual((foreign_dir / "custom.txt").read_bytes(), expected_foreign_custom)
-        self.assertEqual(foreign_backup_file.read_bytes(), expected_foreign_backup)
-        self.assertEqual(foreign_staging_file.read_bytes(), expected_foreign_staging)
+        for action in actions:
+            with self.subTest(target="foreign", action=action):
+                res = subprocess.run(
+                    [str(installer), "--install-dir", str(foreign_dir), *action],
+                    env=self.base_env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(res.returncode, 0)
+                self.assertEqual((foreign_dir / "custom.txt").read_bytes(), expected_foreign_custom)
+                self.assertEqual(foreign_backup_file.read_bytes(), expected_foreign_backup)
+                self.assertEqual(foreign_staging_file.read_bytes(), expected_foreign_staging)
 
     def test_valid_operations_preserve_adjacent_unowned_backups_and_staging(self):
         """Test that install, upgrade, and repair preserve unowned adjacent backup/staging directories."""
@@ -932,20 +863,7 @@ class LinuxInstallerTestCase(unittest.TestCase):
 
         for cut_point in cut_points:
             with self.subTest(cut_point=cut_point):
-                # Clean up previous state
-                if app_dir.exists():
-                    shutil.rmtree(app_dir)
-                for p in self.data_dir.glob("paperassist-app.*"):
-                    if p.is_dir():
-                        shutil.rmtree(p)
-                    else:
-                        p.unlink()
-                if launcher.exists():
-                    launcher.unlink()
-                if (self.data_dir / "icons").exists():
-                    shutil.rmtree(self.data_dir / "icons")
-                if (self.data_dir / "applications").exists():
-                    shutil.rmtree(self.data_dir / "applications")
+                self._reset_install_state()
 
                 # 1. Install base v0
                 res0 = subprocess.run([str(inst0)], env=self.base_env, capture_output=True, text=True)
@@ -1084,24 +1002,12 @@ class LinuxInstallerTestCase(unittest.TestCase):
             "after_backup",
             "after_swap_before_manifest",
             "during_integration",
+            "launcher_write",
         ]
 
         for cut_point in rollback_cut_points:
             with self.subTest(cut_point=cut_point):
-                # Clean up previous state
-                if app_dir.exists():
-                    shutil.rmtree(app_dir)
-                for p in self.data_dir.glob("paperassist-app.*"):
-                    if p.is_dir():
-                        shutil.rmtree(p)
-                    else:
-                        p.unlink()
-                if launcher.exists():
-                    launcher.unlink()
-                if (self.data_dir / "icons").exists():
-                    shutil.rmtree(self.data_dir / "icons")
-                if (self.data_dir / "applications").exists():
-                    shutil.rmtree(self.data_dir / "applications")
+                self._reset_install_state()
 
                 # 1. Install base v0
                 res0 = subprocess.run([str(inst0)], env=self.base_env, capture_output=True, text=True)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from .citation import pdf_name
+from .citation import first_surname, normalize_doi, pdf_name
 from .metadata import PARSER_VERSION, extract_metadata, useful
 
 MAX_LABEL = 80
@@ -60,11 +60,6 @@ def _recorded(document, metadata):
     if "manual" in metadata or document["metadata_status"] != "corrected":
         return metadata
     return {**metadata, "manual": manual_fields(document)}
-
-
-def _surname(authors: str) -> str:
-    words = re.split(r"\s*(?:[;,]|\band\b)\s*", authors.strip())[0].split()
-    return words[-1] if words else ""
 
 
 def _ocr_candidates(metadata):
@@ -145,6 +140,9 @@ class Library:
         self.working.mkdir(exist_ok=True)
         self.db_path = self.data_dir / "library.sqlite3"
         self._lock = threading.RLock()
+        self._local = threading.local()
+        self._conn_lock = threading.Lock()
+        self._connections: list[sqlite3.Connection] = []
         with self._connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS documents (
@@ -154,7 +152,7 @@ class Library:
                     doi TEXT, pages INTEGER NOT NULL, metadata_status TEXT NOT NULL,
                     extracted TEXT NOT NULL, work_id INTEGER, revision INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    stored_name TEXT, label TEXT NOT NULL DEFAULT ''
+                    stored_name TEXT, label TEXT NOT NULL DEFAULT '', revision_sha256 TEXT
                 );
                 CREATE TABLE IF NOT EXISTS works (
                     id INTEGER PRIMARY KEY, preferred_file_id INTEGER REFERENCES documents(id)
@@ -171,24 +169,68 @@ class Library:
                     document_id INTEGER PRIMARY KEY REFERENCES documents(id),
                     content TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS reference_analyses (source_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS publication_evidence_v4 (sha TEXT PRIMARY KEY, payload TEXT NOT NULL);
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
             if "stored_name" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN stored_name TEXT")
             if "label" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+            if "revision_sha256" not in columns:
+                db.execute("ALTER TABLE documents ADD COLUMN revision_sha256 TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS documents_stored_name ON documents(stored_name)")
         self._reconcile()
+        # Release the init connection so constructing Library() alone leaves no WAL sidecars or locks.
+        self.close()
+
+    def close(self) -> None:
+        conn_lock = getattr(self, "_conn_lock", None)
+        if conn_lock is None:
+            return
+        with conn_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        for db in connections:
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+        self._local = threading.local()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def __del__(self):
+        self.close()
 
     @contextmanager
     def _connect(self):
-        db = sqlite3.connect(self.db_path)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys = ON")
+        db = getattr(self._local, "db", None)
+        if db is None:
+            # Each thread keeps its own connection; check_same_thread=False lets close() clean up across threads.
+            db = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA journal_mode = WAL")
+            db.execute("PRAGMA busy_timeout = 30000")
+            db.execute("PRAGMA foreign_keys = ON")
+            self._local.db = db
+            self._local.depth = 0
+            with self._conn_lock:
+                self._connections.append(db)
+        depth = self._local.depth
+        self._local.depth = depth + 1
         try:
-            with db:
+            if depth == 0:
+                with db:
+                    yield db
+            else:
                 yield db
         finally:
-            db.close()
+            self._local.depth = depth
 
     @staticmethod
     def _document(row):
@@ -209,7 +251,7 @@ class Library:
             # A user correction wins over the provider's author, but keeps the identified journal reference.
             surname = "" if "authors" in manual_fields(doc) else (verified or {}).get("first_author")
             try:
-                name = safe_filename(pdf_name(surname or _surname(doc["authors"]), doc["year"], (verified or {}).get("publication")))
+                name = safe_filename(pdf_name(surname or first_surname(doc["authors"]), doc["year"], (verified or {}).get("publication")))
             except (KeyError, IndexError, TypeError):
                 name = ""
             if name:
@@ -322,27 +364,53 @@ class Library:
 
     def open_file(self, path: str | Path) -> dict:
         """Reuse this library's original/current revision, or import a managed copy of an external file."""
-        path = Path(path).expanduser().resolve(strict=True)
-        if not path.is_file() or path.suffix.lower() != '.pdf':
+        path = Path(path).expanduser()
+        path = path.parent.resolve() / path.name
+        resolved = path.resolve(strict=True)
+        if not resolved.is_file() or path.suffix.lower() != '.pdf':
             raise ValueError('Choose a PDF file, not a folder or another file type.')
-        owner = path.parent.parent
-        managed = path.parent.name in ('originals', 'working') and (owner / 'library.sqlite3').is_file()
-        if managed:
-            if owner != self.data_dir.resolve():
-                raise ValueError('This PDF belongs to another PaperAssist library. Open that library to use it.')
-            for document in self.list_documents():
-                original = self.originals / self._stored_name(document)
-                current = self.working / f"{document['id']}-{document['revision']}.pdf"
-                if path == original.resolve():
-                    with path.open('rb') as source:
-                        if hashlib.file_digest(source, 'sha256').hexdigest() != document['sha256']:
-                            raise ValueError('The managed original has changed. Restore its original bytes before opening it.')
-                    return document
-                if document['revision'] and path == current.resolve():
-                    return document
-            raise ValueError('This managed PDF is missing from the catalog or is an older revision. Open the paper from Library.')
-        with path.open('rb') as stream:
-            return self._import_stream(stream, path.name, str(path))
+        # A replaced managed filename still belongs to its catalog entry, even if it is a symlink.
+        if self._managed_path(path):
+            return self._open_managed(path)
+        if self._managed_path(resolved):
+            return self._open_managed(resolved)
+        with resolved.open('rb') as stream:
+            document = self._import_stream(stream, resolved.name, str(resolved))
+        if document['duplicate']:
+            self._read_pdf(document, document['revision'])
+        return document
+
+    @staticmethod
+    def _managed_path(path):
+        return path.parent.name in ('originals', 'working') and (path.parent.parent / 'library.sqlite3').is_file()
+
+    def _open_managed(self, path):
+        if path.parent.parent != self.data_dir.resolve():
+            raise ValueError('This PDF belongs to another PaperAssist library. Open that library to use it.')
+        original = path.parent.name == 'originals'
+        with self._connect() as db:
+            if original:
+                lookup = ("SELECT * FROM documents WHERE {} = ? "
+                          "OR (sha256 = ? AND nullif(stored_name, '') IS NULL)")
+                row = db.execute(lookup.format('stored_name'), (path.name, path.stem)).fetchone()
+                if row is None and os.name == 'nt':
+                    # Match Windows paths with a different case, including Unicode filenames.
+                    db.create_function('filename_lower', 1, lambda name: name and name.lower())
+                    row = db.execute(lookup.format('filename_lower(stored_name)'),
+                                     (path.name.lower(), path.stem.lower())).fetchone()
+            else:
+                document_id = path.stem.rpartition('-')[0]
+                row = db.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+        if row is not None:
+            document = self._document(row)
+            revision = document['revision']
+            expected = self._pdf_path(document, 0 if original else revision)
+            if (original or revision) and path == expected.parent.resolve() / expected.name:
+                if original and revision:
+                    self._read_pdf(document, 0)
+                self._read_pdf(document, revision)
+                return document
+        raise ValueError('This managed PDF is missing from the catalog or is an older revision. Open the paper from Library.')
 
     def _import_stream(self, stream, filename, source_path):
         filename = Path(filename.replace("\\", "/")).name or "document.pdf"
@@ -362,15 +430,16 @@ class Library:
                     row = db.execute("SELECT * FROM documents WHERE sha256 = ?", (sha,)).fetchone()
                     if row:
                         doc = self._document(row)
-                        dest = self.originals / self._stored_name(doc)
+                        dest = self._pdf_path(doc, 0)
+                        verified_copy = temp
                         if not dest.exists():  # repair an original that was deleted from disk
                             name = row["stored_name"] or self._free_name(db, doc, self._base_name(doc))
                             dest = self.originals / name
                             os.replace(temp, dest)
                             db.execute("UPDATE documents SET stored_name = ? WHERE id = ?", (name, row["id"]))
-                        result = doc
-                        if result["metadata"].get("parser_version", 0) < PARSER_VERSION:
-                            _store_local(db, doc, extract_metadata(dest, doc["filename"]))
+                            verified_copy = dest
+                        if doc["metadata"].get("parser_version", 0) < PARSER_VERSION:
+                            _store_local(db, doc, extract_metadata(verified_copy, doc["filename"]))
                         result = self._document(db.execute("SELECT * FROM documents WHERE id = ?", (row["id"],)).fetchone())
                         result["duplicate"] = True
                         return result
@@ -396,35 +465,70 @@ class Library:
                 temp.unlink(missing_ok=True)
 
     def get_path(self, document_id: int, annotated: bool = True) -> Path:
-        doc = self.get_document(document_id)
-        if annotated and doc["revision"]:
-            working = self.working / f'{document_id}-{doc["revision"]}.pdf'
-            if not working.is_file():
-                raise FileNotFoundError(f"Missing saved PDF for document {document_id}, revision {doc['revision']}")
-            return working
-        original = self.originals / self._stored_name(doc)
-        if not original.is_file():
-            raise FileNotFoundError(f"Missing original PDF for document {document_id}")
-        return original
+        document = self.get_document(document_id)
+        return self._existing_pdf_path(document, document['revision'] if annotated else 0)
+
+    def has_pdf(self, document: dict, annotated: bool = True) -> bool:
+        return self._pdf_path(document, document.get('revision', 0) if annotated else 0).is_file()
+
+    def _pdf_path(self, document, revision):
+        if revision:
+            return self.working / f"{document['id']}-{revision}.pdf"
+        return self.originals / self._stored_name(document)
+
+    def _existing_pdf_path(self, document, revision):
+        path = self._pdf_path(document, revision)
+        if path.is_file():
+            return path
+        if revision:
+            raise FileNotFoundError(f"Missing saved PDF for document {document['id']}, revision {revision}")
+        raise FileNotFoundError(f"Missing original PDF for document {document['id']}")
+
+    def read_pdf(self, document_id: int, annotated: bool = True) -> tuple[bytes, int]:
+        """Return verified bytes and the revision from the same catalog lookup."""
+        document = self.get_document(document_id)
+        revision = document['revision'] if annotated else 0
+        return self._read_pdf(document, revision), revision
+
+    @staticmethod
+    def _matches_original(document, data):
+        return hashlib.sha256(memoryview(data)[:document['size']]).hexdigest() == document['sha256']
+
+    def _read_pdf(self, document, revision):
+        data = self._existing_pdf_path(document, revision).read_bytes()
+        if not revision:
+            if hashlib.sha256(data).hexdigest() != document['sha256']:
+                raise ValueError('The managed original has changed. Restore its original bytes before opening it.')
+        elif digest := document['revision_sha256']:
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise ValueError('The saved PDF revision has changed. Restore its saved bytes before opening it.')
+        # Older saves were incremental too, so their original PDF is still the prefix.
+        elif not self._matches_original(document, data):
+            raise ValueError('The saved PDF revision does not match its managed original.')
+        return data
 
     def save_pdf(self, document_id: int, payload: bytes, expected_revision: int) -> dict:
         with self._lock:
             doc = self.get_document(document_id)
             if doc["revision"] != expected_revision:
                 raise ValueError("Revision conflict")
+            if not payload.lstrip().startswith(b"%PDF-"):
+                raise ValueError("File is not a PDF")
+            if not self._matches_original(doc, payload):
+                raise ValueError('The PDF does not match its managed original.')
+            digest = hashlib.sha256(payload).hexdigest()
             fd, temp = tempfile.mkstemp(dir=self.working, suffix=".part")
             temp = Path(temp)
             try:
                 with os.fdopen(fd, "wb") as output:
                     output.write(payload)
-                if not payload.lstrip().startswith(b"%PDF-"):
-                    raise ValueError("File is not a PDF")
                 reader = PdfReader(temp)
                 if reader.is_encrypted or not len(reader.pages):
                     raise ValueError("Invalid PDF")
-                os.replace(temp, self.working / f"{document_id}-{expected_revision + 1}.pdf")
+                os.replace(temp, self._pdf_path(doc, expected_revision + 1))
                 with self._connect() as db:
-                    db.execute("UPDATE documents SET revision = revision + 1 WHERE id = ?", (document_id,))
+                    db.execute("UPDATE documents SET revision = revision + 1, revision_sha256 = ? WHERE id = ?",
+                               (digest, document_id))
                 return self.get_document(document_id)
             finally:
                 temp.unlink(missing_ok=True)
@@ -469,7 +573,7 @@ class Library:
         if "title" in allowed and not allowed["title"]:
             raise ValueError("Title cannot be empty")
         if "doi" in allowed:
-            allowed["doi"] = self._normalize_doi(allowed["doi"])
+            allowed["doi"] = normalize_doi(allowed["doi"])
         with self._lock:
             doc = self.get_document(document_id)
             changed = {key: value for key, value in allowed.items() if (value or None) != (doc[key] or None)}
@@ -570,15 +674,8 @@ class Library:
             self._rename(document_id)
             return self.get_document(document_id)
 
-    @staticmethod
-    def _normalize_doi(value):
-        value = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", str(value or "").strip(), flags=re.I).strip().lower()
-        if value and not re.fullmatch(r"10\.\d{4,9}/\S+", value):
-            raise ValueError("Invalid DOI")
-        return value or None
-
     def find_by_doi(self, doi: str) -> list[dict]:
-        doi = self._normalize_doi(doi)
+        doi = normalize_doi(doi)
         with self._connect() as db:
             rows = db.execute("""SELECT documents.* FROM documents JOIN work_identifiers
                 ON documents.work_id = work_identifiers.work_id
@@ -598,7 +695,7 @@ class Library:
             row = db.execute("SELECT content FROM document_views WHERE document_id = ?", (document_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def save_view(self, document_id: int, view: dict, only_if_missing=False) -> dict:
+    def save_view(self, document_id: int, view: dict) -> dict:
         doc = self.get_document(document_id)
         if not isinstance(view, dict) or set(view) != {'page', 'scale'}:
             raise ValueError('View must contain page and scale')
@@ -613,8 +710,7 @@ class Library:
             if isinstance(scale, bool) or not math.isfinite(number) or not 0 < number <= 100:
                 raise ValueError('Invalid zoom scale')
         with self._lock, self._connect() as db:
-            conflict = 'DO NOTHING' if only_if_missing else 'DO UPDATE SET content = excluded.content'
-            db.execute(f"INSERT INTO document_views VALUES (?, ?) ON CONFLICT(document_id) {conflict}",
+            db.execute("INSERT INTO document_views VALUES (?, ?) ON CONFLICT(document_id) DO UPDATE SET content = excluded.content",
                        (document_id, json.dumps(view)))
             row = db.execute("SELECT content FROM document_views WHERE document_id = ?", (document_id,)).fetchone()
         return json.loads(row[0])

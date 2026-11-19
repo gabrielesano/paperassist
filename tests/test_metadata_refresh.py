@@ -31,7 +31,7 @@ class MetadataRefreshTests(unittest.TestCase):
         arxiv = patch("paperassist.metadata_refresh.arxiv_metadata.lookup", return_value=None)
         self.arxiv = arxiv.start()
         self.addCleanup(arxiv.stop)
-        network = patch("paperassist.retrieval._get", return_value=b'{"message":{"items":[]}}')
+        network = patch("paperassist.http_client.get", return_value=b'{"message":{"items":[]}}')
         self.network = network.start()
         self.addCleanup(network.stop)
 

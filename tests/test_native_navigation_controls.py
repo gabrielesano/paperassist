@@ -1,43 +1,25 @@
 """Independent and stable page and zoom controls for split papers."""
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
-from test_native_support import make_pdf, needs_qt
+from support import QtTestCase, make_pdf, needs_qt
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QToolButton
 
 from paperassist.native.positions import current_page
-from paperassist.native.renderer import RenderClient
 from paperassist.native.source import FileSource
 from paperassist.native.window import MainWindow
 
 
 @needs_qt
-class NavigationControlsTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
+class NavigationControlsTests(QtTestCase):
     def setUp(self):
-        self.folder = tempfile.TemporaryDirectory()
-        self.addCleanup(self.folder.cleanup)
-        self.path = Path(self.folder.name)
-        config = patch('paperassist.paths.config_file', return_value=self.path / 'config.json')
-        config.start()
-        self.addCleanup(config.stop)
-        self.paths = [make_pdf(self.path / f'{i}.pdf', pages=3 + i) for i in range(3)]
+        super().setUp()
+        self.paths = [make_pdf(self.dir / f'{i}.pdf', pages=3 + i) for i in range(3)]
         self.window = MainWindow(self.client)
         self.window.resize(1600, 900)
         self.window.show()
-        self.addCleanup(self.window.close)
+        self.addCleanup(lambda: self.cleanup_window(self.window))
         self.window.activateWindow()
         QApplication.setActiveWindow(self.window)
         self.tab = self.window.open_source(FileSource(self.paths[0]))

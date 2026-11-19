@@ -1,12 +1,12 @@
-"""A pane is one PDF view with its own top find bar, and a title bar when it is a quick view or read-only."""
+"""A pane is one PDF view with its own top find bar, and a title/nav bar when it is a quick view or read-only."""
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .document import PdfDocument
-from .theme import INK, icon
-from .toolbar import install_overflow
+from .theme import INK, icon, set_props
+from .toolbar import PageField, install_overflow, reserve_zoom_width, step_page
 from .view import PdfView
 
 
@@ -76,11 +76,12 @@ class Pane(QFrame):
         self.find_bar = FindBar(self.view)
         self.quick, self.vertical = False, True  # vertical: the other pane sits above or below
         self.title_label = QLabel()
-        self.title_label.setStyleSheet("font-weight: 600;")
         self.head, self.note = "", ""  # the label elides the head, never the note: a toolbar widget needs an exact width or it overlaps the buttons
-        self.bar = QToolBar("Quick view", objectName="pane-bar")
+        self.bar = self.navigation_bar = QToolBar("Quick view", objectName="pane-bar")
         self.bar.setMovable(False)
         self.title_action = self.bar.addWidget(self.title_label)
+        self.navigation_field = PageField("Second paper")
+        self.navigation_actions = self._build_navigation()
         self.quick_buttons = []
         for text, tooltip, signal in (
             ("Side by side", "Stack the papers or put them side by side", self.quick_layout_toggled),
@@ -93,14 +94,40 @@ class Pane(QFrame):
             self.quick_buttons.append(self.bar.widgetForAction(action))
         self.layout_button = self.quick_buttons[0]
         install_overflow(self.bar)
-        self.navigation_bar = self.bar
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
         for widget in (self.bar, self.find_bar, self.view):
             column.addWidget(widget)
         self.view.edited.connect(self.refresh_bar)
+        self.view.moved.connect(self.refresh_navigation)
         self.set_quick(False)
+
+    def _build_navigation(self):
+        bar, view = self.bar, self.view
+        before = set(bar.actions())
+
+        def button(text, glyph, slot):
+            action = QAction(icon(glyph, INK, 15), f"Second paper: {text}", bar)
+            action.triggered.connect(slot)
+            bar.addAction(action)
+            widget = bar.widgetForAction(action)
+            widget.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            widget.setAccessibleName(action.text())
+            return action
+
+        button("previous page", "chevron_left", lambda: step_page(view, -1))
+        bar.addWidget(self.navigation_field)
+        button("next page", "chevron_right", lambda: step_page(view, 1))
+        button("find", "find", self.find_bar.open)
+        button("zoom out", "minus", lambda: view.zoom_by(0.8))
+        self.navigation_fit = QAction("Fit width", bar)
+        self.navigation_fit.triggered.connect(view.fit_width)
+        bar.addAction(self.navigation_fit)
+        self.navigation_fit.setToolTip("Second paper: fit width")
+        bar.widgetForAction(self.navigation_fit).setAccessibleName("Second paper: fit width")
+        button("zoom in", "plus", lambda: view.zoom_by(1.25))
+        return [action for action in bar.actions() if action not in before]
 
     # ---- what the rules and the window need to know -------------------------------------
     @property
@@ -130,9 +157,20 @@ class Pane(QFrame):
         self.quick = quick
         for button in self.quick_buttons:
             button.defaultAction().setVisible(quick)
-        for action in getattr(self, 'navigation_actions', []):
+        for action in self.navigation_actions:
             action.setVisible(quick)
+        if quick:
+            self.refresh_navigation()
         self.refresh_bar()
+
+    def refresh_navigation(self):
+        if not self.quick:
+            return
+        self.navigation_field.show_page(self.view)
+        text = "Fit width" if self.view.fit else f"{round(self.view.zoom * 100)}%"
+        button = self.bar.widgetForAction(self.navigation_fit)
+        if button is not None:
+            reserve_zoom_width(self.navigation_fit, button, text)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -143,7 +181,7 @@ class Pane(QFrame):
         label = self.title_label
         tail = (" · " if self.head and self.note else "") + self.note
         buttons_w = sum(button.sizeHint().width() for button in self.quick_buttons if button.defaultAction().isVisible())
-        navigation_w = sum(max(widget.sizeHint().width(), widget.minimumWidth()) for action in getattr(self, 'navigation_actions', [])
+        navigation_w = sum(max(widget.sizeHint().width(), widget.minimumWidth()) for action in self.navigation_actions
                            if action.isVisible() and (widget := self.bar.widgetForAction(action)))
         room = min(160, self.width() - buttons_w - navigation_w - 44 - label.fontMetrics().horizontalAdvance(tail))
         self.title_action.setVisible(bool(self.note) or room >= 60)
@@ -169,9 +207,7 @@ class Pane(QFrame):
         self.bar.setVisible(self.quick or self.view.locked)
 
     def set_active(self, active):
-        self.setProperty("active", active)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        set_props(self, active=active)
 
     def keyPressEvent(self, event):
         if event.key() != Qt.Key_Escape:

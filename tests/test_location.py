@@ -21,9 +21,8 @@ class LocationTests(unittest.TestCase):
         (self.current / 'originals' / 'a.pdf').write_bytes(b'%PDF one')
         (self.current / 'working').mkdir(exist_ok=True)
         (self.current / '.token').write_text('secret', encoding='utf-8')
-        # A running server's markers must not travel with the library.
+        # A running instance's lock marker must not travel with the library.
         (self.current / '.server.lock').write_text('', encoding='utf-8')
-        (self.current / '.server.json').write_text('{}', encoding='utf-8')
 
     def test_unreadable_resolution_or_source_tree_is_refused(self):
         for target in ('paperassist.location.Path.resolve', 'paperassist.location._tree'):

@@ -81,6 +81,38 @@ class GlibcAuditTests(unittest.TestCase):
         self.assertIn('bad.so', error)
         self.assertIn('permission denied', error)
 
+    def test_inspect_bundle_elfs_scans_executable_once_and_summarizes_metadata(self):
+        internal = self.bundle / '_internal'
+        internal.mkdir()
+        bundled = internal / 'libfoo.so'
+        bundled.write_bytes(b'\x7fELF')
+
+        calls = []
+        def fake_run(command, **kwargs):
+            calls.append((command[1], command[2]))
+            flag, target = command[1], Path(command[2])
+            if flag == '-V':
+                if target == self.executable:
+                    out = 'Name: GLIBC_2.17\n'
+                else:
+                    out = 'Name: GLIBC_2.34\nName: GLIBCXX_3.4.30\nName: CXXABI_1.3.9\n'
+            else:
+                out = ' 0x0000000000000001 (NEEDED) Shared library: [libfoo.so]\n' \
+                      ' 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n'
+            return subprocess.CompletedProcess(command, 0, stdout=out, stderr='')
+
+        with patch.object(audit_glibc.subprocess, 'run', side_effect=fake_run):
+            summary = audit_glibc.inspect_bundle_elfs(self.bundle)
+
+        exe_v_calls = [c for c in calls if c == ('-V', str(self.executable))]
+        self.assertEqual(len(exe_v_calls), 1)
+        self.assertEqual(summary['bootloader_max_glibc'], 'GLIBC_2.17')
+        self.assertEqual(summary['bundle_max_glibc'], 'GLIBC_2.34')
+        self.assertEqual(summary['bundle_max_glibc_files'], ['_internal/libfoo.so'])
+        self.assertEqual(summary['bundle_max_glibcxx'], 'GLIBCXX_3.4.30')
+        self.assertEqual(summary['bundle_max_cxxabi'], 'CXXABI_1.3.9')
+        self.assertEqual(summary['external_shared_libraries'], ['libc.so.6'])
+
 
 if __name__ == '__main__':
     unittest.main()

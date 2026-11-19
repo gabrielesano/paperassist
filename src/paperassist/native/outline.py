@@ -1,41 +1,21 @@
-"""The outline column: bookmarks of the main paper, or a page list when it has none.
-
-Bookmarks are read with pypdf, so the PDF engine stays behind engine.py.
-"""
-import io
+"""The outline column: bookmarks of the main paper via PDFium, or a page list when it has none."""
+from contextlib import closing
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
 
+from .engine import Pdf
 
-def read_outline(data):
+
+def read_outline(source):
     """[(title, level, page index, y)] with y in displayed points from the page top; [] without bookmarks."""
-    from pypdf import PdfReader  # loaded on first use: most sessions never need it in this process
-    entries = []
     try:
-        reader = PdfReader(io.BytesIO(data))
-
-        def walk(items, level):
-            for item in items:
-                if isinstance(item, list):
-                    walk(item, level + 1)
-                    continue
-                page = reader.get_destination_page_number(item)
-                if page is not None and 0 <= page < len(reader.pages):
-                    entries.append((str(item.title), level, page, _top(reader.pages[page], item.top)))
-
-        walk(reader.outline, 0)
+        if isinstance(source, Pdf):
+            return source.outline()
+        with closing(Pdf(source)) as pdf:
+            return pdf.outline()
     except Exception:  # a damaged outline must not stop the paper from being read
-        return entries
-    return entries
-
-
-def _top(page, top):
-    """Rotated pages keep to the page top: converting their coordinates is the engine's job."""
-    from pypdf.generic import NullObject
-    if top is None or isinstance(top, NullObject) or page.rotation % 360:
-        return 0.0
-    return max(0.0, float(page.cropbox.top) - float(top))
+        return []
 
 
 class OutlinePanel(QTreeWidget):

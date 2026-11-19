@@ -2,34 +2,18 @@
 import hashlib
 import io
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import needs_qt
+from support import QtTestCase, needs_qt
 from test_reference_links import make_cross_page_paper, make_link_paper
 
 
 @needs_qt
-class ReferenceLinkWindowTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from PySide6.QtWidgets import QApplication
-        from paperassist.native.renderer import RenderClient
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
+class ReferenceLinkWindowTests(QtTestCase):
     def pump(self, condition):
-        end = time.monotonic() + 15
-        while time.monotonic() < end and not condition():
-            self.app.processEvents()
-            time.sleep(.002)
-        self.assertTrue(condition(), 'Timed out waiting for the native reader')
+        return super().pump(condition, timeout=15)
 
     def test_count_button_visits_same_page_and_later_appendices_without_saving(self):
         self.check_window(make_link_paper, 5, [1, 1, 1, 2, 3])

@@ -10,12 +10,15 @@ Native parity is accepted: 104 rows and five host-only exclusions in the
 Windows and Apple Silicon macOS packages already exist. The web stack is retired
 and minimal offline OCR is included in new builds.
 
-The `0.2.0a6` alpha adds a right-click PDF context menu (`Copy`, `Highlight`,
-`Comment`, `Select all`, and annotation/comment deletion) and confines multi-line
-selection and highlighting to article prose by excluding margin and two-column
-gutter line numbers. It includes the earlier `0.2.0a5` extraction and Linux CA
-fixes. See [release notes](releases/0.2.0a6.md) and the
-[release acceptance record](development/release-0.2.0a6.md).
+The `0.3.0` release lowers multi-paper resident memory by 18–24% (sharing a
+single PDFium document between rendering and `CitationIndex` in the worker,
+hibernating inactive `pypdf` structures on hidden tabs, and trimming native
+heaps after tab close and background jobs), verifies SHA-256 integrity of
+original and working PDFs on open, hardens indirect PDF annotation and
+rotated-page handling, batches reference resolution and per-host HTTP
+throttling, and consolidates the native UI and packaging stack. See
+[release notes](releases/0.3.0.md) and the
+[release acceptance record](development/release-0.3.0.md).
 
 1. Keep manual desktop acceptance as an explicit follow-up: clean Ubuntu/Debian
    GUI trials and interactive Windows/macOS reading, editing, focus and display
@@ -26,6 +29,11 @@ fixes. See [release notes](releases/0.2.0a6.md) and the
 
 ## Completed transitions and automated acceptance
 
+- Prepared `0.3.0` with the multi-paper memory and worker optimizations,
+  library/annotation integrity hardening, batch reference resolution, per-host
+  HTTP throttling, and native/packaging consolidation. See
+  [release notes](releases/0.3.0.md) and the
+  [acceptance record](development/release-0.3.0.md).
 - Published `0.2.0a6` with the PDF right-click context menu and line-number
   exclusion during multi-line selection and highlighting, verified source and
   tag CI, successful Linux/Windows/macOS package acceptance, and all release

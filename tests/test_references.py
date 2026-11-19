@@ -2,11 +2,17 @@ import unittest
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from paperassist.references import (analyze, extract, local_candidates, get, link, repair_downloads, set_retrieval, _save,
+from paperassist.library import Library as Catalog
+from paperassist.references import (analyze, extract, local_candidates, get, link, repair_downloads, set_retrieval, _load, _save, _store_analysis,
                                     map_destinations, _publication, _extract_pages, DESTINATION_VERSION, EXTRACTION_VERSION)
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
+
+
+class ReferenceTestLibrary(Catalog):
+    def read_pdf(self, document_id, annotated=True):
+        return str(self.get_path(document_id, annotated)).encode(), 0
 
 
 class ReferenceTests(unittest.TestCase):
@@ -21,11 +27,13 @@ class ReferenceTests(unittest.TestCase):
         self.assertIsNone(_publication('ApJ, 170, 228'))
 
     def test_numeric_groups_ranges_exclude_bibliography(self):
-        pages = ['See [1–3] and [1, 3].\nReferences\n[1] Alpha 2020. First.\n[2] Beta 2021. Second.\n[3] Gamma 2022. Third.']
+        pages = ['See [1—3] and [1, 3; 1]. Ignore [2, 3–1].\n'
+                 'References\n[1] Alpha 2020. First.\n[2] Beta 2021. Second.\n[3] Gamma 2022. Third.']
         refs = extract(pages)
         self.assertEqual([r['citation_count'] for r in refs], [2, 1, 2])
         self.assertTrue(all(r['count_status'] == 'partial' for r in refs))
         self.assertEqual(refs[0]['occurrences'][0]['page'], 1)
+        self.assertEqual(refs[1]['occurrences'][0]['marker'], '[1—3]')
 
     def test_author_year_and_no_heading(self):
         refs = extract(['Smith et al. (2020) and Smith (2020).\nReferences\nSmith, A. 2020. A useful paper.'])
@@ -166,9 +174,9 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual([d['id'] for d in local_candidates(refs[1], documents, 9)], [2])
 
     def test_automatic_links_refresh_and_manual_link_wins(self):
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
                 self.documents = []
 
             def list_documents(self):
@@ -183,18 +191,20 @@ class ReferenceTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             library = Library(Path(directory) / 'library.sqlite')
-            ref = {'id': '0', 'raw': 'Smith, A., Jones, B. 2020', 'authors': 'Smith',
+            ref = {'raw': 'Smith, A., Jones, B. 2020', 'authors': 'Smith', 'label': 'Smith 2020', 'citation_count': 0,
                    'year': '2020', 'doi': '10.1234/example', 'local_document_id': None}
-            _save(library, 9, {'references': [ref], 'status': 'partial', 'destination_version': DESTINATION_VERSION,
-                               'extraction_version': EXTRACTION_VERSION})
             library.documents = [{'id': 1, 'title': 'Paper', 'authors': 'Smith A., Jones B.',
                                   'year': 2020, 'doi': '10.1234/example'},
                                  {'id': 2, 'title': 'Other', 'authors': '', 'year': None}]
+            analyzed = _store_analysis(library, 9, [dict(ref)])['references'][0]
+            self.assertEqual((analyzed['local_document_id'], analyzed['local_match']), (1, 'doi'))
+            self.assertIsNone(_load(library, 9)['references'][0]['local_document_id'])
             self.assertEqual(get(library, 9)['references'][0]['local_document_id'], 1)
             library.documents.append({**library.documents[0], 'id': 3})
             self.assertIsNone(get(library, 9)['references'][0]['local_document_id'])
             link(library, 9, '0', 2)
             library.documents.pop()
+            self.assertEqual(_store_analysis(library, 9, [dict(ref)])['references'][0]['local_document_id'], 2)
             self.assertEqual(get(library, 9)['references'][0]['local_document_id'], 2)
 
     def test_publication_match_ambiguity_missing_and_manual_precedence(self):
@@ -205,9 +215,9 @@ class ReferenceTests(unittest.TestCase):
         class Reader:
             pages = [Page()]
 
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
                 self.documents = [{'id': 1, 'sha256': 'one', 'authors': 'Guarrasi M., Reale F.', 'title': 'Paper'},
                                   {'id': 2, 'sha256': 'two', 'authors': 'Other A.', 'title': 'Other'}]
                 self.missing = set()
@@ -248,9 +258,9 @@ class ReferenceTests(unittest.TestCase):
                         'A PAPER TITLE\nP. Antolin1, and L. Rouppe van der Voort')
         class Reader:
             pages = [Page()]
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
             def list_documents(self):
                 return [{'id': 2, 'sha256': 'paper', 'authors': 'IOP Publishing'}]
             def get_path(self, document_id, annotated=False):
@@ -271,9 +281,10 @@ class ReferenceTests(unittest.TestCase):
                         'A PAPER TITLE\nP. Antolin1, and L. Rouppe van der Voort')
         class Reader:
             pages = [Page()]
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path, metadata):
-                self.db_path, self.metadata = path, metadata
+                super().__init__(path)
+                self.metadata = metadata
             def list_documents(self):
                 return [{'id': 2, 'sha256': 'paper', 'authors': 'IOP Publishing', 'metadata_status': 'corrected',
                          'metadata': self.metadata}]
@@ -289,9 +300,9 @@ class ReferenceTests(unittest.TestCase):
                     self.assertEqual(get(library, 1)['references'][0]['local_document_id'], expected)
 
     def test_manual_links_shared_only_when_reference_and_target_are_unique(self):
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
             def list_documents(self):
                 return [{'id': 2}, {'id': 3}]
             def get_path(self, document_id, annotated=False):
@@ -313,9 +324,9 @@ class ReferenceTests(unittest.TestCase):
             self.assertIsNone(get(library, 1)['references'][0]['local_document_id'])
 
     def test_self_link_is_preserved_as_invalid_and_can_be_reset(self):
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
             def list_documents(self):
                 return [{'id': 1}, {'id': 2, 'doi': '10.1234/example'}]
             def get_document(self, document_id):
@@ -340,9 +351,9 @@ class ReferenceTests(unittest.TestCase):
             self.assertNotIn('manual_link', reset)
 
     def test_missing_current_revision_is_not_available(self):
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
             def list_documents(self):
                 return [{'id': 2, 'doi': '10.1234/example'}]
             def get_path(self, document_id, annotated=True):
@@ -446,9 +457,9 @@ class ReferenceTests(unittest.TestCase):
             pages = [Page()]
             named_destinations = {}
 
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
             def get_path(self, document_id, annotated=False):
                 return 'paper.pdf'
             def list_documents(self):
@@ -508,9 +519,9 @@ class ReferenceTests(unittest.TestCase):
             pages = [Page()]
             named_destinations = {}
 
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
             def get_path(self, document_id, annotated=False):
                 return 'paper.pdf'
             def list_documents(self):
@@ -537,11 +548,12 @@ class ReferenceTests(unittest.TestCase):
                 reader.assert_called_once()
 
 
-class FakeLibrary:
+class FakeLibrary(ReferenceTestLibrary):
     """Minimal library whose first pages are described by `pages` (sha -> text)."""
 
     def __init__(self, path, documents, pages=None):
-        self.db_path, self.documents, self.pages = path, documents, pages or {}
+        super().__init__(path)
+        self.documents, self.pages = documents, pages or {}
         self.verified = []
 
     def list_documents(self):
@@ -558,8 +570,8 @@ class FakeLibrary:
 
 
 class FakeReader:
-    def __init__(self, sha):
-        text = FakeLibrary.pages[sha]
+    def __init__(self, stream):
+        text = FakeLibrary.pages[stream.read().decode()]
         self.pages = [type('Page', (), {'extract_text': lambda self: text})()]
 
 
@@ -622,7 +634,7 @@ class ConflictTests(unittest.TestCase):
         library = self.library(BROWNING, {'id': 9, 'sha256': 'other'})
         self.save(library, dict(GERRARD))
         extracting, release = threading.Event(), threading.Event()
-        def extract_pages(pages):
+        def extract_references(pages, heading):
             extracting.set()
             if not release.wait(3):
                 raise TimeoutError('PDF extraction was not released')
@@ -632,9 +644,7 @@ class ConflictTests(unittest.TestCase):
             link(library, 9, '0', 28)
             set_retrieval(library, 9, '0', {'status': 'not_found'})
         with ThreadPoolExecutor(max_workers=2) as executor, \
-             patch('paperassist.references.extract', side_effect=extract_pages), \
-             patch('paperassist.references.map_destinations'), \
-             patch('paperassist.references.crosscheck_links'):
+             patch('paperassist.references._extract_references', side_effect=extract_references):
             analysis = executor.submit(analyze, library, 9)
             try:
                 self.assertTrue(extracting.wait(3))
@@ -695,15 +705,11 @@ class ConflictTests(unittest.TestCase):
         ref = {**GERRARD, 'id': 'legacy-3', 'legacy': True, 'manual_link': True,
                'local_document_id': 28, 'retrieval': {'status': 'found'}}
         self.save(library, ref)
-        with patch('paperassist.references.extract', return_value=[]), \
-             patch('paperassist.references.map_destinations'), \
-             patch('paperassist.references.crosscheck_links'):
+        with patch('paperassist.references._analyze_pdf', return_value=[]):
             unmatched = analyze(library, 9)['references'][0]
         self.assertEqual(unmatched['id'], 'legacy-3')
-        with patch('paperassist.references.extract', return_value=[{
-                **GERRARD, 'id': '0', 'label': 'Gerrard 2001', 'citation_count': 0}]), \
-             patch('paperassist.references.map_destinations'), \
-             patch('paperassist.references.crosscheck_links'):
+        with patch('paperassist.references._analyze_pdf', return_value=[{
+                **GERRARD, 'id': '0', 'label': 'Gerrard 2001', 'citation_count': 0}]):
             matched = analyze(library, 9)['references'][0]
         self.assertEqual(matched['id'], 'legacy-3')
         self.assertNotIn('legacy', matched)
@@ -717,9 +723,7 @@ class ConflictTests(unittest.TestCase):
             rows[name] = {**GERRARD, 'raw': f'{name}, A. 2001, Journal, 1, 22',
                           'authors': name, 'label': f'{name} 2001', 'citation_count': 0}
         def run(*names):
-            with patch('paperassist.references.extract', return_value=[dict(rows[name]) for name in names]), \
-                 patch('paperassist.references.map_destinations'), \
-                 patch('paperassist.references.crosscheck_links'):
+            with patch('paperassist.references._analyze_pdf', return_value=[dict(rows[name]) for name in names]):
                 refs = analyze(library, 9)['references']
             self.assertEqual(len({ref['id'] for ref in refs}), len(refs))
             return {ref['authors']: ref for ref in refs}
@@ -748,9 +752,7 @@ class ConflictTests(unittest.TestCase):
         without_id.pop('id')
         self.save(library, without_id, {**GERRARD, 'id': 'legacy-0',
                                       'retrieval': {'status': 'not_found'}})
-        with patch('paperassist.references.extract', return_value=[]), \
-             patch('paperassist.references.map_destinations'), \
-             patch('paperassist.references.crosscheck_links'):
+        with patch('paperassist.references._analyze_pdf', return_value=[]):
             refs = analyze(library, 9)['references']
         self.assertEqual(len({ref['id'] for ref in refs}), 2)
         self.assertIn('legacy-0', {ref['id'] for ref in refs})
@@ -953,9 +955,9 @@ class OutlierTests(unittest.TestCase):
         pages = ['References\n' + '\n'.join(f'Author{chr(97 + i)}, A. 20{10 + i}, Notes {i}' for i in range(6)) +
                  f'\n{entry}\nJournal of Tests, 12, 34 (2020) {junk}']
         refs = extract(pages)
-        self.assertTrue(refs[-1].get('truncated'))
         self.assertTrue(refs[-1]['raw'].endswith('Journal of Tests, 12, 34 (2020)'))
-        self.assertFalse(any(ref.get('truncated') for ref in refs[:-1]))
+        self.assertNotIn('stray words', refs[-1]['raw'])
+        self.assertEqual(len(refs), 7)
 
     def test_a_long_author_list_is_left_alone_and_unfinished_entries_cannot_be_cut(self):
         authors = ', '.join(f'Name{chr(65 + i)}, {chr(65 + i)}.' for i in range(20))
@@ -963,14 +965,29 @@ class OutlierTests(unittest.TestCase):
         legit = f'Consortium, A., Springer, L., Press, W. H., {authors} 2014, Sol. Phys., 289, 2733'
         refs = extract(['References\n' + '\n'.join(lines) + '\n' + legit])
         self.assertEqual(refs[-1]['raw'], legit)
-        self.assertFalse(refs[-1].get('truncated'))
         open_entry = 'Plain, A. 2019, ' + 'no citation end in this one ' * 30
         refs = extract(['References\n' + '\n'.join(lines) + '\n' + open_entry])
         self.assertEqual(refs[-1]['raw'], open_entry.strip())
-        self.assertFalse(refs[-1].get('truncated'))
 
 
 class ShortenedEntryCarryOverTests(unittest.TestCase):
+    def test_manual_link_stays_with_the_previous_entry_when_two_prefixes_match(self):
+        with TemporaryDirectory() as directory:
+            library = Catalog(directory)
+            raw = 'Smith, J. 2001, Journal 5, 100'
+            entry = {'label': 'Smith 2001', 'authors': 'Smith', 'year': '2001', 'doi': '', 'citation_count': 1}
+            old = {**entry, 'id': '7', 'raw': f'{raw}. Brown, C. 2005, Journal 7, 25',
+                   'manual_link': True, 'local_document_id': 2}
+            _save(library, 1, {'references': [old], 'status': 'partial'})
+            result = _store_analysis(library, 1, [{**entry, 'raw': raw}, {**entry, 'raw': raw[:-3]}])
+
+        first, second, legacy = result['references']
+        for fresh in (first, second):
+            self.assertNotEqual(fresh['id'], '7')
+            self.assertFalse(fresh.get('manual_link'))
+        self.assertTrue(legacy['legacy'])
+        self.assertEqual((legacy['id'], legacy['manual_target_id']), ('7', 2))
+
     def test_links_and_retrieval_of_an_over_merged_entry_follow_the_shortened_entry(self):
         class Page:
             def extract_text(self, **kwargs):
@@ -981,9 +998,9 @@ class ShortenedEntryCarryOverTests(unittest.TestCase):
             pages = [Page()]
             named_destinations = {}
 
-        class Library:
+        class Library(ReferenceTestLibrary):
             def __init__(self, path):
-                self.db_path = path
+                super().__init__(path)
             def get_path(self, document_id, annotated=False):
                 return 'paper.pdf'
             def list_documents(self):
@@ -1111,3 +1128,61 @@ class LineNumberAndHeadingTests(unittest.TestCase):
 
         # Fallback must not trigger on stray prose lacking following bibliography entries.
         self.assertEqual(extract(['References 1\nThis is a normal paragraph.\nNothing cited here.']), [])
+
+    def test_analyze_pdf_reuses_extracted_chunks_without_second_extract_text(self):
+        from paperassist.references import _analyze_pdf
+        calls = []
+
+        class Dest:
+            typ, left, top, bottom = '/XYZ', 80.0, 560.0, None
+
+        class Page:
+            mediabox = type('Box', (), {'width': 612.0, 'right': 612.0})()
+
+            def extract_text(self, visitor_text=None):
+                calls.append(visitor_text is not None)
+                spans = [('References\n', 80, 600, 10), ('Smith, A. 2020, ApJ, 10, 20\n', 80, 550, 8)]
+                if visitor_text is not None:
+                    for text, x, y, size in spans:
+                        visitor_text(text, [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, x, y], {}, size)
+                return ''.join(text for text, *_ in spans)
+
+        class Reader:
+            pages = [Page()]
+            named_destinations = {'cite.smith2020': Dest()}
+
+            def get_destination_page_number(self, dest):
+                return 0
+
+        class StubLibrary:
+            def read_pdf(self, document_id, annotated=False):
+                return b'%PDF-stub', 0
+
+        with patch('paperassist.references.PdfReader', return_value=Reader()), \
+             patch('paperassist.references._crosscheck_links'):
+            refs = _analyze_pdf(StubLibrary(), 1)
+        self.assertEqual(calls, [True])
+        self.assertEqual(refs[0]['destinations'], ['cite.smith2020'])
+
+    def test_resolve_checks_pdf_availability_without_n_plus_one_get_path(self):
+        from io import BytesIO
+        from pypdf import PdfWriter
+        from paperassist.references import _resolve
+
+        buf = BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        writer.write(buf)
+        pdf_bytes = buf.getvalue()
+
+        with TemporaryDirectory() as directory:
+            with Catalog(Path(directory)) as library:
+                source = library.import_stream(BytesIO(pdf_bytes), 'source.pdf')
+                cited = library.import_stream(BytesIO(pdf_bytes + b'\n% cited\n'), 'cited.pdf')
+                library.update_metadata(cited['id'], {'doi': '10.1234/cited'})
+                docs = library.list_documents()
+                payload = {'references': [{'id': '0', 'raw': 'Smith, A. 2020, ApJ, 1, 2', 'authors': 'Smith',
+                                           'year': '2020', 'doi': '10.1234/cited'}], 'status': 'partial'}
+                with patch.object(library, 'get_path', side_effect=AssertionError('get_path should not be called')):
+                    resolved = _resolve(library, source['id'], payload, docs)
+                self.assertEqual(resolved['references'][0]['local_document_id'], cited['id'])

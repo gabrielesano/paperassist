@@ -8,10 +8,11 @@ from PySide6.QtWidgets import (
 from shiboken6 import isValid
 
 from paperassist import paths, settings
+from paperassist.settings import ZOOM_CHOICES
 from paperassist.workspace import WorkspaceConflict
 
-from .interface_zoom import ZOOM_CHOICES, parse_zoom, window_style
-from .theme import ERROR_INK
+from .dialogs import setup_dialog
+from .theme import apply_theme, parse_zoom, set_props
 
 
 def _button(text, name, accessible, primary=False):
@@ -23,19 +24,16 @@ def _button(text, name, accessible, primary=False):
 
 class PreferencesDialog(QDialog):
     def __init__(self, host):
-        super().__init__(host, objectName="preferences-dialog", windowTitle="Preferences")
+        super().__init__(host, objectName="preferences-dialog")
         self.host, self.zoom_value, self.base_font = host, 1, QFont(host.font())
         self._return_focus = None
         self._saved_inbox, self._plan = "", None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(8)
+        layout, _ = setup_dialog(self, "Preferences", spacing=8)
         layout.setSizeConstraint(QLayout.SetFixedSize)
-        layout.addWidget(QLabel("<b>Preferences</b>"))
 
         size_label = QLabel("Interface size")
-        size_label.setStyleSheet("font-weight: 600;")
+        size_label.setProperty("strong", True)
         layout.addWidget(size_label)
         self.size_combo = QComboBox(objectName="preferences-zoom", accessibleName="Interface size")
         for value in ZOOM_CHOICES:
@@ -64,7 +62,7 @@ class PreferencesDialog(QDialog):
             ("Library location", self.library_edit, (self.library_browse, self.library_check), self.library_note),
         ):
             label = QLabel(title)
-            label.setStyleSheet("font-weight: 600;")
+            label.setProperty("strong", True)
             label.setBuddy(field)
             section.addWidget(label)
             row = QHBoxLayout()
@@ -128,7 +126,7 @@ class PreferencesDialog(QDialog):
 
     def _say(self, text, bad=False):
         self.message.setText(text)
-        self.message.setStyleSheet(f"color: {ERROR_INK};" if bad else "")
+        set_props(self.message, tone="error" if bad else "")
         self.message.setVisible(bool(text))
 
     def _close_confirm(self, *_):
@@ -221,7 +219,7 @@ class PreferencesDialog(QDialog):
         self.zoom_value = zoom
         with QSignalBlocker(self.size_combo):
             self.size_combo.setCurrentIndex(ZOOM_CHOICES.index(zoom))
-        self.host.setStyleSheet(window_style(self.host.styleSheet(), self.base_font, zoom))
+        apply_theme(base_font=self.base_font, zoom=zoom)
 
     def _on_size_changed(self, _index):
         value = parse_zoom(self.size_combo.currentData())
@@ -245,13 +243,3 @@ class PreferencesDialog(QDialog):
         key = focus if isinstance(focus, str) else "zoom"
         target = {"inbox": self.inbox_edit, "library": self.library_edit}.get(key, self.size_combo)
         (target if target.isEnabled() and target.isVisibleTo(self) else self.size_combo).setFocus()
-
-
-def install(window):
-    if existing := getattr(window, "preferences_dialog", None):
-        return existing
-    dialog = PreferencesDialog(window)
-    window.preferences_dialog = dialog
-    window.show_preferences = dialog.open_preferences
-    dialog.apply_zoom(settings.preferences().get("ui_zoom"))
-    return dialog

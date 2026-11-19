@@ -1,6 +1,5 @@
 """The native window on a real library: opening, saving, positions, shared preferences and side columns."""
 import io
-import tempfile
 import threading
 import time
 import unittest
@@ -9,8 +8,8 @@ from unittest.mock import patch
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, Fit, NameObject
+from support import QtTestCase, make_pdf, needs_qt, pdf_available
 from test_library import confirm
-from test_native_support import make_pdf, needs_qt, pdf_available
 
 if pdf_available:
     from PySide6.QtCore import Qt
@@ -22,12 +21,10 @@ if pdf_available:
     from paperassist.native import app as native_app
     from paperassist.native.engine import Rect
     from paperassist.native.library_dialog import LibraryDialog
-    from paperassist.native.library_source import LibrarySource
     from paperassist.native.outline import read_outline
     from paperassist.native.positions import CSS_PER_POINT, PositionKeeper, current_page, to_scale, to_zoom
     from paperassist.native.references_panel import reference_matcher
-    from paperassist.native.renderer import RenderClient
-    from paperassist.native.source import FileSource
+    from paperassist.native.source import FileSource, LibrarySource
     from paperassist.native.window import MainWindow
     from paperassist.workspace import LibraryInUse, Workspace, library_lock
 
@@ -50,25 +47,11 @@ def cited_pdf(path, pages=3):
 
 
 @needs_qt
-class LibraryWindowCase(unittest.TestCase):
+class LibraryWindowCase(QtTestCase):
     """A disposable library with papers of 3 to 5 pages (different content, so none is a duplicate)."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        self.dir = Path(folder.name).resolve()
-        config = patch("paperassist.paths.config_file", return_value=self.dir / "config.json")
-        config.start()
-        self.addCleanup(config.stop)
+        super().setUp()
         self.workspace = Workspace(self.dir / "library")
         self.addCleanup(self.workspace.close)
         papers = [cited_pdf(self.dir / "p3.pdf", pages=3), cited_pdf(self.dir / "p4.pdf", pages=4), make_pdf(self.dir / "p5.pdf", pages=5)]
@@ -87,13 +70,6 @@ class LibraryWindowCase(unittest.TestCase):
         window.confirm = lambda panes: True  # edits left over from a test are not the point of the cleanup
         window.close()  # finishes the background reads that write into the library folder
         window.deleteLater()
-
-    def pump(self, until=None, seconds=0.2):
-        end = time.perf_counter() + (10 if until else seconds)
-        while time.perf_counter() < end and not (until and until()):
-            self.app.processEvents()
-            time.sleep(0.002)
-        self.assertTrue(until() if until else True, "timed out")
 
     def open_document(self, window, document):
         tab = window.open_library_document(document["id"])
@@ -126,6 +102,45 @@ class StartUpTests(LibraryWindowCase):
 
 
 class SourceTests(LibraryWindowCase):
+    def test_library_refuses_a_replaced_original_then_opens_the_restored_bytes(self):
+        window = self.make_window()
+        library = self.workspace.library
+        document_id = self.docs[0]['id']
+        original = library.get_path(document_id)
+        original_bytes = original.read_bytes()
+        original.write_bytes(library.get_path(self.docs[2]['id']).read_bytes())
+        library.save_view(document_id, {'page': 2, 'scale': 'page-fit'})
+
+        window.show_library()
+        dialog = window.library_dialog
+        item = next(dialog.table.topLevelItem(i) for i in range(dialog.table.topLevelItemCount())
+                    if dialog.table.topLevelItem(i).data(0, Qt.UserRole) == document_id)
+        dialog.table.setCurrentItem(item)
+        QTest.mouseClick(dialog.open_button, Qt.LeftButton)
+        self.assertEqual(window.tabs.count(), 0)
+        self.assertIn('original has changed', window.statusBar().currentMessage())
+        self.assertEqual(library.get_document(document_id)['revision'], 0)
+        self.assertFalse(list(library.working.iterdir()))
+        self.assertEqual(library.get_view(document_id)['page'], 2)
+
+        original.write_bytes(original_bytes)
+        self.assertEqual(len(self.open_document(window, self.docs[0]).main.view.doc), 3)
+
+    def test_renderer_gets_the_verified_snapshot_even_if_the_path_changes_after_reading(self):
+        window = self.make_window()
+        original = self.workspace.library.get_path(self.docs[0]['id'])
+        verified = original.read_bytes()
+        replacement = self.workspace.library.get_path(self.docs[2]['id']).read_bytes()
+        render = self.client.open
+
+        def replace_before_render(data):
+            original.write_bytes(replacement)
+            return render(data)
+
+        with patch.object(self.client, 'open', side_effect=replace_before_render) as start_rendering:
+            self.open_document(window, self.docs[0])
+        start_rendering.assert_called_once_with(verified)
+
     def test_open_follows_the_newest_revision_and_save_creates_one(self):
         window = self.make_window()
         tab = self.open_document(window, self.docs[0])

@@ -5,7 +5,6 @@ import subprocess
 import sys
 import time
 import unittest
-from pathlib import Path
 
 try:
     from tests import test_linux_installer
@@ -63,9 +62,9 @@ class MaintenanceConcurrencyTests(unittest.TestCase):
             proc.terminate()
         proc.communicate(timeout=10)
 
-    def test_uninstall_holds_lock_against_install_and_repair(self):
-        proc = self.paused_process([str(self.app / "uninstall.sh")], "grep", '[ "$1" = "^LAUNCHER_PATH=" ]')
-        for args in (self.args, self.args + ["--repair"]):
+    def _assert_uninstall_holds_lock(self, uninstall_cmd, contenders):
+        proc = self.paused_process(uninstall_cmd, "grep", '[ "$1" = "^LAUNCHER_PATH=" ]')
+        for args in contenders:
             result = self.run_command(args)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("maintenance process", result.stderr)
@@ -75,16 +74,11 @@ class MaintenanceConcurrencyTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, err)
         self.assertFalse(self.app.exists())
 
+    def test_uninstall_holds_lock_against_install_and_repair(self):
+        self._assert_uninstall_holds_lock([str(self.app / "uninstall.sh")], (self.args, self.args + ["--repair"]))
+
     def test_installer_uninstall_holds_lock_through_removal(self):
-        proc = self.paused_process(self.args + ["--uninstall"], "grep", '[ "$1" = "^LAUNCHER_PATH=" ]')
-        result = self.run_command(self.args)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("maintenance process", result.stderr)
-        self.assertTrue(self.app.exists())
-        (self.gate / "go").touch()
-        _, err = proc.communicate(timeout=20)
-        self.assertEqual(proc.returncode, 0, err)
-        self.assertFalse(self.app.exists())
+        self._assert_uninstall_holds_lock(self.args + ["--uninstall"], (self.args, self.args + ["--repair"]))
 
     def test_unmanaged_uninstall_targets_leave_no_lock_files(self):
         for name in ("library", "foreign"):

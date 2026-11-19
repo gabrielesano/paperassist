@@ -7,13 +7,15 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject,
                            NameObject, TextStringObject)
 
 from paperassist import references
-from paperassist.native.citations import CitationIndex, citation_parts, merge_links
+from paperassist.library import Library
+from paperassist.citations import CitationIndex, citation_parts, merge_links
 from paperassist.native.engine import Pdf
 
 
@@ -146,6 +148,18 @@ def make_cross_page_paper(path, rotation=0, linked=True, complete=False):
 
 
 class EventTests(unittest.TestCase):
+    def test_analysis_finds_the_heading_once_for_text_and_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.pdf'
+            make_link_paper(path)
+            library = Library(Path(directory) / 'library')
+            document_id = library.open_file(path)['id']
+            with patch.object(references, '_find_heading', wraps=references._find_heading) as find_heading:
+                ref = references.analyze(library, document_id)['references'][0]
+            find_heading.assert_called_once()
+            self.assertEqual(ref['destinations'], ['Item.1'])
+            self.assertEqual([event['page'] for event in ref['occurrences']], [1, 1, 1, 2, 3])
+
     def test_one_cross_page_event_keeps_geometry_on_both_pages(self):
         with tempfile.TemporaryDirectory() as directory:
             for rotation in (0, 90, 180, 270):
@@ -158,7 +172,7 @@ class EventTests(unittest.TestCase):
                         refs = references.extract(pages)
                         self.assertEqual(refs[0]['citation_count'], 1)
                         references.map_destinations(reader, pages, refs)
-                        references.crosscheck_links(path, pages, refs)
+                        references.crosscheck_links(path.read_bytes(), pages, refs)
                         self.assertEqual(refs[0]['citation_count'], 1)
                         index = CitationIndex(path.read_bytes())
                         try:
@@ -178,7 +192,7 @@ class EventTests(unittest.TestCase):
             pages = [page.extract_text() for page in reader.pages]
             refs = references.extract(pages)
             references.map_destinations(reader, pages, refs)
-            references.crosscheck_links(path, pages, refs)
+            references.crosscheck_links(path.read_bytes(), pages, refs)
             self.assertEqual(refs[0]['citation_count'], 2)
             self.assertFalse(any(event.get('continuations') for event in refs[0]['occurrences']))
 
@@ -214,7 +228,7 @@ class EventTests(unittest.TestCase):
                     self.assertEqual(refs[0]['citation_count'], 4)
                     references.map_destinations(reader, pages, refs)
                     self.assertEqual(refs[0]['destinations'], ['Item.1'])
-                    references.crosscheck_links(path, pages, refs)
+                    references.crosscheck_links(path.read_bytes(), pages, refs)
                     self.assertEqual(refs[0]['citation_count'], 5)
                     self.assertEqual([o['page'] for o in refs[0]['occurrences']], [1, 1, 1, 2, 3])
                     self.assertEqual(sum(o['source'] == 'text' for o in refs[0]['occurrences']), 1)
@@ -229,7 +243,7 @@ class EventTests(unittest.TestCase):
     def test_ambiguous_counts_are_not_silently_replaced_with_link_counts(self):
         refs = [{'raw': ALPHA, 'citation_count': None, 'count_status': 'ambiguous',
                  'destinations': ['Item.1'], 'occurrences': []}]
-        references.crosscheck_links('unused.pdf', ['References'], refs)
+        references.crosscheck_links(b'', ['References'], refs)
         self.assertIsNone(refs[0]['citation_count'])
 
     def test_destination_migration_reextracts_saved_link_occurrences(self):
@@ -240,15 +254,16 @@ class EventTests(unittest.TestCase):
             pages = [page.extract_text() for page in reader.pages]
             refs = references.extract(pages)
             references.map_destinations(reader, pages, refs)
-            references.crosscheck_links(path, pages, refs)
+            references.crosscheck_links(path.read_bytes(), pages, refs)
             expected = copy.deepcopy(refs[0]['occurrences'])
-            library = SimpleNamespace(db_path=Path(directory) / 'library.sqlite',
-                                      get_path=lambda *args, **kwargs: path,
-                                      list_documents=lambda: [])
-            references._save(library, 1, {'references': refs, 'status': 'partial',
-                                          'destination_version': references.DESTINATION_VERSION - 1,
-                                          'extraction_version': references.EXTRACTION_VERSION})
-            migrated = references.get(library, 1)['references'][0]
+            library = Library(Path(directory) / 'library')
+            document_id = library.open_file(path)['id']
+            references._save(library, document_id, {'references': refs, 'status': 'partial',
+                                                    'destination_version': references.DESTINATION_VERSION - 1,
+                                                    'extraction_version': references.EXTRACTION_VERSION})
+            with patch.object(references, '_find_heading', wraps=references._find_heading) as find_heading:
+                migrated = references.get(library, document_id)['references'][0]
+            find_heading.assert_called_once()
             self.assertEqual(migrated['citation_count'], len(expected))
             self.assertEqual(sum(o['source'] == 'link' for o in migrated['occurrences']),
                              sum(o['source'] == 'link' for o in expected))
@@ -271,7 +286,7 @@ class EventTests(unittest.TestCase):
             pages = [page.extract_text() for page in reader.pages]
             refs = references.extract(pages)
             references.map_destinations(reader, pages, refs)
-            references.crosscheck_links(output, pages, refs)
+            references.crosscheck_links(output.read_bytes(), pages, refs)
             self.assertEqual(refs[0]['citation_count'], 5)
 
     def test_background_crosscheck_can_overlap_foreground_reading(self):
@@ -288,7 +303,7 @@ class EventTests(unittest.TestCase):
                 barrier.wait(timeout=5)
                 for _ in range(8):
                     result = copy.deepcopy(refs)
-                    references.crosscheck_links(path, pages, result)
+                    references.crosscheck_links(path.read_bytes(), pages, result)
                     self.assertEqual(result[0]['citation_count'], 5)
 
             def read():

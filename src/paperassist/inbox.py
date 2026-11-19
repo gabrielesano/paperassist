@@ -6,6 +6,7 @@ never the browser's download name. Nothing in the folder is written, moved or de
 """
 
 import hashlib
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,8 +14,8 @@ from pathlib import Path
 from pypdf import PdfReader
 
 from paperassist import references, retrieval
-from paperassist.citation import fold, pdf_name, publication
-from paperassist.retrieval import DOI_PATTERN, MAX_PDF, _arxiv_id
+from paperassist.citation import DOI, arxiv_id, has_surname, pdf_name, publication, squash, strip_arxiv_version
+from paperassist.http_client import MAX_PDF
 from paperassist.settings import Settings
 
 MAX_FILES = 50
@@ -22,10 +23,6 @@ MAX_CANDIDATES = 5
 # A download made recently is plausibly the one the user wants even when it cannot be verified.
 RECENT = timedelta(days=14)
 NO_FOLDER = {'status': 'not_configured', 'summary': 'Set a folder for manual downloads in Preferences.'}
-
-
-def _squash(text):
-    return re.sub(r'[^a-z0-9]', '', fold(text))
 
 
 def _read(path):
@@ -39,19 +36,21 @@ def _read(path):
     return {'text': text if len(text.strip()) > 100 else '', 'properties': properties}
 
 
-def _entry(path):
-    info = path.stat()
-    return {'name': path.name, 'path': path, 'size': info.st_size, 'mtime': info.st_mtime}
-
-
 def _scan(folder):
-    files = [p for p in folder.iterdir() if p.suffix.lower() == '.pdf' and not p.is_symlink() and p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return [entry for entry in map(_entry, files[:MAX_FILES]) if entry['size'] <= MAX_PDF]
+    entries = []
+    with os.scandir(folder) as scan:
+        for entry in scan:
+            if not entry.name.lower().endswith('.pdf') or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                continue
+            info = entry.stat(follow_symlinks=False)
+            entries.append({'name': entry.name, 'path': Path(entry.path), 'size': info.st_size, 'mtime': info.st_mtime})
+    entries.sort(key=lambda item: item['mtime'], reverse=True)
+    return [entry for entry in entries[:MAX_FILES] if entry['size'] <= MAX_PDF]
 
 
-def _has_surname(text, surname):
-    return bool(surname) and bool(re.search(r'(?<!\w)' + re.escape(fold(surname)) + r'(?!\w)', fold(text)))
+def _sha256(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def _verdict(ref, file):
@@ -62,20 +61,20 @@ def _verdict(ref, file):
     doi = (ref.get('doi') or identity.get('doi') or '').lower()
     surname = ref.get('authors') or identity.get('first_author') or ''
     text, lines = file['text'], file['text'].splitlines()
-    own = [value.rstrip('.,;').lower() for value in DOI_PATTERN.findall(file['properties'])]
+    own = [value.rstrip('.,;').lower() for value in DOI.findall(file['properties'])]
     found = publication('\n'.join(lines[:6]))
     # Reuse the library's own contradiction rules: a different DOI or a different journal reference.
-    if references._conflict({**ref, 'doi': doi}, {'doi': doi if doi in own else own[0] if own else '', 'year': None}, {'publication': found}):
+    if references.has_conflict({**ref, 'doi': doi}, {'doi': doi if doi in own else own[0] if own else '', 'year': None}, {'publication': found}):
         return 'rejected'
     cited = publication(ref.get('raw') or '', ref.get('year', ''))
     printed = ' '.join(f'{text} {file["properties"]}'.lower().split())
-    arxiv = re.sub(r'v\d+$', '', _arxiv_id(ref).lower())
-    title = _squash(identity.get('title', ''))
+    arxiv = strip_arxiv_version(arxiv_id(ref))
+    title = squash(identity.get('title', ''))
     checks = (
         bool(doi) and bool(re.search(re.escape(doi) + r'(?![-_;/:a-z0-9]|\.[a-z0-9])', printed)),
         bool(arxiv) and bool(re.search(re.escape(arxiv) + r'(?!\d)', printed)),
-        bool(cited) and found == cited and _has_surname(text, surname),
-        len(title) >= 15 and title in _squash(text) and _has_surname(text, surname))
+        bool(cited) and found == cited and has_surname(text, surname),
+        len(title) >= 15 and title in squash(text) and has_surname(text, surname))
     return 'verified' if any(checks) else 'unmatched'
 
 
@@ -97,12 +96,12 @@ def _import(library, document_id, ref, path, verified, note=''):
     # A duplicate that is still unreviewed can now be verified; a user correction is never touched.
     if verified and ref.get('identity') and document['metadata_status'] == 'needs_review':
         document = library.apply_verified(document['id'], ref['identity'], name)
-    references.link(library, document_id, ref['id'], document['id'])
     stored = document['filename']
     summary = f'Linked from your folder as {stored}' + (f' (was {path.name}).' if stored != path.name else '.')
     summary += note if verified else ' Chosen by hand, not verified.'
     references.set_retrieval(library, document_id, ref['id'], {'version': 2, 'status': 'local', 'summary': summary,
-                                                                'attempts': [], 'document_id': document['id']})
+                                                                'attempts': [], 'document_id': document['id']},
+                             target_id=document['id'])
     return document, summary
 
 
@@ -114,7 +113,7 @@ def _identify(library, document_id, ref, cfg):
     if ref.get('identity'):
         return ref, ''
     try:
-        identity = retrieval._identity(ref, [], cfg)
+        identity = retrieval.resolve_identity(ref, cfg)
     except Exception:
         identity = None  # network or lookup trouble must not break the folder check
     if not identity:
@@ -126,7 +125,7 @@ def _identify(library, document_id, ref, cfg):
 
 
 def _find_reference(library, document_id, reference_id):
-    ref = next((r for r in references.get(library, document_id)['references'] if r['id'] == str(reference_id)), None)
+    ref = next((r for r in references.get(library, document_id, resolve=False)['references'] if r['id'] == str(reference_id)), None)
     if ref is None:
         raise KeyError('Reference not found')
     return ref
@@ -144,7 +143,7 @@ def check_folder(library, document_id, reference_id, folder, cfg=None):
     verdicts = [(entry, _verdict(ref, {**entry, **_read(entry['path'])})) for entry in _scan(Path(folder))]
     verified = [entry for entry, verdict in verdicts if verdict == 'verified']
     # The same paper downloaded twice is one candidate, not an ambiguity.
-    unique = list({hashlib.sha256(entry['path'].read_bytes()).hexdigest(): entry for entry in verified}.values()) if len(verified) > 1 else verified
+    unique = list({_sha256(entry['path']): entry for entry in verified}.values()) if len(verified) > 1 else verified
     if len(unique) > 1:
         return {'status': 'ambiguous', 'candidates': [_candidate(e) for e in unique[:MAX_CANDIDATES]],
                 'summary': 'Several PDFs in your folder match this reference; choose one.' + note}

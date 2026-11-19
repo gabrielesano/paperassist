@@ -31,8 +31,8 @@ class ArxivMetadataTests(unittest.TestCase):
         return document
 
     def lookup(self, document, data, cfg=None):
-        with patch("paperassist.arxiv_metadata.retrieval._get", return_value=data) as get:
-            with patch("paperassist.retrieval._download_pdf") as download:
+        with patch("paperassist.http_client.get", return_value=data) as get:
+            with patch("paperassist.http_client.download_pdf") as download:
                 record = lookup(document, cfg or Settings(), threading.Event())
         download.assert_not_called()
         return record, get
@@ -93,11 +93,11 @@ class ArxivMetadataTests(unittest.TestCase):
         for document, cfg in ((self.document(), Settings({"enabled": {"arxiv": False}})),
                               (self.document(identifiers=(), authors=""), Settings()),
                               (self.document(identifiers=tuple(f"2610.{n:05}" for n in range(6))), Settings())):
-            with patch("paperassist.arxiv_metadata.retrieval._get") as get:
+            with patch("paperassist.http_client.get") as get:
                 self.assertIsNone(lookup(document, cfg, cancel))
                 get.assert_not_called()
         cancel.set()
-        with patch("paperassist.arxiv_metadata.retrieval._get") as get:
+        with patch("paperassist.http_client.get") as get:
             self.assertIsNone(lookup(self.document(), Settings(), cancel))
             get.assert_not_called()
 
@@ -107,7 +107,7 @@ class ArxivMetadataTests(unittest.TestCase):
             <meta name="citation_arxiv_id" content="2610.12345"></head></html>'''
         for failure in (OSError("Temporary API failure"), b"invalid XML"):
             with self.subTest(failure=failure):
-                with patch("paperassist.arxiv_metadata.retrieval._get", side_effect=[failure, html]) as get:
+                with patch("paperassist.http_client.get", side_effect=[failure, html]) as get:
                     record = lookup(self.document(), Settings(), threading.Event())
                 self.assertEqual(record["authors"], "Ada Lovelace")
                 self.assertEqual(record["evidence"]["method"], "abstract_meta")
@@ -117,10 +117,10 @@ class ArxivMetadataTests(unittest.TestCase):
         html = b'''<meta name="citation_title" content="Parallel models for text generation">
             <meta name="citation_author" content="Ada Lovelace"><meta name="citation_date" content="2026/10/01">
             <meta name="citation_arxiv_id" content="2610.99999">'''
-        with patch("paperassist.arxiv_metadata.retrieval._get", side_effect=[OSError("Offline"), html]):
+        with patch("paperassist.http_client.get", side_effect=[OSError("Offline"), html]):
             with self.assertRaisesRegex(ValueError, "different identifier"):
                 lookup(self.document(), Settings(), threading.Event())
-        with patch("paperassist.arxiv_metadata.retrieval._get", side_effect=OSError("Offline")) as get:
+        with patch("paperassist.http_client.get", side_effect=OSError("Offline")) as get:
             with self.assertRaises(OSError):
                 lookup(self.document(identifiers=()), Settings(), threading.Event())
             get.assert_called_once()
@@ -142,7 +142,7 @@ class ArxivMetadataTests(unittest.TestCase):
         html = b'''<meta name="citation_title" content="Parallel models for text generation">
             <meta name="citation_author" content="Ada Lovelace"><meta name="citation_date" content="2026/10/01">
             <meta name="citation_arxiv_id" content="2610.12345">'''
-        with patch("paperassist.arxiv_metadata.retrieval._get", side_effect=[OSError("Offline"), html]):
+        with patch("paperassist.http_client.get", side_effect=[OSError("Offline"), html]):
             self.assertIsNone(lookup(document, Settings(), threading.Event()))
 
     def test_unversioned_doi_alias_never_bypasses_explicit_pdf_version(self):
@@ -159,7 +159,7 @@ class ArxivMetadataTests(unittest.TestCase):
         document = self.document(identifiers=("2610.12345v1", "2610.12345v2"))
         document["metadata"]["identifier_sources"] = {"arxiv": {
             "2610.12345v1": "pdf_info", "2610.12345v2": "xmp"}}
-        with patch("paperassist.arxiv_metadata.retrieval._get") as get:
+        with patch("paperassist.http_client.get") as get:
             self.assertIsNone(lookup(document, Settings(), threading.Event()))
         get.assert_not_called()
 
@@ -200,11 +200,11 @@ class ArxivMetadataTests(unittest.TestCase):
             <meta name="citation_author" content="Ada Lovelace"><meta name="citation_date" content="2026/10/01">
             <meta name="citation_arxiv_id" content="2610.12345">'''
         missing = HTTPError("https://arxiv.org/abs/2610.12344", 404, "Missing", {}, None)
-        with patch("paperassist.arxiv_metadata.retrieval._get", side_effect=[OSError("Offline"), missing, html]) as get:
+        with patch("paperassist.http_client.get", side_effect=[OSError("Offline"), missing, html]) as get:
             record = lookup(document, Settings(), threading.Event())
         self.assertIsNotNone(record)
         self.assertEqual(get.call_count, 3)
-        with patch("paperassist.arxiv_metadata.retrieval._get", side_effect=OSError("Offline")) as get:
+        with patch("paperassist.http_client.get", side_effect=OSError("Offline")) as get:
             with self.assertRaises(OSError):
                 lookup(self.document(identifiers=("2610.12344", "2610.12345", "2610.12346")), Settings(), threading.Event())
         get.assert_called_once()

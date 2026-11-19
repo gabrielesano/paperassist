@@ -23,12 +23,11 @@ from .about import COMPONENTS, component_info
 from .document import PdfDocument
 from .instance import InstanceServer, absolute_paths, forward
 from .open_files import FileOpenEvents, OpenFiles
-from .renderer import RenderClient
+from .platform import hold_installation_mutex, install_wayland_warning_filter
 from .source import FileSource
-from .theme import brand_icon
-from .wayland import install_wayland_warning_filter
+from .theme import apply_theme, brand_icon
 from .window import MainWindow
-from .windows import hold_installation_mutex
+from .worker import RenderClient
 
 SELF_TEST_SECONDS = 60  # a cold start of a frozen app on a busy CI runner can be slow
 
@@ -181,6 +180,7 @@ def run(argv=None):
     app.setApplicationName("PaperAssist")
     app.setDesktopFileName("paperassist")
     app.setWindowIcon(brand_icon(64))
+    apply_theme(app)
     if not hasattr(app, 'file_open_events'):
         app.file_open_events = FileOpenEvents(app)
     app.processEvents()

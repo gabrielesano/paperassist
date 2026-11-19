@@ -200,13 +200,7 @@ verify_package_integrity() {
     fi
 }
 
-is_pid_alive() {
-    PID_CHECK="$1"
-    case "$PID_CHECK" in
-        ''|*[!0-9]*) return 1 ;;
-        *) kill -0 "$PID_CHECK" 2>/dev/null ;;
-    esac
-}
+@@LOCK_COMMON@@
 
 is_committed_install_dir() {
     CHECK_DIR="$1"
@@ -240,23 +234,26 @@ is_incomplete_paperassist_dir() {
     return 1
 }
 
+is_stale_owned_backup() {
+    CANDIDATE="$1"
+    is_committed_install_dir "$CANDIDATE" || return 1
+    BPID=""
+    if [ -f "$CANDIDATE/.paperassist-backup-marker" ]; then
+        BPID=$(grep '^PID=' "$CANDIDATE/.paperassist-backup-marker" 2>/dev/null | cut -d= -f2-)
+    fi
+    if [ -z "$BPID" ]; then
+        SUFFIX="${CANDIDATE##*.backup.}"
+        case "$SUFFIX" in
+            ''|*[!0-9]*) ;;
+            *) BPID="$SUFFIX" ;;
+        esac
+    fi
+    [ -z "$BPID" ] || ! is_pid_alive "$BPID"
+}
+
 find_owned_backup() {
     for b in "$INSTALL_DIR.backup."*; do
-        if is_committed_install_dir "$b"; then
-            BPID=""
-            if [ -f "$b/.paperassist-backup-marker" ]; then
-                BPID=$(grep '^PID=' "$b/.paperassist-backup-marker" 2>/dev/null | cut -d= -f2-)
-            fi
-            if [ -z "$BPID" ]; then
-                SUFFIX="${b##*.backup.}"
-                case "$SUFFIX" in
-                    ''|*[!0-9]*) ;;
-                    *) BPID="$SUFFIX" ;;
-                esac
-            fi
-            if [ -n "$BPID" ] && is_pid_alive "$BPID"; then
-                continue
-            fi
+        if is_stale_owned_backup "$b"; then
             echo "$b"
             return 0
         fi
@@ -344,99 +341,50 @@ if [ -d "$INSTALL_DIR" ] && [ "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
     fi
 fi
 
+# Delegate normal --uninstall directly to the installed uninstaller so it holds
+# the maintenance lock without double-locking or duplicating uninstall logic.
+if [ "$UNINSTALL_ACTION" -eq 1 ]; then
+    if is_committed_install_dir "$INSTALL_DIR" && [ -x "$INSTALL_DIR/uninstall.sh" ]; then
+        exec "$INSTALL_DIR/uninstall.sh" --install-dir "$INSTALL_DIR"
+    fi
+    if [ ! -d "$INSTALL_DIR" ] && [ -z "$OWNED_BACKUP" ]; then
+        echo "Error: Installation directory does not exist: $INSTALL_DIR" >&2
+        exit 1
+    fi
+fi
+
 # ------------------------------------------------------------------------------
 # Step D: Concurrency Lock ($INSTALL_DIR.lock)
 # ------------------------------------------------------------------------------
-LOCK_DIR="$INSTALL_DIR.lock"
-LOCK_ACQUIRED=0
-
-acquire_lock() {
-    LOCK_PARENT="$(dirname "$LOCK_DIR")"
-    mkdir -p "$LOCK_PARENT" 2>/dev/null || true
-    if ! command -v flock >/dev/null 2>&1; then
-        echo "Error: flock is required for PaperAssist maintenance." >&2
-        exit 1
-    fi
-    # This file must persist: unlinking it could split contenders across inodes.
-    if ! { exec 9>>"$LOCK_DIR.flock"; }; then
-        echo "Error: Cannot open maintenance lock ($LOCK_DIR.flock)." >&2
-        exit 1
-    fi
-    if ! flock -n 9; then
-        echo "Error: Another PaperAssist installer or maintenance process is currently operating on $INSTALL_DIR." >&2
-        exit 1
-    fi
-
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-        cat > "$LOCK_DIR/owner" << EOF_LOCK
-# Managed-By: PaperAssist-Linux-Installer
-PID=$$
-EOF_LOCK
-        LOCK_ACQUIRED=1
-        return 0
-    fi
-
-    # Lock directory exists. Verify ownership before touching anything.
-    if [ ! -e "$LOCK_DIR" ]; then
-        echo "Error: Cannot create lock directory ($LOCK_DIR)." >&2
-        exit 1
-    fi
-
-    if [ ! -f "$LOCK_DIR/owner" ]; then
-        sleep 0.1 2>/dev/null || sleep 1 2>/dev/null || true
-        if [ ! -f "$LOCK_DIR/owner" ]; then
-            echo "Error: Lock directory ($LOCK_DIR) already exists and has no PaperAssist owner file." >&2
-            exit 1
-        fi
-    fi
-
-    if ! grep -q "Managed-By: PaperAssist-Linux-Installer" "$LOCK_DIR/owner" 2>/dev/null; then
-        echo "Error: Lock directory ($LOCK_DIR) is not managed by PaperAssist-Linux-Installer." >&2
-        exit 1
-    fi
-
-    OTHER_PID=$(grep '^PID=' "$LOCK_DIR/owner" 2>/dev/null | cut -d= -f2-)
-    if [ -n "$OTHER_PID" ] && [ "$OTHER_PID" != "$$" ] && is_pid_alive "$OTHER_PID"; then
-        echo "Error: Another PaperAssist installer or maintenance process (PID $OTHER_PID) is currently operating on $INSTALL_DIR." >&2
-        exit 1
-    fi
-
-    if [ "$OTHER_PID" != "$$" ]; then
-        rm -rf "$LOCK_DIR"
-        if mkdir "$LOCK_DIR" 2>/dev/null; then
-            cat > "$LOCK_DIR/owner" << EOF_LOCK
-# Managed-By: PaperAssist-Linux-Installer
-PID=$$
-EOF_LOCK
-            LOCK_ACQUIRED=1
-            return 0
-        else
-            echo "Error: Failed to acquire lock directory ($LOCK_DIR) after removing stale lock." >&2
-            exit 1
-        fi
-    else
-        LOCK_ACQUIRED=1
-        return 0
-    fi
-}
-
-release_lock() {
-    if [ "$LOCK_ACQUIRED" -eq 1 ] && [ -d "$LOCK_DIR" ]; then
-        OWNER_PID=$(grep '^PID=' "$LOCK_DIR/owner" 2>/dev/null | cut -d= -f2-)
-        if [ "$OWNER_PID" = "$$" ]; then
-            rm -rf "$LOCK_DIR"
-        fi
-        LOCK_ACQUIRED=0
-    fi
-}
-
 acquire_lock
 
 STAGE=""
-ROLLBACK_DIR=""
 BACKUP_DIR=""
 SWAPPED=0
 ROLLBACK_ACTIVE=0
+
+restore_integration_file() {
+    if [ -f "$1" ]; then
+        mkdir -p "$(dirname "$2")" 2>/dev/null || true
+        cp -a "$1" "$2"
+    fi
+}
+
+save_integration_files() {
+    DEST_DIR="$1"
+    [ ! -f "$LAUNCHER_PATH" ] || cp -a "$LAUNCHER_PATH" "$DEST_DIR/launcher"
+    [ ! -f "$DESKTOP_PATH" ] || cp -a "$DESKTOP_PATH" "$DEST_DIR/desktop"
+    [ ! -f "$ICON_SVG_TARGET" ] || cp -a "$ICON_SVG_TARGET" "$DEST_DIR/icon.svg"
+    [ ! -f "$ICON_PNG_TARGET" ] || cp -a "$ICON_PNG_TARGET" "$DEST_DIR/icon.png"
+}
+
+restore_integration_files() {
+    SRC_DIR="$1"
+    restore_integration_file "$SRC_DIR/launcher" "$LAUNCHER_PATH"
+    restore_integration_file "$SRC_DIR/desktop" "$DESKTOP_PATH"
+    restore_integration_file "$SRC_DIR/icon.svg" "$ICON_SVG_TARGET"
+    restore_integration_file "$SRC_DIR/icon.png" "$ICON_PNG_TARGET"
+}
 
 # A fresh install has no backup. Record the exact bytes before publishing each
 # integration file so interrupted recovery removes only files we installed.
@@ -485,27 +433,15 @@ cleanup_on_exit() {
         fi
         if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
             mv "$BACKUP_DIR" "$INSTALL_DIR"
+        fi
+        if [ -d "$INSTALL_DIR/.paperassist-rollback" ]; then
+            restore_integration_files "$INSTALL_DIR/.paperassist-rollback"
             rm -rf "$INSTALL_DIR/.paperassist-rollback" 2>/dev/null || true
-        fi
-        if [ -f "$ROLLBACK_DIR/launcher" ]; then
-            cp -a "$ROLLBACK_DIR/launcher" "$LAUNCHER_PATH"
-        fi
-        if [ -f "$ROLLBACK_DIR/desktop" ]; then
-            cp -a "$ROLLBACK_DIR/desktop" "$DESKTOP_PATH"
-        fi
-        if [ -f "$ROLLBACK_DIR/icon.svg" ]; then
-            cp -a "$ROLLBACK_DIR/icon.svg" "$ICON_SVG_TARGET"
-        fi
-        if [ -f "$ROLLBACK_DIR/icon.png" ]; then
-            cp -a "$ROLLBACK_DIR/icon.png" "$ICON_PNG_TARGET"
         fi
         echo "Rollback complete. Previous installation state preserved." >&2
     fi
     if [ -n "$STAGE" ] && [ -d "$STAGE" ]; then
         rm -rf "$STAGE"
-    fi
-    if [ -n "$ROLLBACK_DIR" ] && [ -d "$ROLLBACK_DIR" ]; then
-        rm -rf "$ROLLBACK_DIR"
     fi
     release_lock
     exit "$EXIT_STATUS"
@@ -535,27 +471,7 @@ auto_recover() {
 
     # 2. Recover incomplete or missing INSTALL_DIR from a valid owned backup
     if ! is_committed_install_dir "$INSTALL_DIR"; then
-        RESTORE_BACKUP=""
-        for b in "$INSTALL_DIR.backup."*; do
-            if is_committed_install_dir "$b"; then
-                BPID=""
-                if [ -f "$b/.paperassist-backup-marker" ]; then
-                    BPID=$(grep '^PID=' "$b/.paperassist-backup-marker" 2>/dev/null | cut -d= -f2-)
-                fi
-                if [ -z "$BPID" ]; then
-                    SUFFIX="${b##*.backup.}"
-                    case "$SUFFIX" in
-                        ''|*[!0-9]*) ;;
-                        *) BPID="$SUFFIX" ;;
-                    esac
-                fi
-                if [ -n "$BPID" ] && is_pid_alive "$BPID"; then
-                    continue
-                fi
-                RESTORE_BACKUP="$b"
-                break
-            fi
-        done
+        RESTORE_BACKUP=$(find_owned_backup || true)
 
         if [ -n "$RESTORE_BACKUP" ]; then
             if [ -d "$INSTALL_DIR" ] && is_incomplete_paperassist_dir "$INSTALL_DIR"; then
@@ -565,22 +481,7 @@ auto_recover() {
                 echo "Interrupted installation detected: restoring $RESTORE_BACKUP -> $INSTALL_DIR" >&2
                 mv "$RESTORE_BACKUP" "$INSTALL_DIR"
                 if [ -d "$INSTALL_DIR/.paperassist-rollback" ]; then
-                    if [ -f "$INSTALL_DIR/.paperassist-rollback/launcher" ]; then
-                        mkdir -p "$(dirname "$LAUNCHER_PATH")" 2>/dev/null || true
-                        cp -a "$INSTALL_DIR/.paperassist-rollback/launcher" "$LAUNCHER_PATH"
-                    fi
-                    if [ -f "$INSTALL_DIR/.paperassist-rollback/desktop" ]; then
-                        mkdir -p "$(dirname "$DESKTOP_PATH")" 2>/dev/null || true
-                        cp -a "$INSTALL_DIR/.paperassist-rollback/desktop" "$DESKTOP_PATH"
-                    fi
-                    if [ -f "$INSTALL_DIR/.paperassist-rollback/icon.svg" ]; then
-                        mkdir -p "$(dirname "$ICON_SVG_TARGET")" 2>/dev/null || true
-                        cp -a "$INSTALL_DIR/.paperassist-rollback/icon.svg" "$ICON_SVG_TARGET"
-                    fi
-                    if [ -f "$INSTALL_DIR/.paperassist-rollback/icon.png" ]; then
-                        mkdir -p "$(dirname "$ICON_PNG_TARGET")" 2>/dev/null || true
-                        cp -a "$INSTALL_DIR/.paperassist-rollback/icon.png" "$ICON_PNG_TARGET"
-                    fi
+                    restore_integration_files "$INSTALL_DIR/.paperassist-rollback"
                     rm -rf "$INSTALL_DIR/.paperassist-rollback"
                 fi
             fi
@@ -596,21 +497,7 @@ auto_recover() {
         rm -f "$INSTALL_DIR/.paperassist-staging-marker"
         rm -rf "$INSTALL_DIR/.paperassist-rollback" "$INSTALL_DIR/.paperassist-integration"
         for b in "$INSTALL_DIR.backup."*; do
-            if is_committed_install_dir "$b"; then
-                BPID=""
-                if [ -f "$b/.paperassist-backup-marker" ]; then
-                    BPID=$(grep '^PID=' "$b/.paperassist-backup-marker" 2>/dev/null | cut -d= -f2-)
-                fi
-                if [ -z "$BPID" ]; then
-                    SUFFIX="${b##*.backup.}"
-                    case "$SUFFIX" in
-                        ''|*[!0-9]*) ;;
-                        *) BPID="$SUFFIX" ;;
-                    esac
-                fi
-                if [ -n "$BPID" ] && is_pid_alive "$BPID"; then
-                    continue
-                fi
+            if is_stale_owned_backup "$b"; then
                 rm -rf "$b"
             fi
         done
@@ -634,69 +521,25 @@ if [ "$REPAIR_ONLY" -eq 1 ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Uninstall action
+# Uninstall action (after auto-recovery if installation had been interrupted)
 # ------------------------------------------------------------------------------
 if [ "$UNINSTALL_ACTION" -eq 1 ]; then
+    if is_committed_install_dir "$INSTALL_DIR" && [ -x "$INSTALL_DIR/uninstall.sh" ]; then
+        release_lock
+        trap - EXIT HUP INT TERM
+        exec "$INSTALL_DIR/uninstall.sh" --install-dir "$INSTALL_DIR"
+    fi
     if [ ! -d "$INSTALL_DIR" ]; then
         echo "Error: Installation directory does not exist: $INSTALL_DIR" >&2
-        release_lock
-        trap - EXIT HUP INT TERM
-        exit 1
-    fi
-
-    MANIFEST="$INSTALL_DIR/.paperassist-install-manifest"
-    if [ ! -f "$MANIFEST" ]; then
+    elif ! is_committed_install_dir "$INSTALL_DIR"; then
         echo "Error: No installation manifest found in $INSTALL_DIR." >&2
         echo "Refusing to uninstall unmanaged directory." >&2
-        release_lock
-        trap - EXIT HUP INT TERM
-        exit 1
+    else
+        echo "Error: Standalone uninstaller missing: $INSTALL_DIR/uninstall.sh." >&2
     fi
-
-    if ! grep -q "Managed-By: PaperAssist-Linux-Installer" "$MANIFEST" 2>/dev/null; then
-        echo "Error: Manifest in $INSTALL_DIR is not managed by PaperAssist-Linux-Installer." >&2
-        echo "Refusing to uninstall unmanaged directory." >&2
-        release_lock
-        trap - EXIT HUP INT TERM
-        exit 1
-    fi
-
-    LAUNCHER_TO_REMOVE=$(grep '^LAUNCHER_PATH=' "$MANIFEST" 2>/dev/null | cut -d= -f2-)
-    if [ -n "$LAUNCHER_TO_REMOVE" ] && { [ -e "$LAUNCHER_TO_REMOVE" ] || [ -L "$LAUNCHER_TO_REMOVE" ]; }; then
-        if grep -q "Managed-By: PaperAssist-Linux-Installer" "$LAUNCHER_TO_REMOVE" 2>/dev/null; then
-            rm -f "$LAUNCHER_TO_REMOVE"
-            echo "Removed launcher: $LAUNCHER_TO_REMOVE"
-        fi
-    fi
-
-    DESKTOP_TO_REMOVE=$(grep '^DESKTOP_PATH=' "$MANIFEST" 2>/dev/null | cut -d= -f2-)
-    if [ -n "$DESKTOP_TO_REMOVE" ] && { [ -e "$DESKTOP_TO_REMOVE" ] || [ -L "$DESKTOP_TO_REMOVE" ]; }; then
-        if grep -q "Managed-By: PaperAssist-Linux-Installer" "$DESKTOP_TO_REMOVE" 2>/dev/null; then
-            rm -f "$DESKTOP_TO_REMOVE"
-            echo "Removed desktop entry: $DESKTOP_TO_REMOVE"
-        fi
-    fi
-
-    grep '^ICON_ENTRY=' "$MANIFEST" 2>/dev/null | cut -d= -f2- | while IFS='|' read -r ICON_PATH RECORDED_HASH; do
-        if [ -n "$ICON_PATH" ] && { [ -e "$ICON_PATH" ] || [ -L "$ICON_PATH" ]; }; then
-            CURR_HASH=$($SHA_CMD "$ICON_PATH" 2>/dev/null | awk '{print $1}')
-            if [ -z "$RECORDED_HASH" ] || [ "$CURR_HASH" = "$RECORDED_HASH" ]; then
-                rm -f "$ICON_PATH"
-                echo "Removed icon: $ICON_PATH"
-            fi
-        fi
-    done
-
-    if [ -n "$DESKTOP_TO_REMOVE" ] && command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database "$(dirname "$DESKTOP_TO_REMOVE")" >/dev/null 2>&1 || true
-    fi
-
-    rm -rf "$INSTALL_DIR"
     release_lock
     trap - EXIT HUP INT TERM
-    echo "PaperAssist uninstalled successfully."
-    echo "Your user libraries, PDFs, annotations, and configuration files were preserved."
-    exit 0
+    exit 1
 fi
 
 # ------------------------------------------------------------------------------
@@ -838,24 +681,9 @@ check_fault_inject "after_stage"
 # ------------------------------------------------------------------------------
 # Rollback handler and atomic swap
 # ------------------------------------------------------------------------------
-ROLLBACK_DIR="$(mktemp -d -t paperassist-rb.XXXXXX 2>/dev/null || mktemp -d /tmp/paperassist-rb.XXXXXX)"
 BACKUP_DIR=""
 SWAPPED=0
 ROLLBACK_ACTIVE=1
-
-# Save existing launcher, desktop file, and icons to rollback backup
-if [ -f "$LAUNCHER_PATH" ]; then
-    cp -a "$LAUNCHER_PATH" "$ROLLBACK_DIR/launcher"
-fi
-if [ -f "$DESKTOP_PATH" ]; then
-    cp -a "$DESKTOP_PATH" "$ROLLBACK_DIR/desktop"
-fi
-if [ -f "$ICON_SVG_TARGET" ]; then
-    cp -a "$ICON_SVG_TARGET" "$ROLLBACK_DIR/icon.svg"
-fi
-if [ -f "$ICON_PNG_TARGET" ]; then
-    cp -a "$ICON_PNG_TARGET" "$ROLLBACK_DIR/icon.png"
-fi
 
 # Atomic move of existing installation to backup
 if [ "$IS_UPGRADE" -eq 1 ]; then
@@ -864,18 +692,7 @@ if [ "$IS_UPGRADE" -eq 1 ]; then
 # Managed-By: PaperAssist-Linux-Installer
 PID=$$
 EOF_RB_MARKER
-    if [ -f "$LAUNCHER_PATH" ]; then
-        cp -a "$LAUNCHER_PATH" "$INSTALL_DIR/.paperassist-rollback/launcher"
-    fi
-    if [ -f "$DESKTOP_PATH" ]; then
-        cp -a "$DESKTOP_PATH" "$INSTALL_DIR/.paperassist-rollback/desktop"
-    fi
-    if [ -f "$ICON_SVG_TARGET" ]; then
-        cp -a "$ICON_SVG_TARGET" "$INSTALL_DIR/.paperassist-rollback/icon.svg"
-    fi
-    if [ -f "$ICON_PNG_TARGET" ]; then
-        cp -a "$ICON_PNG_TARGET" "$INSTALL_DIR/.paperassist-rollback/icon.png"
-    fi
+    save_integration_files "$INSTALL_DIR/.paperassist-rollback"
 
     BACKUP_DIR="$INSTALL_DIR.backup.$$"
     mv "$INSTALL_DIR" "$BACKUP_DIR"
@@ -901,240 +718,10 @@ check_fault_inject "after_swap_before_manifest"
 # ------------------------------------------------------------------------------
 # Install components (Uninstall script, Launcher, Desktop Entry, Icons)
 # ------------------------------------------------------------------------------
-# 1. Standalone uninstall script
-if [ ! -f "$INSTALL_DIR/uninstall.sh" ]; then
-    cat > "$INSTALL_DIR/uninstall.sh" << 'EOF_UNINSTALL_SCRIPT'
-#!/bin/sh
-# ==============================================================================
-# PaperAssist Standalone Uninstaller
-# Managed-By: PaperAssist-Linux-Installer
-# ==============================================================================
-set -e
-
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-INSTALL_DIR="$SCRIPT_DIR"
-
-# Allow overriding install directory via --install-dir
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -h|--help)
-            echo "Usage: $0 [OPTIONS]"
-            echo "Uninstall PaperAssist while preserving all user libraries and configuration."
-            echo ""
-            echo "Options:"
-            echo "  --install-dir DIR   Target installation directory (default: current directory)"
-            echo "  -h, --help          Show this help message and exit"
-            exit 0
-            ;;
-        --install-dir)
-            if [ -z "$2" ]; then
-                echo "Error: --install-dir requires a directory path." >&2
-                exit 1
-            fi
-            INSTALL_DIR="$2"
-            shift 2
-            ;;
-        --install-dir=*)
-            INSTALL_DIR="${1#*=}"
-            shift
-            ;;
-        *)
-            echo "Error: Unknown option: $1" >&2
-            echo "Run with --help for usage information." >&2
-            exit 1
-            ;;
-    esac
-done
-
-# Keep maintenance paths beside the installation, even with a trailing slash.
-while [ "$INSTALL_DIR" != "/" ] && [ "${INSTALL_DIR%/}" != "$INSTALL_DIR" ]; do
-    INSTALL_DIR="${INSTALL_DIR%/}"
-done
-
-is_pid_alive() {
-    case "$1" in
-        ''|*[!0-9]*) return 1 ;;
-        *) kill -0 "$1" 2>/dev/null ;;
-    esac
-}
-
-LOCK_DIR="$INSTALL_DIR.lock"
-LOCK_ACQUIRED=0
-
-acquire_lock() {
-    LOCK_PARENT="$(dirname "$LOCK_DIR")"
-    mkdir -p "$LOCK_PARENT" 2>/dev/null || true
-    if ! command -v flock >/dev/null 2>&1; then
-        echo "Error: flock is required for PaperAssist maintenance." >&2
-        exit 1
-    fi
-    # This file must persist: unlinking it could split contenders across inodes.
-    if ! { exec 9>>"$LOCK_DIR.flock"; }; then
-        echo "Error: Cannot open maintenance lock ($LOCK_DIR.flock)." >&2
-        exit 1
-    fi
-    if ! flock -n 9; then
-        echo "Error: Another PaperAssist installer or maintenance process is currently operating on $INSTALL_DIR." >&2
-        exit 1
-    fi
-
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-        cat > "$LOCK_DIR/owner" << EOF_LOCK
-# Managed-By: PaperAssist-Linux-Installer
-PID=$$
-EOF_LOCK
-        LOCK_ACQUIRED=1
-        return 0
-    fi
-
-    # Lock directory exists. Verify ownership before touching anything.
-    if [ ! -e "$LOCK_DIR" ]; then
-        echo "Error: Cannot create lock directory ($LOCK_DIR)." >&2
-        exit 1
-    fi
-
-    if [ ! -f "$LOCK_DIR/owner" ]; then
-        sleep 0.1 2>/dev/null || sleep 1 2>/dev/null || true
-        if [ ! -f "$LOCK_DIR/owner" ]; then
-            echo "Error: Lock directory ($LOCK_DIR) already exists and has no PaperAssist owner file." >&2
-            exit 1
-        fi
-    fi
-
-    if ! grep -q "Managed-By: PaperAssist-Linux-Installer" "$LOCK_DIR/owner" 2>/dev/null; then
-        echo "Error: Lock directory ($LOCK_DIR) is not managed by PaperAssist-Linux-Installer." >&2
-        exit 1
-    fi
-
-    OTHER_PID=$(grep '^PID=' "$LOCK_DIR/owner" 2>/dev/null | cut -d= -f2-)
-    if [ -n "$OTHER_PID" ] && [ "$OTHER_PID" != "$$" ] && is_pid_alive "$OTHER_PID"; then
-        echo "Error: Another PaperAssist installer or maintenance process (PID $OTHER_PID) is currently operating on $INSTALL_DIR." >&2
-        exit 1
-    fi
-
-    if [ "$OTHER_PID" != "$$" ]; then
-        rm -rf "$LOCK_DIR"
-        if mkdir "$LOCK_DIR" 2>/dev/null; then
-            cat > "$LOCK_DIR/owner" << EOF_LOCK
-# Managed-By: PaperAssist-Linux-Installer
-PID=$$
-EOF_LOCK
-            LOCK_ACQUIRED=1
-            return 0
-        else
-            echo "Error: Failed to acquire lock directory ($LOCK_DIR) after removing stale lock." >&2
-            exit 1
-        fi
-    else
-        LOCK_ACQUIRED=1
-        return 0
-    fi
-}
-
-release_lock() {
-    if [ "$LOCK_ACQUIRED" -eq 1 ] && [ -d "$LOCK_DIR" ]; then
-        OWNER_PID=$(grep '^PID=' "$LOCK_DIR/owner" 2>/dev/null | cut -d= -f2-)
-        if [ "$OWNER_PID" = "$$" ]; then
-            rm -rf "$LOCK_DIR"
-        fi
-        LOCK_ACQUIRED=0
-    fi
-}
-
-validate_target() {
-# Step A: Refuse immediately if target is a PaperAssist library catalog
-if [ -f "$INSTALL_DIR/library.sqlite3" ]; then
-    echo "Error: Target directory ($INSTALL_DIR) contains a PaperAssist library catalog (library.sqlite3)." >&2
-    echo "PaperAssist application files must be kept separate from user research libraries." >&2
-    exit 1
+# 1. Standalone uninstall script (packaged in payload by build_installer.py)
+if [ -f "$INSTALL_DIR/uninstall.sh" ]; then
+    chmod 755 "$INSTALL_DIR/uninstall.sh"
 fi
-
-if [ ! -d "$INSTALL_DIR" ]; then
-    echo "Error: Installation directory does not exist: $INSTALL_DIR" >&2
-    exit 1
-fi
-
-MANIFEST="$INSTALL_DIR/.paperassist-install-manifest"
-if [ ! -f "$MANIFEST" ]; then
-    echo "Error: No installation manifest found in $INSTALL_DIR." >&2
-    echo "Refusing to uninstall unmanaged directory." >&2
-    exit 1
-fi
-
-if ! grep -q "Managed-By: PaperAssist-Linux-Installer" "$MANIFEST" 2>/dev/null; then
-    echo "Error: Manifest in $INSTALL_DIR is not managed by PaperAssist-Linux-Installer." >&2
-    echo "Refusing to uninstall unmanaged directory." >&2
-    exit 1
-fi
-
-}
-
-validate_target
-acquire_lock
-trap 'release_lock' EXIT
-trap 'exit 1' HUP INT TERM
-validate_target
-
-# Locate hash command
-if command -v sha256sum >/dev/null 2>&1; then
-    SHA_CMD="sha256sum"
-elif command -v shasum >/dev/null 2>&1; then
-    SHA_CMD="shasum -a 256"
-else
-    SHA_CMD=""
-fi
-
-# 1. Remove owned launcher
-LAUNCHER_PATH=$(grep '^LAUNCHER_PATH=' "$MANIFEST" 2>/dev/null | cut -d= -f2-)
-if [ -n "$LAUNCHER_PATH" ] && { [ -e "$LAUNCHER_PATH" ] || [ -L "$LAUNCHER_PATH" ]; }; then
-    if grep -q "Managed-By: PaperAssist-Linux-Installer" "$LAUNCHER_PATH" 2>/dev/null; then
-        rm -f "$LAUNCHER_PATH"
-        echo "Removed launcher: $LAUNCHER_PATH"
-    else
-        echo "Preserving launcher (modified or unmanaged): $LAUNCHER_PATH"
-    fi
-fi
-
-# 2. Remove owned desktop file
-DESKTOP_PATH=$(grep '^DESKTOP_PATH=' "$MANIFEST" 2>/dev/null | cut -d= -f2-)
-if [ -n "$DESKTOP_PATH" ] && { [ -e "$DESKTOP_PATH" ] || [ -L "$DESKTOP_PATH" ]; }; then
-    if grep -q "Managed-By: PaperAssist-Linux-Installer" "$DESKTOP_PATH" 2>/dev/null; then
-        rm -f "$DESKTOP_PATH"
-        echo "Removed desktop entry: $DESKTOP_PATH"
-    else
-        echo "Preserving desktop entry (modified or unmanaged): $DESKTOP_PATH"
-    fi
-fi
-
-# 3. Remove owned icons
-if [ -n "$DESKTOP_PATH" ] && command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$(dirname "$DESKTOP_PATH")" >/dev/null 2>&1 || true
-fi
-
-grep '^ICON_ENTRY=' "$MANIFEST" 2>/dev/null | cut -d= -f2- | while IFS='|' read -r ICON_PATH RECORDED_HASH; do
-    if [ -n "$ICON_PATH" ] && { [ -e "$ICON_PATH" ] || [ -L "$ICON_PATH" ]; }; then
-        if [ -n "$SHA_CMD" ] && [ -n "$RECORDED_HASH" ]; then
-            CURR_HASH=$($SHA_CMD "$ICON_PATH" 2>/dev/null | awk '{print $1}')
-            if [ "$CURR_HASH" = "$RECORDED_HASH" ]; then
-                rm -f "$ICON_PATH"
-                echo "Removed icon: $ICON_PATH"
-            else
-                echo "Preserving icon (modified or hash mismatch): $ICON_PATH"
-            fi
-        else
-            rm -f "$ICON_PATH"
-            echo "Removed icon: $ICON_PATH"
-        fi
-    fi
-done
-
-# The script remains loaded after its file is removed, and retains the lock.
-rm -rf "$INSTALL_DIR"
-echo "PaperAssist uninstalled successfully from $INSTALL_DIR."
-echo "Your user libraries, PDFs, annotations, and configuration files were preserved."
-EOF_UNINSTALL_SCRIPT
-fi
-chmod 755 "$INSTALL_DIR/uninstall.sh"
 
 # 2. CLI Launcher
 RECORDED_LAUNCHER=""
@@ -1269,7 +856,6 @@ check_fault_inject "after_commit_before_cleanup"
 if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
     rm -rf "$BACKUP_DIR"
 fi
-rm -rf "$ROLLBACK_DIR"
 release_lock
 trap - EXIT HUP INT TERM
 

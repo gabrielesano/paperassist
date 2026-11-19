@@ -11,22 +11,21 @@ from pypdf import PdfWriter
 from pypdf.generic import RectangleObject
 
 from paperassist.library import Library
-from test_native_support import needs_qt, pdf_available
+from support import QtTestCase, needs_qt, pdf_available
 
 if pdf_available:
     from PySide6.QtCore import QObject, Qt, Signal
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
     from paperassist.native.comments import NotesModel, capture_anchor, line_bands, note_color, note_rects, quote
     from paperassist.native.document import PdfDocument
     from paperassist.native.engine import Pdf, Rect
-    from paperassist.native.library_source import LibrarySource
+    from paperassist.native.source import LibrarySource
     from paperassist.native.view import PdfView
 
     class Client(QObject):
         page_ready = Signal(int, int, float, int, int, bytes, float)
 
-        def open(self, data):
+        def open(self, data, *, inherit_from=None):
             return 1
 
         def want(self, *args):
@@ -40,15 +39,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @needs_qt
-class CommentsTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
+class CommentsTests(QtTestCase):
+    use_client = False
 
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.library = Library(temporary.name)
+        super().setUp()
+        self.library = Library(self.dir)
         self.data = (FIXTURES / "pdfjs-annotations.pdf").read_bytes()
         self.document = self.library.import_stream(io.BytesIO(self.data), "synthetic.pdf")
         self.notes = json.loads((FIXTURES / "pdfjs-notes.json").read_text())
@@ -274,21 +270,21 @@ class CommentsTests(unittest.TestCase):
             self.assertEqual(build_rows.call_count, 1)
             row_widgets = [row for _, row in panel._rows]
 
-            # Repeated refreshes and comment selection changes update styles in place without rebuilding.
+            # Repeated refreshes and comment selection changes update state in place without rebuilding.
             panel.refresh(self.view)
             panel.refresh(self.view)
             self.view.select_comment(self.model.notes[0])
             panel.refresh(self.view)
-            self.assertIn("#e6eeeb", row_widgets[0].styleSheet())
-            self.assertEqual(row_widgets[1].styleSheet(), "")
+            self.assertTrue(row_widgets[0].property("selected"))
+            self.assertFalse(row_widgets[1].property("selected"))
             self.view.select_comment(self.model.notes[1])
             panel.refresh(self.view)
-            self.assertEqual(row_widgets[0].styleSheet(), "")
-            self.assertIn("#e6eeeb", row_widgets[1].styleSheet())
+            self.assertFalse(row_widgets[0].property("selected"))
+            self.assertTrue(row_widgets[1].property("selected"))
             self.view.select_comment(None)
             panel.refresh(self.view)
-            self.assertEqual(row_widgets[0].styleSheet(), "")
-            self.assertEqual(row_widgets[1].styleSheet(), "")
+            self.assertFalse(row_widgets[0].property("selected"))
+            self.assertFalse(row_widgets[1].property("selected"))
             self.assertEqual(build_rows.call_count, 1)
 
             # Draft composer keeps text, mid-word cursor position, and focus across refreshes.

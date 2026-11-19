@@ -119,3 +119,20 @@ class SettingsTests(unittest.TestCase):
             (folder / 'sub').mkdir()
             self.assertEqual(self.put({'inbox': '~/sub'})['inbox'], str((folder / 'sub').resolve()))
         self.assertEqual(self.put({'inbox': None})['inbox'], '')
+
+    def test_shared_constants_and_atomic_json_helpers(self):
+        from paperassist import paths
+        self.assertEqual(settings.SOURCES, tuple(settings.PROVIDER_NAMES))
+        self.assertEqual(settings.ZOOM_CHOICES, (0.8, 0.9, 1, 1.1, 1.25, 1.5))
+        self.assertEqual(paths.format_size(512), '512 bytes')
+        self.assertEqual(paths.format_size(2048), '2.0 KB')
+        target = self.data / 'nested' / 'sample.json'
+        paths.write_json_atomic(target, {'ok': True}, mode=0o600)
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'ok': True})
+        if os.name != 'nt':
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(TypeError):
+            paths.write_json_atomic(target, {'bad': object()})
+        # Failed atomic writes clean up temp files and keep the previous target intact.
+        self.assertEqual(list(target.parent.iterdir()), [target])
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'ok': True})

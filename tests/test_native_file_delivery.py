@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 
-from test_native_support import make_pdf, needs_qt
+from support import make_pdf, needs_qt
 
 
 @needs_qt

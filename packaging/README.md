@@ -6,12 +6,12 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current release is **0.2.0a6**, adding a right-click PDF context menu (Copy,
-Highlight, Comment, Select all, and annotation/comment deletion) and excluding
-margin and two-column gutter line numbers from multi-line text selection and
-highlighting. Release notes are in [0.2.0a6](../docs/releases/0.2.0a6.md). Build
+The current release is **0.3.0**, cutting multi-paper memory usage by 18–24%,
+hardening library and annotation integrity, accelerating reference resolution
+and per-host HTTP lookups, and consolidating the native reader and installer
+stack. Release notes are in [0.3.0](../docs/releases/0.3.0.md). Build
 commands below produce the current source version. See
-[release acceptance](../docs/development/release-0.2.0a6.md)
+[release acceptance](../docs/development/release-0.3.0.md)
 for the current packages and
 [earlier maintenance verification](../docs/development/linux-alpha-maintenance.md)
 for the historical `0.1.0a2` measurements and examples below.

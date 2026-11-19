@@ -19,11 +19,20 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPainter
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter
 
 TEAL = "#276c65"
 WHITE = "#ffffff"
+_APP: QGuiApplication | None = None
+
+
+def _ensure_app() -> QGuiApplication:
+    global _APP
+    app = QGuiApplication.instance()
+    if app is None:
+        _APP = QGuiApplication(["generate_icons", "-platform", "offscreen"])
+        app = _APP
+    return app
 
 SVG_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="256" height="256" viewBox="0 0 256 256">
@@ -65,8 +74,7 @@ def generate_svg(output_path: Path) -> str:
 def generate_png(output_path: Path, size: int = 256) -> None:
     """Render a crisp RGBA PNG icon using PySide6 QPainter offscreen."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    app = QApplication.instance() or QApplication(["generate_icons", "-platform", "offscreen"])
+    _ensure_app()
 
     image = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
     image.fill(Qt.transparent)
@@ -121,7 +129,6 @@ def main() -> int:
     args = parser.parse_args()
 
     out_dir = args.output_dir
-    app = QApplication.instance() or QApplication(["generate_icons", "-platform", "offscreen"])
     svg_file = out_dir / "paperassist.svg"
     png_file = out_dir / "paperassist.png"
 

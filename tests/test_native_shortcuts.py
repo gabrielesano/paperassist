@@ -1,12 +1,10 @@
 """Keyboard shortcuts of the native window: navigation, tabs, columns, rename, help and key conflicts."""
 import io
-import tempfile
 import unittest
 from collections import Counter
-from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import make_pdf, needs_qt, pdf_available
+from support import QtTestCase, make_pdf, needs_qt, pdf_available
 
 if pdf_available:
     from PySide6.QtCore import Qt
@@ -16,7 +14,6 @@ if pdf_available:
 
     from paperassist.native import shortcuts
     from paperassist.native.positions import current_page
-    from paperassist.native.renderer import RenderClient
     from paperassist.native.rules import CANCEL
     from paperassist.native.source import FileSource
     from paperassist.native.window import MainWindow
@@ -24,31 +21,16 @@ if pdf_available:
 
 
 @needs_qt
-class ShortcutTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
+class ShortcutTests(QtTestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        self.dir = Path(folder.name).resolve()
-        config = patch("paperassist.paths.config_file", return_value=self.dir / "config.json")
-        config.start()
-        self.addCleanup(config.stop)
+        super().setUp()
         self.workspace = Workspace(self.dir / "library")
         self.addCleanup(self.workspace.close)
         self.paths = [make_pdf(self.dir / f"paper{n}.pdf", pages=3 + n) for n in range(3)]
         self.window = MainWindow(self.client, self.workspace)
         self.window.resize(1200, 800)
-        shortcuts.install(self.window)
         self.window.show()
-        self.addCleanup(self.window.close)
+        self.addCleanup(lambda: self.cleanup_window(self.window))
         QTest.qWaitForWindowActive(self.window)
 
     def open_papers(self, count=1):
@@ -80,12 +62,6 @@ class ShortcutTests(unittest.TestCase):
         self.assertEqual([key for key, count in Counter(keys).items() if count > 1], [])
         reserved = {"Ctrl+T", "Ctrl+W", "Ctrl+Tab", "Alt+Left", "Alt+Right", "Ctrl+,"}
         self.assertFalse(reserved & set(keys))
-
-    def test_install_twice_keeps_one_set_of_bindings(self):
-        self.assertIs(shortcuts.install(self.window), self.window.shortcuts)
-        count = len(self.window.findChildren(QAction))
-        shortcuts.install(self.window)
-        self.assertEqual(len(self.window.findChildren(QAction)), count)
 
     # ---- pages ----------------------------------------------------------------------------------
     def test_page_keys_move_between_pages_and_stop_at_the_ends(self):
@@ -262,7 +238,7 @@ class ShortcutTests(unittest.TestCase):
         self.window.tab().main.view.doc.source.title = "Corrected title"
         self.window.refresh()
         self.assertTrue(self.window.tabs.tabText(0).startswith("Loops review"))
-        self.window.shortcuts.rename_tab(0)
+        self.window.rename_tab(0)
         self.edit_tab_name("", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
         self.assertTrue(self.window.tabs.tabText(0).startswith("Corrected title"))
 
@@ -270,7 +246,7 @@ class ShortcutTests(unittest.TestCase):
         document = self.workspace.library.import_stream(io.BytesIO(self.paths[0].read_bytes()), "alpha.pdf")
         first = self.window.open_library_document(document["id"])
         second = self.window._add_tab(self.window._wrap(self.window._open_pane(self.window.library_source(document["id"]))))
-        self.window.shortcuts.set_label(first, "First tab")
+        self.window.set_tab_label(first, "First tab")
         self.assertEqual(first.title, "First tab")
         self.assertNotEqual(second.title, "First tab")
         self.assertIn("First tab", self.window.tabs.tabToolTip(0))
@@ -293,7 +269,7 @@ class ShortcutTests(unittest.TestCase):
         self.assertIn("A&A & Keppens", self.window.tabs.tabToolTip(0))
         self.assertNotIn("&&", self.window.tabs.tabToolTip(0))
 
-        self.window.shortcuts.rename_tab(0)
+        self.window.rename_tab(0)
         editor = next(e for e in bar.findChildren(QLineEdit) if e.isVisible())
         self.assertEqual(editor.text(), "A&A & Keppens")
         QTest.keyClick(editor, Qt.Key_Escape)
@@ -303,15 +279,15 @@ class ShortcutTests(unittest.TestCase):
         self.window.open_library_document(document["id"])
         original = self.window.tabs.tabText(0)
         self.window.tabs.tabBar().setFocus()
-        self.window.shortcuts.rename_tab(0)
+        self.window.rename_tab(0)
         self.edit_tab_name("Draft", lambda editor: QTest.keyClick(editor, Qt.Key_Escape))
         self.assertEqual(self.workspace.library.get_document(document["id"])["label"], "")
         self.assertEqual(self.window.tabs.tabText(0), original)
-        self.window.shortcuts.rename_tab(0)
+        self.window.rename_tab(0)
         self.edit_tab_name("Kept", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
         self.assertEqual(self.workspace.library.get_document(document["id"])["label"], "")
         self.assertTrue(self.window.tabs.tabText(0).startswith("Kept"))
-        self.window.shortcuts.rename_tab(0)
+        self.window.rename_tab(0)
         self.edit_tab_name("", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
         self.assertEqual(self.workspace.library.get_document(document["id"])["label"], "")
         self.assertEqual(self.window.tabs.tabText(0), original)
@@ -329,7 +305,7 @@ class ShortcutTests(unittest.TestCase):
         self.assertEqual(self.window.tab().title, "Session name")
         self.assertEqual(self.window.pane().title, "paper0.pdf")
         self.assertEqual(self.paths[0].name, "paper0.pdf")  # a loose file keeps its name on disk
-        self.window.shortcuts.rename_tab(0)
+        self.window.rename_tab(0)
         self.edit_tab_name("", lambda editor: QTest.keyClick(editor, Qt.Key_Return))
         self.assertEqual(self.window.pane().title, "paper0.pdf")
 

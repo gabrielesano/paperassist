@@ -9,12 +9,22 @@ from urllib.parse import urlsplit
 
 from . import paths
 
-SOURCES = ('crossref', 'ads', 'arxiv', 'openalex', 'semantic_scholar', 'core', 'unpaywall')
+PROVIDER_NAMES = {
+    'crossref': 'Crossref',
+    'ads': 'NASA ADS',
+    'arxiv': 'arXiv',
+    'openalex': 'OpenAlex',
+    'semantic_scholar': 'Semantic Scholar',
+    'core': 'CORE',
+    'unpaywall': 'Unpaywall',
+}
+SOURCES = tuple(PROVIDER_NAMES)
 KEYS = ('ads', 'core', 'semantic_scholar', 'openalex')
 # What a source cannot run without. OpenAlex and Semantic Scholar keys and the Crossref
 # email only raise rate limits, so they are optional and not listed here.
 NEEDS = {'ads': 'token', 'core': 'key', 'unpaywall': 'email'}
 ENVIRONMENT = {'email': 'PAPERASSIST_EMAIL', 'openalex': 'OPENALEX_API_KEY'}
+ZOOM_CHOICES = (0.8, 0.9, 1, 1.1, 1.25, 1.5)
 _WRITE = threading.Lock()
 
 
@@ -141,21 +151,18 @@ def update(data_dir, changes):
     path = Path(data_dir) / 'settings.json'
     with _WRITE:
         data = _merge(load(data_dir).data, changes, data_dir)
-        temporary = path.with_name(f'.settings.{os.getpid()}.tmp')
-        with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w', encoding='utf-8') as file:
-            json.dump(data, file, indent=2)
-        os.replace(temporary, path)
+        paths.write_json_atomic(path, data, mode=0o600)
     return Settings(data)
 
 
 def preferences():
-    """Interface choices follow the user across libraries; missing keys allow browser migration."""
+    """Interface choices follow the user across libraries."""
     value = paths.load_config().get('preferences')
     return value if isinstance(value, dict) else {}
 
 
-def update_preferences(changes, only_if_missing=False):
-    checks = {'ui_zoom': lambda value: type(value) in (int, float) and value in (.8, .9, 1, 1.1, 1.25, 1.5),
+def update_preferences(changes):
+    checks = {'ui_zoom': lambda value: type(value) in (int, float) and value in ZOOM_CHOICES,
               'quick_view_layout': lambda value: value in ('stacked', 'side'),
               'outline_expanded': lambda value: isinstance(value, bool),
               'details_expanded': lambda value: isinstance(value, bool)}
@@ -168,7 +175,6 @@ def update_preferences(changes, only_if_missing=False):
         current = data.get('preferences')
         if not isinstance(current, dict):
             current = {}
-        updated = {**changes, **current} if only_if_missing else {**current, **changes}
-        return {**data, 'preferences': updated}
+        return {**data, 'preferences': {**current, **changes}}
 
     return paths.update_config(merge)['preferences']

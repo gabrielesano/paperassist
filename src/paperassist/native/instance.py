@@ -30,7 +30,9 @@ def absolute_paths(values):
                 raise ValueError('Only local PDF files can be opened.')
             url.setHost('')
             value = url.toLocalFile()
-        paths.append(str(Path(value).expanduser().resolve()))
+        path = Path(value).expanduser()
+        # Keep the requested filename so the library can verify its catalog entry before following a symlink.
+        paths.append(str(path.parent.resolve() / path.name))
     return list(dict.fromkeys(paths))
 
 

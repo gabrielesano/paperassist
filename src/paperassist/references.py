@@ -7,19 +7,18 @@ import statistics
 import threading
 import unicodedata
 from bisect import bisect_right
-from contextlib import contextmanager
 from functools import wraps
+from io import BytesIO
 from pathlib import Path
-import sqlite3
 from weakref import WeakValueDictionary
 
 from pypdf import PdfReader
 
-from paperassist.citation import SURNAME, describe, fold, pdf_name, publication as _publication, surnames
-from paperassist.library import manual_fields
-from paperassist.retrieval import identify, search_urls
+from paperassist.citation import (DOI, NUMERIC_MARKER, PARTICLES, SURNAME, citation_numbers, describe, fold,
+                                  has_surname, pdf_name, publication as _publication, surnames)
+from paperassist.library import Library, manual_fields
+from paperassist.retrieval import identify
 
-DOI = re.compile(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', re.I)
 HEADING = re.compile(r'^\s*(?:\d+\.?\s+)?(?:references|bibliography|literature\s+cited)\s*[.:]?\s*$', re.I | re.M)
 FALLBACK_HEADING = re.compile(
     r'^\s*(?:\d+\s+)?(?:references|bibliography|literature\s+cited)(?:\s*\d+|\s*[.:])?\s*$', re.I | re.M)
@@ -31,13 +30,12 @@ AUTHOR_ENTRY = re.compile(rf'^\s*({SURNAME}),\s*(?:[^\W\d_]\s?\.|[^\W\d_]+\s*,|[
 INITIALS_ENTRY = re.compile(r"^\s*([^\W\d_]+(?:[-'’][^\W\d_]+)*),?\s(?:[A-Z][a-z]?\.\s?){1,3}(?:,|\s&|\sand\b)")
 # Text extraction sometimes inserts a space inside a year ("200 8") or after "[".
 YEAR = re.compile(r'\b(?:19|20)\d\s?\d[a-z]?\b')
-MARKER = re.compile(r'\[\s*(\d+(?:\s*[,;–−-]\s*\d+)*)\s*\]')
 JOINED_ENTRIES = re.compile(r"(?<=[\d.])\s+(?=[A-Z][^\W\d_]+(?:[-'’][^\W\d_]+)*,\s[A-Z]\.|[.;]\s*(?:1[89]|20)\d\d)")
 IBID = re.compile(r'^[.;:—–_-]{1,8}\s*[.,]?\s*((?:1[89]|20)\d\d[a-z]?\b.*)')
 ENTRY_LIKE = re.compile(r"[A-Z][^\W\d_]+,\s[A-Z]\..*\b(?:1[89]|20)\d\d\b")
 # A second author may carry particles ("Rouppe van der Voort") but never a whole phrase,
 # so prose after "Smith &" cannot be mistaken for a name.
-PARTICLE = r'(?:van|von|de|del|der|den|di|da|dos|ter|la|le)'
+PARTICLE = '(?:' + '|'.join(sorted(PARTICLES, key=len, reverse=True)) + ')'
 # A few trailing letters after a space are a kerning gap ("Spi cer"), not another word.
 SECOND_AUTHOR = rf"(?:[^\W\d_]+\s+(?={PARTICLE}\s))?(?:{PARTICLE}\s+)*[^\W\d_]+(?:[-'’][^\W\d_]+)*(?:\s[a-z]{{2,4}}(?![a-z]))?"
 # "B" in "A & B 2001" is a second author, not a citation of B.
@@ -79,7 +77,7 @@ CONTINUATION = re.compile(r'(?:[-–−]\s?\d+[.,;)]?$|\d+\s?[-–−]\s?\d+[.,;
 SHORT_LINE, MIN_LINES = 16, 8
 # An entry this many times longer than the median entry is suspect, however long real author lists are.
 OUTLIER = 6
-EXTRACTION_VERSION = 6
+EXTRACTION_VERSION = 7
 
 _locks = WeakValueDictionary()
 _locks_guard = threading.Lock()
@@ -97,30 +95,6 @@ def _synchronized(function):
         with lock:
             return function(library, *args, **kwargs)
     return synchronized
-
-
-@contextmanager
-def _connection(library):
-    db = sqlite3.connect(library.db_path)
-    try:
-        with db:
-            db.execute('CREATE TABLE IF NOT EXISTS reference_analyses (source_id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
-            yield db
-    finally:
-        db.close()
-
-
-def _numbers(marker):
-    result = set()
-    for part in re.split(r'\s*[,;]\s*', marker):
-        match = re.fullmatch(r'(\d+)\s*[–−-]\s*(\d+)', part)
-        if match:
-            a, b = map(int, match.groups())
-            if a <= b and b - a <= 100:
-                result.update(range(a, b + 1))
-        elif part.isdigit():
-            result.add(int(part))
-    return result
 
 
 def _clean(text):
@@ -240,7 +214,7 @@ def _trim_outliers(entries):
         raw = entry['raw']
         end = len(raw) > limit and _citation_end(CITATION_END, raw)
         if end and raw[end.end():].strip():
-            entry.update(raw=raw[:end.end()].rstrip(), truncated=True)
+            entry['raw'] = raw[:end.end()].rstrip()
 
 
 def _citation_name(author):
@@ -408,8 +382,8 @@ def _detect_line_numbers(pages_chunks, page_widths, prose_xs):
     return pagewise if len(pagewise_pages) >= (1 if n_pages == 1 else 2) else set()
 
 
-def _extract_pages(reader):
-    """Extract per-page text while stripping verified margin line numbers."""
+def _extract_pages_with_chunks(reader):
+    """Extract per-page text while stripping verified margin line numbers, returning geometry chunks too."""
     pages_raw, pages_chunks, page_widths, prose_xs = [], [], [], []
     for page in reader.pages:
         box = getattr(page, 'mediabox', None)
@@ -420,7 +394,9 @@ def _extract_pages(reader):
         def visit(text, cm, tm, font, size):
             x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
             y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
-            chunks.append((text, x, y, abs(size)))
+            height = abs(size) * math.hypot(tm[2] * cm[0] + tm[3] * cm[2],
+                                            tm[2] * cm[1] + tm[3] * cm[3])
+            chunks.append((text, x, y, height))
             stripped = text.strip()
             if len(stripped) >= 4 and any(ch.isalpha() for ch in stripped):
                 prose_xs.append(x)
@@ -435,7 +411,7 @@ def _extract_pages(reader):
 
     stripped_ids = _detect_line_numbers(pages_chunks, page_widths, prose_xs)
     if not stripped_ids:
-        return pages_raw, {}
+        return pages_raw, {}, pages_chunks
 
     pages, ignored = [], {}
     for page_idx, chunks in enumerate(pages_chunks):
@@ -451,13 +427,27 @@ def _extract_pages(reader):
             else:
                 out.append(text)
         pages.append(''.join(out))
+    return pages, ignored, pages_chunks
+
+
+def _extract_pages(reader):
+    """Extract per-page text while stripping verified margin line numbers."""
+    pages, ignored, _ = _extract_pages_with_chunks(reader)
     return pages, ignored
+
+
+def _prepare_bibliography(pages):
+    pages = [_clean(page) for page in pages]
+    return pages, _find_heading(pages)
 
 
 def extract(pages):
     """Return detected references and occurrences; coverage is always partial."""
-    pages = [_clean(page) for page in pages]
-    heading = _find_heading(pages)
+    pages, heading = _prepare_bibliography(pages)
+    return _extract_references(pages, heading)
+
+
+def _extract_references(pages, heading):
     if not heading:
         return []
     page_index, match = heading
@@ -489,6 +479,10 @@ def extract(pages):
     for text in body:
         page_starts.append(offset)
         offset += len(text) + 1
+    numeric_markers = {}
+    for match in NUMERIC_MARKER.finditer(body_text):
+        for number in citation_numbers(match[1]):
+            numeric_markers.setdefault(number, []).append(match)
     found = []
     for index, entry in enumerate(entries):
         raw = entry['raw']
@@ -501,18 +495,17 @@ def extract(pages):
         if not numeric and author and year:
             entry['label'] = f'{surname} {year_text}'
         if numeric:
-            find = lambda text, n=int(entry['label']): [m for m in MARKER.finditer(text) if n in _numbers(m.group(1))]
+            matches = numeric_markers.get(int(entry['label']), [])
         elif author and year:
             pattern = _citation(surname, year_text, surnames(raw))
-            find = lambda text: [m for m in pattern.finditer(text) if not AFTER_NAME.search(text[max(0, m.start() - 30):m.start()])]
+            matches = [m for m in pattern.finditer(body_text) if not AFTER_NAME.search(body_text[max(0, m.start() - 30):m.start()])]
         else:
-            find = lambda text: []
-        found.append([(bisect_right(page_starts, m.start()), m) for m in find(body_text)
+            matches = []
+        found.append([(bisect_right(page_starts, m.start()), m) for m in matches
                       if bisect_right(page_starts, m.end() - 1) - bisect_right(page_starts, m.start()) <= 1])
         entry.update(id=str(index), title=raw, authors=surname,
                      year=year_text, doi=doi.group().rstrip('.,;') if doi else '',
                      count_status='partial', local_document_id=None)
-        entry['search_urls'] = search_urls(entry)
     homonyms = {}
     for i, entry in enumerate(entries):
         if not entry['label'].isdigit():
@@ -545,29 +538,35 @@ def extract(pages):
     return entries
 
 
-def analyze(library, document_id):
-    path = library.get_path(document_id, annotated=False)
-    reader = PdfReader(str(path))
-    pages, ignored = _extract_pages(reader)
-    refs = extract(pages)
-    map_destinations(reader, pages, refs, _ignored=ignored)
-    crosscheck_links(path, pages, refs)
-    return _store_analysis(library, document_id, refs)
+def analyze(library, document_id, *, resolve=True):
+    return _store_analysis(library, document_id, _analyze_pdf(library, document_id), resolve=resolve)
+
+
+def _analyze_pdf(library, document_id, refs=None):
+    data, _ = library.read_pdf(document_id, annotated=False)
+    reader = PdfReader(BytesIO(data))
+    pages, ignored, page_chunks = _extract_pages_with_chunks(reader)
+    pages, heading = _prepare_bibliography(pages)
+    if refs is None:
+        refs = _extract_references(pages, heading)
+    _map_destinations(reader, heading, refs, ignored, page_chunks=page_chunks)
+    _crosscheck_links(data, heading, refs)
+    return refs
 
 
 @_synchronized
-def _store_analysis(library, document_id, refs):
+def _store_analysis(library, document_id, refs, *, resolve=True):
     # Extraction can be slow; merge the latest user changes only after it finishes.
     previous_payload = _load(library, document_id)
     previous = previous_payload.get('references', [])
     reserved = {str(old['id']) for old in previous if 'id' in old}
     next_id = max(previous_payload.get('next_reference_id', 0),
                   max((int(value) for value in reserved if value.isdigit()), default=-1) + 1)
+    entries = [(ref, _normalize(ref['raw'])) for ref in refs]
+    previous_entries = [(old, _normalize(old['raw'])) for old in previous]
     retained = {}
-    previous_entries = [(_normalize(old['raw']), old) for old in previous if 'id' in old]
-    for ref in refs:
-        raw = _normalize(ref['raw'])
-        matches = [old for old_raw, old in previous_entries if str(old['id']) not in retained
+    for ref, raw in entries:
+        matches = [old for old, old_raw in previous_entries if 'id' in old and str(old['id']) not in retained
                    and (raw == old_raw or
                         (str(ref['label']).isdigit() and ref['label'] == old.get('label')
                          and min(len(raw), len(old_raw)) >= 20
@@ -579,28 +578,24 @@ def _store_analysis(library, document_id, refs):
             # Never reuse removed IDs: a download may still hold an older selection.
             ref['id'] = str(next_id)
             next_id += 1
-    preserved = [r for r in previous if r.get('manual_link') or r.get('retrieval') or r.get('identity')]
+    preserved = [(old, raw) for old, raw in previous_entries
+                 if old.get('manual_link') or old.get('retrieval') or old.get('identity')]
     claimed = set()
-    documents = library.list_documents()
-    for ref in refs:
-        raw = _normalize(ref['raw'])
+    for ref, raw in entries:
         matches = []
-        for i, old in enumerate(preserved):
+        for i, (old, old_raw) in enumerate(preserved):
             old_id = str(old['id']) if 'id' in old else None
             if i in claimed or (old_id in retained and ref['id'] != old_id):
                 continue
-            old_raw = _normalize(old['raw'])
             if (old_raw == raw and raw) or retained.get(ref['id']) is old:
                 matches.append(i)
                 continue
             # An older parser may have merged the next entry into this one.
-            same_author = old.get('authors') and _normalize(ref.get('authors', '')).startswith(
-                _normalize(old['authors']))
-            unique_prefix = sum(old_raw.startswith(_normalize(item['raw'])) for item in refs) == 1
-            if (len(raw) >= 12 and old_raw.startswith(raw) and same_author
-                    and old.get('year') == ref.get('year') and unique_prefix):
+            if (len(raw) >= 12 and old_raw.startswith(raw) and old.get('year') == ref.get('year')
+                    and old.get('authors') and _normalize(ref.get('authors', '')).startswith(_normalize(old['authors']))
+                    and sum(old_raw.startswith(text) for _, text in entries) == 1):
                 matches.append(i)
-        old = preserved[matches[0]] if len(matches) == 1 else {}
+        old = preserved[matches[0]][0] if len(matches) == 1 else {}
         if old:
             claimed.add(matches[0])
             if 'id' in old:
@@ -613,11 +608,7 @@ def _store_analysis(library, document_id, refs):
         linked = (old.get('manual_target_id') or old.get('local_document_id')) if old.get('manual_link') else None
         if linked:
             ref['local_document_id'], ref['manual_link'] = linked, True
-        elif ref['doi']:
-            matches = [d for d in documents if (d.get('doi') or '').lower() == ref['doi'].lower() and str(d['id']) != str(document_id)]
-            if len(matches) == 1:
-                ref['local_document_id'] = matches[0]['id']
-    for i, old in enumerate(preserved):
+    for i, (old, _) in enumerate(preserved):
         if i not in claimed:
             reference_id = str(old['id']) if 'id' in old else str(next_id)
             next_id += 'id' not in old
@@ -628,7 +619,7 @@ def _store_analysis(library, document_id, refs):
                'next_reference_id': next_id,
                'message': 'Detected citations only; bibliography and counts may be incomplete.'}
     _save(library, document_id, payload)
-    return _resolve(library, document_id, payload, documents)
+    return _resolve(library, document_id, payload, library.list_documents()) if resolve else payload
 
 
 def _normalize(text):
@@ -636,18 +627,21 @@ def _normalize(text):
     return ''.join(c for c in _clean(text).casefold() if c.isalnum())
 
 
-def crosscheck_links(path, pages, refs):
+def crosscheck_links(data, pages, refs):
     """Reconcile link and text events by position, retaining ambiguous counts as unknown."""
+    _, heading = _prepare_bibliography(pages)
+    _crosscheck_links(data, heading, refs)
+
+
+def _crosscheck_links(data, heading, refs):
     linked = [ref for ref in refs if ref.get('destinations') and ref.get('citation_count') is not None]
-    found_heading = _find_heading([_clean(page) for page in pages])
-    heading = found_heading[0] + 1 if found_heading else None
     if not linked or heading is None:
         return
-    from paperassist.native.citations import CitationIndex
+    from paperassist.citations import CitationIndex
 
-    index = CitationIndex(Path(path).read_bytes())
+    index = CitationIndex(data)
     try:
-        index.prepare_bibliography(refs, heading)
+        index.prepare_bibliography(refs, heading[0] + 1)
         for ref in linked:
             # Rebuild link events from the PDF, rather than treating saved geometry as new text.
             ref.pop('occurrence_geometry', None)
@@ -675,12 +669,16 @@ def _destination_coordinates(destination):
 
 def map_destinations(reader, pages, refs, _ignored=None):
     """Match the nearest bibliography row; unrecognized or ambiguous rows stay unmapped."""
+    _, heading = _prepare_bibliography(pages)
+    _map_destinations(reader, heading, refs, _ignored)
+
+
+def _map_destinations(reader, heading, refs, ignored, page_chunks=None):
     for ref in refs:
         ref['destinations'] = []
-    found_heading = _find_heading([_clean(page) for page in pages])
-    heading = found_heading[0] if found_heading else None
     if heading is None:
         return
+    heading_page, _ = heading
     destinations = {}
     for name, dest in reader.named_destinations.items():
         if STRUCTURAL_DESTINATION.match(str(name)):
@@ -688,29 +686,35 @@ def map_destinations(reader, pages, refs, _ignored=None):
         try:
             page = reader.get_destination_page_number(dest)
             left, top = _destination_coordinates(dest)
-            if page is not None and heading <= page < len(reader.pages) and top is not None:
+            if page is not None and heading_page <= page < len(reader.pages) and top is not None:
                 destinations.setdefault(page, []).append((name, left, top))
         except (TypeError, ValueError, AttributeError):
             continue
     entries = [(_normalize(ref['raw']), ref) for ref in refs]
     for page_number, targets in destinations.items():
         lines = []
-        skip_coords = (_ignored or {}).get(page_number, set())
-
-        def visit(text, cm, tm, font, size):
-            if not text.strip():
-                return
-            x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
-            y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
-            if (round(x, 1), round(y, 1)) in skip_coords:
-                return
-            height = abs(size) * math.hypot(tm[2] * cm[0] + tm[3] * cm[2],
-                                            tm[2] * cm[1] + tm[3] * cm[3])
-            if height:
-                lines.append((x, y, y + height, text.splitlines()[0]))
-
+        skip_coords = (ignored or {}).get(page_number, set())
         page = reader.pages[page_number]
-        page.extract_text(visitor_text=visit)
+        chunks = page_chunks[page_number] if page_chunks and page_number < len(page_chunks) else None
+        if chunks is not None:
+            for text, x, y, height in chunks:
+                if not text.strip() or (round(x, 1), round(y, 1)) in skip_coords or not height:
+                    continue
+                lines.append((x, y, y + height, text.splitlines()[0]))
+        else:
+            def visit(text, cm, tm, font, size):
+                if not text.strip():
+                    return
+                x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+                y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+                if (round(x, 1), round(y, 1)) in skip_coords:
+                    return
+                height = abs(size) * math.hypot(tm[2] * cm[0] + tm[3] * cm[2],
+                                                tm[2] * cm[1] + tm[3] * cm[3])
+                if height:
+                    lines.append((x, y, y + height, text.splitlines()[0]))
+
+            page.extract_text(visitor_text=visit)
         for name, left, top in targets:
             # An anchor inside the font band can be closer to the next row's estimated top.
             nearby = [(top - baseline, baseline) for x, baseline, y, _ in lines
@@ -741,49 +745,68 @@ def map_destinations(reader, pages, refs, _ignored=None):
                 matches[0]['destinations'].append(name)
 
 
+def _prepare_documents(documents, source_id):
+    """Precompute per-document tokens once per resolution pass instead of per reference."""
+    source = str(source_id)
+    prepared = []
+    for document in documents:
+        if str(document['id']) == source:
+            continue
+        title_words = frozenset(w for w in re.findall(r'[a-z0-9]+', (document.get('title') or '').lower()) if len(w) > 3)
+        doc_authors = fold(document.get('authors') or '')
+        years = frozenset(int(value) for value in document.get('metadata', {}).get('candidates', {}).get('year', []))
+        prepared.append((document, title_words, doc_authors, years, str(document.get('year') or ''),
+                         {'id': document['id'], 'title': document.get('title'),
+                          'authors': document.get('authors'), 'year': document.get('year')}))
+    return prepared
+
+
+def _local_candidates(ref, prepared, evidence=None):
+    raw_words = frozenset(re.findall(r'[a-z0-9]+', ref['raw'].lower()))
+    names = list(dict.fromkeys(fold(name) for name in surnames(ref['raw'])))
+    author = fold(ref.get('authors', ''))
+    year = (ref.get('year') or '')[:4]
+    patterns = {name: re.compile(r'(?<!\w)' + re.escape(name) + r'(?!\w)')
+                for name in (*names, *( [author] if author else [] )) if name}
+    candidates = []
+    for document, title_words, doc_authors, years, year_str, summary in prepared:
+        if year and year_str not in ('', year):
+            continue
+        def position(name):
+            if not name or name not in doc_authors:
+                return None
+            match = patterns[name].search(doc_authors)
+            return match.start() if match else None
+        author_pos = position(author) if author else None
+        if author and doc_authors and author_pos is None:
+            continue
+        title_match = len(title_words) >= 3 and len(title_words & raw_words) / len(title_words) >= .8
+        if not title_match:
+            if not (author and author_pos is not None):
+                continue
+            positions = [pos for name in names if (pos := position(name)) is not None]
+            if len(positions) < 2 or positions != sorted(positions):
+                continue
+        if has_conflict(ref, document, evidence(document) if evidence else None):
+            continue
+        # A paper almost always prints its own year on the first page.
+        if years and year and not any(abs(value - int(year)) <= 1 for value in years):
+            continue
+        candidates.append(((bool(author) and author_pos == 0, int(year or 0) in years), summary))
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    return [candidate for _, candidate in candidates[:5]]
+
+
 def local_candidates(ref, documents, source_id, evidence=None):
     """Suggest possible matches without silently merging different works.
 
     `evidence` maps a document to its publication evidence; a document whose own
     journal, volume, page or year contradicts the reference is never suggested.
     """
-    raw_words = set(re.findall(r'[a-z0-9]+', ref['raw'].lower()))
-    names = [fold(name) for name in surnames(ref['raw'])]
-    author = fold(ref.get('authors', ''))
-    year = (ref.get('year') or '')[:4]
-    candidates = []
-    for document in documents:
-        if str(document['id']) == str(source_id):
-            continue
-        title_words = set(re.findall(r'[a-z0-9]+', (document.get('title') or '').lower()))
-        title_words = {word for word in title_words if len(word) > 3}
-        doc_authors = fold(document.get('authors') or '')
-        def position(name):
-            match = re.search(r'(?<!\w)' + re.escape(name) + r'(?!\w)', doc_authors)
-            return match.start() if match else None
-        title_match = len(title_words) >= 3 and len(title_words & raw_words) / len(title_words) >= .8
-        positions = [pos for name in dict.fromkeys(names) if (pos := position(name)) is not None]
-        author_match = len(positions) >= 2 and author and position(author) is not None and positions == sorted(positions)
-        if str(document.get('year') or '') not in ('', year) and year:
-            continue
-        if not (title_match or author_match):
-            continue
-        if author and doc_authors and position(author) is None:
-            continue
-        if _conflict(ref, document, evidence(document) if evidence else None):
-            continue
-        years = {int(value) for value in document.get('metadata', {}).get('candidates', {}).get('year', [])}
-        # A paper almost always prints its own year on the first page.
-        if years and year and not any(abs(value - int(year)) <= 1 for value in years):
-            continue
-        candidates.append(((bool(author) and position(author) == 0, int(year or 0) in years),
-                           {'id': document['id'], 'title': document.get('title'),
-                            'authors': document.get('authors'), 'year': document.get('year')}))
-    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
-    return [candidate for _, candidate in candidates[:5]]
+    return _local_candidates(ref, _prepare_documents(documents, source_id), evidence)
 
 
-def _conflict(ref, document, evidence):
+def has_conflict(ref, document, evidence):
     """Short reason why the document cannot be the cited work, or '' when none is known."""
     cited = _publication(ref['raw'], ref.get('year', ''))
     found = (evidence or {}).get('publication')
@@ -799,21 +822,23 @@ def _conflict(ref, document, evidence):
 
 
 def _save(library, document_id, payload):
-    with _connection(library) as db:
+    with library._connect() as db:
         db.execute('INSERT OR REPLACE INTO reference_analyses VALUES (?, ?)', (str(document_id), json.dumps(payload)))
 
 
 def _load(library, document_id):
-    with _connection(library) as db:
+    with library._connect() as db:
         row = db.execute('SELECT payload FROM reference_analyses WHERE source_id = ?', (str(document_id),)).fetchone()
     if not row:
         return {'references': [], 'status': 'not_analyzed'}
     return json.loads(row[0])
 
 
-def _available(library, document_id):
+def _available(library, document):
+    if type(library).get_path is Library.get_path:
+        return library.has_pdf(document)
     try:
-        library.get_path(document_id)
+        library.get_path(document['id'])
         return True
     except (KeyError, FileNotFoundError, OSError):
         return False
@@ -823,14 +848,13 @@ def _publication_evidence(library, document):
     sha = document.get('sha256')
     if not sha:
         return None
-    with _connection(library) as db:
-        db.execute('CREATE TABLE IF NOT EXISTS publication_evidence_v4 (sha TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+    with library._connect() as db:
         row = db.execute('SELECT payload FROM publication_evidence_v4 WHERE sha = ?', (sha,)).fetchone()
         if row:
             return json.loads(row[0])
         try:
-            path = library.get_path(document['id'], annotated=False)
-            text = PdfReader(str(path)).pages[0].extract_text() or ''
+            data, _ = library.read_pdf(document['id'], annotated=False)
+            text = PdfReader(BytesIO(data)).pages[0].extract_text() or ''
             lines = text.splitlines()
             evidence = {'publication': _publication('\n'.join(lines[:6])), 'lines': lines[:15]}
         except Exception:
@@ -839,9 +863,24 @@ def _publication_evidence(library, document):
         return evidence
 
 
+def _load_evidence_batch(library, documents):
+    shas = list({d['sha256'] for d in documents if d.get('sha256')})
+    cached = {}
+    if not shas:
+        return cached
+    with library._connect() as db:
+        for start in range(0, len(shas), 900):
+            chunk = shas[start:start + 900]
+            placeholders = ','.join('?' * len(chunk))
+            for sha, raw in db.execute(f'SELECT sha, payload FROM publication_evidence_v4 WHERE sha IN ({placeholders})', chunk):
+                cached[sha] = json.loads(raw)
+    return cached
+
+
 def _resolve(library, document_id, payload, documents):
-    with _connection(library) as db:
-        rows = db.execute('SELECT source_id, payload FROM reference_analyses WHERE source_id != ?', (str(document_id),)).fetchall()
+    source = str(document_id)
+    with library._connect() as db:
+        rows = db.execute('SELECT source_id, payload FROM reference_analyses WHERE source_id != ?', (source,)).fetchall()
     shared = {}
     for source_id, saved_payload in rows:
         for old in json.loads(saved_payload).get('references', []):
@@ -849,12 +888,28 @@ def _resolve(library, document_id, payload, documents):
             if (old.get('manual_link') and not old.get('legacy') and not old.get('local_invalid')
                     and target and str(target) != source_id):
                 shared.setdefault(_normalize(old['raw']), set()).add(str(target))
-    available = {str(d['id']): d for d in documents if _available(library, d['id'])}
+    available = {str(d['id']): d for d in documents if _available(library, d)}
+    possible = [d for key, d in available.items() if key != source]
+    possible_by_id = {str(d['id']): d for d in possible}
+    by_doi = {}
+    by_first_page_doi = {}
+    folded_authors = {}
+    manual_authors = {}
+    for d in possible:
+        if doi := (d.get('doi') or '').lower():
+            by_doi.setdefault(doi, []).append(d)
+        for printed_doi in {value.lower() for value in d.get('metadata', {}).get('candidates', {}).get('doi', [])}:
+            by_first_page_doi.setdefault(printed_doi, []).append(d)
+        folded_authors[d['id']] = fold(d.get('authors') or '')
+        manual_authors[d['id']] = 'authors' in manual_fields(d)
+
+    evidence_by_sha = _load_evidence_batch(library, documents)
     evidence_cache = {}
 
     def evidence_for(d):
         if d['id'] not in evidence_cache:
-            found = _publication_evidence(library, d)
+            sha = d.get('sha256')
+            found = evidence_by_sha[sha] if sha and sha in evidence_by_sha else _publication_evidence(library, d)
             # PDFs without a printed journal header (preprints) keep the verified citation.
             verified = d.get('metadata', {}).get('verified', {}).get('publication')
             if verified and not (found and found['publication']):
@@ -862,53 +917,59 @@ def _resolve(library, document_id, payload, documents):
             evidence_cache[d['id']] = found
         return evidence_cache[d['id']]
 
+    by_publication = None
+    prepared = _prepare_documents(documents, document_id)
+
     for ref in payload['references']:
-        ref['local_candidates'] = local_candidates(ref, documents, document_id, evidence_for)
+        ref['local_candidates'] = _local_candidates(ref, prepared, evidence_for)
         for key in ('local_match', 'local_missing', 'local_invalid', 'local_conflict'):
             ref.pop(key, None)
         if ref.get('manual_link'):
             target = ref.get('manual_target_id') or ref.get('local_document_id')
             ref['manual_target_id'] = target
-            ref['local_invalid'] = str(target) == str(document_id)
+            ref['local_invalid'] = str(target) == source
             ref['local_document_id'] = target if str(target) in available and not ref['local_invalid'] else None
             ref['local_missing'] = str(target) not in available and not ref['local_invalid']
             ref['local_match'] = 'manual'
-            if ref['local_document_id'] and (reason := _conflict(ref, available[str(target)], evidence_for(available[str(target)]))):
+            if ref['local_document_id'] and (reason := has_conflict(ref, available[str(target)], evidence_for(available[str(target)]))):
                 ref['local_conflict'] = reason  # flagged for review; the user's link is kept
             continue
         ref['local_document_id'] = None
-        possible = [d for d in available.values() if str(d['id']) != str(document_id)]
-        matches = [d for d in possible if ref.get('doi') and (d.get('doi') or '').lower() == ref['doi'].lower()]
+        ref_doi = (ref.get('doi') or '').lower()
+        matches = by_doi.get(ref_doi, []) if ref_doi else []
         reason = 'doi'
-        if not matches and ref.get('doi'):
-            matches = [d for d in possible if _first_page_doi(ref, d, evidence_for)]
+        if not matches and ref_doi:
+            matches = [d for d in by_first_page_doi.get(ref_doi, []) if _first_page_doi(ref, d, evidence_for)]
             reason = 'first_page_doi'
         if not matches:
             targets = shared.get(_normalize(ref['raw']), set())
-            matches = [d for d in possible if str(d['id']) in targets] if len(targets) == 1 else []
+            matches = [possible_by_id[t] for t in targets if t in possible_by_id] if len(targets) == 1 else []
             reason = 'shared_manual'
         else:
             targets = set()
         if not matches and len(targets) <= 1 and (fingerprint := _publication(ref['raw'], ref.get('year', ''))):
             author = fold(ref.get('authors', ''))
             matches = []
-            for d in possible:
-                if not author:
-                    continue
-                evidence = evidence_for(d)
-                if not evidence or evidence['publication'] != fingerprint:
-                    continue
-                authors = fold(d.get('authors') or '')
-                in_metadata = re.search(r'(?<!\w)' + re.escape(author) + r'(?!\w)', authors)
-                # Authors the user typed outrank the printed header; extracted ones do not.
-                if 'authors' in manual_fields(d) and authors and not in_metadata:
-                    continue
-                if d.get('year') and str(d['year']) != fingerprint[3]:
-                    continue
+            if author:
+                if by_publication is None:
+                    by_publication = {}
+                    for d in possible:
+                        ev = evidence_for(d)
+                        if ev and ev.get('publication'):
+                            by_publication.setdefault(tuple(ev['publication']), []).append((d, ev))
+                author_word = re.compile(r'(?<!\w)' + re.escape(author) + r'(?!\w)')
                 first_author = re.compile(r'^\s*(?:[A-Z]\.\s*)+' + re.escape(author) + r'(?![^\W\d_])', re.I)
-                in_header = any(first_author.search(unicodedata.normalize('NFKC', line)) for line in evidence['lines'])
-                if in_metadata or in_header:
-                    matches.append(d)
+                for d, evidence in by_publication.get(tuple(fingerprint), ()):
+                    authors = folded_authors[d['id']]
+                    in_metadata = author in authors and bool(author_word.search(authors))
+                    # Authors the user typed outrank the printed header; extracted ones do not.
+                    if manual_authors[d['id']] and authors and not in_metadata:
+                        continue
+                    if d.get('year') and str(d['year']) != fingerprint[3]:
+                        continue
+                    in_header = any(first_author.search(unicodedata.normalize('NFKC', line)) for line in evidence['lines'])
+                    if in_metadata or in_header:
+                        matches.append(d)
             reason = 'publication'
         if len(matches) == 1:
             ref['local_document_id'], ref['local_match'] = matches[0]['id'], reason
@@ -921,54 +982,58 @@ def _first_page_doi(ref, document, evidence_for):
     if ref['doi'].lower() not in printed:
         return False
     evidence = evidence_for(document)
-    author = fold(ref.get('authors', ''))
-    seen = fold(f"{document.get('authors') or ''} {' '.join((evidence or {}).get('lines', []))}")
-    return bool(author) and not _conflict(ref, document, evidence) and bool(re.search(r'(?<!\w)' + re.escape(author) + r'(?!\w)', seen))
+    author = ref.get('authors', '')
+    seen = f"{document.get('authors') or ''} {' '.join((evidence or {}).get('lines', []))}"
+    return bool(author) and not has_conflict(ref, document, evidence) and has_surname(seen, author)
 
 
 @_synchronized
-def get(library, document_id):
+def get(library, document_id, *, resolve=True):
+    """Load or update the analysis, optionally skipping local matching."""
     payload = _load(library, document_id)
     if payload['status'] == 'not_analyzed':
         return payload
     if payload.get('extraction_version') != EXTRACTION_VERSION:
-        return analyze(library, document_id)
+        return analyze(library, document_id, resolve=resolve)
     if payload.get('destination_version') != DESTINATION_VERSION:
-        reader = PdfReader(str(library.get_path(document_id, annotated=False)))
-        pages, ignored = _extract_pages(reader)
-        map_destinations(reader, pages, payload['references'], _ignored=ignored)
-        crosscheck_links(library.get_path(document_id, annotated=False), pages, payload['references'])
+        _analyze_pdf(library, document_id, payload['references'])
         payload['destination_version'] = DESTINATION_VERSION
         _save(library, document_id, payload)
-    return _resolve(library, document_id, payload, library.list_documents())
+    return _resolve(library, document_id, payload, library.list_documents()) if resolve else payload
 
 
-@_synchronized
-def link(library, document_id, reference_id, target_id):
+def _reference_update(library, document_id, reference_id, target_id):
     if target_id is not None:
         if str(document_id) == str(target_id):
             raise ValueError('A reference cannot link to its source document')
         library.get_document(target_id)
-    payload = get(library, document_id)
+    payload = get(library, document_id, resolve=False)
     ref = next((r for r in payload['references'] if r['id'] == str(reference_id)), None)
     if ref is None:
         raise KeyError('Reference not found')
-    if target_id is None:
-        for key in ('manual_link', 'manual_target_id', 'local_document_id', 'local_match', 'local_missing', 'local_invalid'):
-            ref.pop(key, None)
-    else:
+    if target_id is not None:
         ref['local_document_id'], ref['manual_target_id'], ref['manual_link'] = target_id, target_id, True
-    _save(library, document_id, payload)
-    return next(r for r in get(library, document_id)['references'] if r['id'] == str(reference_id))
+        # A stale self-link flag would hide this valid link from other papers.
+        ref.pop('local_invalid', None)
+    return payload, ref
 
 
 @_synchronized
-def set_retrieval(library, document_id, reference_id, result):
+def link(library, document_id, reference_id, target_id):
+    payload, ref = _reference_update(library, document_id, reference_id, target_id)
+    if target_id is None:
+        for key in ('manual_link', 'manual_target_id', 'local_document_id', 'local_match', 'local_missing', 'local_invalid'):
+            ref.pop(key, None)
+    _save(library, document_id, payload)
+    _resolve(library, document_id, payload, library.list_documents())
+    return ref
+
+
+@_synchronized
+def set_retrieval(library, document_id, reference_id, result, *, target_id=None):
+    """Save a retrieval outcome and any associated manual link in one update."""
     from datetime import datetime, timezone
-    payload = get(library, document_id)
-    ref = next((r for r in payload['references'] if r['id'] == str(reference_id)), None)
-    if ref is None:
-        raise KeyError('Reference not found')
+    payload, ref = _reference_update(library, document_id, reference_id, target_id)
     identity = result.get('identity')
     ref['retrieval'] = {**{k: v for k, v in result.items() if k != 'identity'}, 'checked_at': datetime.now(timezone.utc).isoformat()}
     ref['status'] = result['status']
@@ -1000,10 +1065,14 @@ def repair_downloads(library, document_id, find=identify):
 
 @_synchronized
 def _repair_reference(library, document_id, reference_id, target, identity, message):
-    payload = get(library, document_id)
+    payload = get(library, document_id, resolve=False)
     ref = next((ref for ref in payload['references'] if ref['id'] == reference_id), None)
+    if ref is not None and not ref.get('manual_link'):
+        payload = get(library, document_id)
+        ref = next((ref for ref in payload['references'] if ref['id'] == reference_id), None)
     result = {'reference': reference_id, 'document': target, 'status': 'skipped'}
-    if ref is None or str(ref.get('local_document_id')) != str(target):
+    current_target = (ref.get('manual_target_id') or ref.get('local_document_id')) if ref else None
+    if ref is None or str(current_target) != str(target):
         return {**result, 'message': 'Reference link changed during lookup'}
     doc = library.get_document(target)
     if doc['filename'] != 'download.pdf' or doc['metadata_status'] == 'corrected':

@@ -20,6 +20,12 @@ def incremental_writer(data):
     return writer
 
 
+def _serialize(writer):
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
 def numbers(values):
     return ArrayObject(FloatObject(value) for value in values)
 
@@ -50,9 +56,18 @@ def color_rgb(annotation):
 
 
 def read(data, page):
+    return next(read_pages(data, [page]))[1]
+
+
+def read_pages(data, pages):
     reader = PdfReader(io.BytesIO(data))
+    for page in pages:
+        yield page, _read_page(reader.pages[page])
+
+
+def _read_page(page):
     result = []
-    for index, reference in enumerate(reader.pages[page].get('/Annots', ArrayObject()).get_object()):
+    for index, reference in enumerate(page.get('/Annots', ArrayObject()).get_object()):
         annotation = reference.get_object()
         subtype = annotation.get('/Subtype')
         if subtype not in ('/Highlight', '/Ink'):
@@ -125,8 +140,17 @@ def recolor_appearance(writer, original, color, seen=None):
 
 
 def apply(data, kind, page, **values):
+    return apply_edits(data, [(kind, page, values)])
+
+
+def apply_edits(data, edits):
     writer = incremental_writer(data)
-    target = writer.pages[page]
+    for kind, page, values in edits:
+        _apply(writer, kind, page, **values)
+    return _serialize(writer)
+
+
+def _apply(writer, kind, page, **values):
     if kind in ('highlight', 'ink'):
         color, opacity = values['color'], values.get('opacity', 1)
         annotation = DictionaryObject({NameObject('/Type'): NameObject('/Annot'), NameObject('/F'): NumberObject(4),
@@ -148,7 +172,7 @@ def apply(data, kind, page, **values):
         regenerate(writer, annotation)
         writer.add_annotation(page, annotation)
     else:
-        references = target['/Annots'].get_object()
+        references = writer.pages[page]['/Annots'].get_object()
         annotation = references[values['index']].get_object()
         if kind == 'delete':
             popup = annotation.get('/Popup')
@@ -183,9 +207,6 @@ def apply(data, kind, page, **values):
                 annotation[NameObject('/AP')] = appearances
             else:
                 regenerate(writer, annotation)
-    output = io.BytesIO()
-    writer.write(output)
-    return output.getvalue()
 
 
 def restore(data, previous, pages):
@@ -200,9 +221,7 @@ def restore(data, previous, pages):
         array = reader.pages[page].get('/Annots', ArrayObject()).get_object()
         writer.pages[page][NameObject('/Annots')] = ArrayObject(
             item.clone(writer, force_duplicate=True) for item in array)
-    output = io.BytesIO()
-    writer.write(output)
-    return output.getvalue()
+    return _serialize(writer)
 
 
 def without_highlights(data):
@@ -213,6 +232,4 @@ def without_highlights(data):
             page[NameObject('/Annots')] = ArrayObject(
                 ref for ref in page['/Annots'] if ref.get_object().get('/Subtype') != '/Highlight'
                 and ref.get_object().get('/IT') != '/InkHighlight')
-    output = io.BytesIO()
-    writer.write(output)
-    return output.getvalue()
+    return _serialize(writer)

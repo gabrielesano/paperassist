@@ -140,6 +140,7 @@ class OcrRecoveryTests(unittest.TestCase):
         cls.shared.cleanup()
 
     def setUp(self):
+        ocr.clear_probe_cache()
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.cache = Path(folder.name) / "cache"
@@ -184,7 +185,7 @@ class OcrRecoveryTests(unittest.TestCase):
         first = self.recover()
         with patch.object(ocr, "_launch", wraps=ocr._launch) as launch:
             second = self.recover()
-            self.assertEqual([call.args[0] for call in launch.call_args_list], ["probe"])
+            self.assertEqual(launch.call_args_list, [])
             self.assertTrue(second["cache_hit"] and not first["cache_hit"])
             self.assertEqual(second["pages"], first["pages"])
             self.assertFalse(self.recover(force=True)["cache_hit"])
@@ -196,6 +197,7 @@ class OcrRecoveryTests(unittest.TestCase):
             self.assertFalse(ocr._probe("eng")["available"])
             self.assertIn("not installed", ocr._probe("eng")["message"])
         gone = {"available": False, "message": "Offline OCR is unavailable: Tesseract is not installed."}
+        ocr.clear_probe_cache()
         with patch.object(ocr, "_launch", return_value=gone):
             unavailable = self.recover()
         self.assertEqual((unavailable["status"], unavailable["message"]), ("unavailable", gone["message"]))

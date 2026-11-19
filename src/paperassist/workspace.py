@@ -5,9 +5,8 @@ before releasing it. Jobs return the same polling records to every kind of UI.
 """
 
 import copy
-import shutil
+import gc
 import sys
-import tempfile
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from paperassist.library import Library
+from paperassist.native.platform import trim_heap
 from paperassist import inbox, location, metadata_refresh, paths, references, retrieval, settings
 
 
@@ -61,6 +61,7 @@ class Workspace:
         for cancel in list(self.cancellations.values()):
             cancel.set()
         self.executor.shutdown(wait=True, cancel_futures=True)
+        self.library.close()
 
     def get_settings(self):
         return settings.load(self.data_dir)
@@ -71,23 +72,17 @@ class Workspace:
     def check_settings(self):
         return retrieval.check(self.get_settings())
 
-    def get_preferences(self):
-        return settings.preferences()
-
-    def save_preferences(self, changes, only_if_missing=False):
-        return settings.update_preferences(changes, only_if_missing)
-
     def get_view(self, document_id):
         return self.library.get_view(document_id)
 
-    def save_view(self, document_id, view, only_if_missing=False):
-        return self.library.save_view(document_id, view, only_if_missing)
+    def save_view(self, document_id, view):
+        return self.library.save_view(document_id, view)
 
-    def submit(self, task, cleanup=None):
+    def submit(self, task):
         with self.job_lock:
-            return self._submit(task, cleanup)
+            return self._submit(task)
 
-    def _submit(self, task, cleanup):
+    def _submit(self, task):
         if not self.slots.acquire(blocking=False):
             raise JobsFull('Too many jobs; try again later')
         while len(self.jobs) >= 50:
@@ -109,6 +104,8 @@ class Workspace:
                 job['status'] = 'failed'
             finally:
                 self.slots.release()
+                gc.collect()
+                trim_heap()
         try:
             future = self.executor.submit(run)
         except Exception:
@@ -119,12 +116,7 @@ class Workspace:
         def finished(future):
             if future.cancelled():
                 job['status'] = 'cancelled'
-                try:
-                    # An upload never started its task's finally block.
-                    if cleanup:
-                        cleanup()
-                finally:
-                    self.slots.release()
+                self.slots.release()
         future.add_done_callback(finished)
         return copy.deepcopy(dict(job))
 
@@ -133,8 +125,9 @@ class Workspace:
             return copy.deepcopy(dict(self.jobs[job_id]))
 
     def cancel_job(self, job_id):
-        self.cancellations[job_id].set()
-        return self.job_status(job_id)
+        with self.job_lock:
+            self.cancellations[job_id].set()
+            return copy.deepcopy(dict(self.jobs[job_id]))
 
     def inspect_library(self, path):
         return location.classify(self.data_dir, path)
@@ -159,6 +152,7 @@ class Workspace:
                 except LibraryInUse:
                     raise WorkspaceConflict('That library is open in another PaperAssist. Close it first.') from None
             else:
+                self.library.close()
                 location.move(self.data_dir, target)
             paths.save_library(target)
             return target
@@ -203,46 +197,12 @@ class Workspace:
         return self.submit(lambda job, cancel: metadata_refresh.refresh(
             self.library, document_ids, cfg, online, job, cancel, ocr))
 
-    def import_files(self, streams):
-        """Stage (name, binary stream) uploads before returning; the job owns their cleanup."""
-        staging = Path(tempfile.mkdtemp(prefix='paperassist-upload-', dir=self.data_dir))
-        files = []
-        try:
-            for index, (name, stream) in enumerate(streams):
-                path = staging / str(index)
-                with path.open('wb') as output:
-                    shutil.copyfileobj(stream, output, length=1024 * 1024)
-                files.append((name, path))
-        except Exception:
-            shutil.rmtree(staging)
-            raise
-        def import_files(job, cancel):
-            results = []
-            try:
-                for index, (name, path) in enumerate(files):
-                    if cancel.is_set():
-                        break
-                    try:
-                        with path.open('rb') as stream:
-                            results.append({'filename': name, 'document': self.library.import_stream(stream, name)})
-                    except Exception as error:
-                        results.append({'filename': name, 'error': str(error)})
-                    job['progress'] = {'completed': index + 1, 'total': len(files)}
-                return {'files': results}
-            finally:
-                shutil.rmtree(staging)
-        try:
-            return self.submit(import_files, cleanup=lambda: shutil.rmtree(staging))
-        except Exception:
-            shutil.rmtree(staging)
-            raise
-
     def analyze_references(self, document_id):
         self.library.get_document(document_id)
         return self.submit(lambda job, cancel: references.analyze(self.library, document_id))
 
     def resolve_reference(self, document_id, reference_id):
-        ref = next((r for r in references.get(self.library, document_id)['references'] if r['id'] == reference_id), None)
+        ref = next((r for r in references.get(self.library, document_id, resolve=False)['references'] if r['id'] == reference_id), None)
         if not ref:
             raise ReferenceNotFound(reference_id)
         if not ref.get('doi'):
@@ -255,7 +215,7 @@ class Workspace:
                 not isinstance(value, (str, int)) or isinstance(value, bool) or not str(value) for value in values):
             raise ValueError('ids must be a non-empty list of reference IDs')
         ids = {str(value) for value in values}
-        refs = [r for r in references.get(self.library, document_id)['references'] if r['id'] in ids]
+        refs = [r for r in references.get(self.library, document_id, resolve=False)['references'] if r['id'] in ids]
         if ids != {r['id'] for r in refs}:
             raise ValueError('Unknown reference ID')
         def download(job, cancel):
@@ -263,28 +223,32 @@ class Workspace:
             for index, ref in enumerate(refs):
                 if cancel.is_set():
                     break
+                reference_id = ref['id']
                 try:
                     with self.download_lock:
-                        current = references.get(self.library, document_id)['references']
-                        ref = next((r for r in current if r['id'] == ref['id']), None)
+                        current = references.get(self.library, document_id, resolve=False)['references']
+                        ref = next((r for r in current if r['id'] == reference_id), None)
                         if ref is None:
                             raise ReferenceNotFound('Reference changed during analysis')
-                        job['progress'] = {'completed': index, 'total': len(refs), 'reference_id': ref['id'], 'provider': 'local'}
-                        def progress(provider):
-                            job['progress'] = {'completed': index, 'total': len(refs), 'reference_id': ref['id'], 'provider': provider}
-                        result = retrieval.download(self.library, ref, progress=progress, settings=self.get_settings())
-                        if result.get('document_id') and str(result['document_id']) != str(document_id):
-                            references.link(self.library, document_id, ref['id'], result['document_id'])
-                        references.set_retrieval(self.library, document_id, ref['id'], result)
+                        cfg = self.get_settings()
+                    def progress(provider):
+                        job['progress'] = {'completed': index, 'total': len(refs), 'reference_id': reference_id, 'provider': provider}
+                    progress('local')
+                    result = retrieval.download(self.library, ref, progress=progress, settings=cfg)
+                    target_id = result.get('document_id') or None
+                    if str(target_id) == str(document_id):
+                        target_id = None
+                    with self.download_lock:
+                        references.set_retrieval(self.library, document_id, reference_id, result, target_id=target_id)
                 except Exception as error:
                     result = {'version': 2, 'status': 'failed', 'summary': f'Search failed: {error}', 'attempts': []}
                     if ref is not None:
                         try:
                             with self.download_lock:
-                                references.set_retrieval(self.library, document_id, ref['id'], result)
+                                references.set_retrieval(self.library, document_id, reference_id, result)
                         except KeyError:
                             pass  # Re-analysis can remove a reference while a download is in flight.
-                results.append({'id': refs[index]['id'], **result})
+                results.append({'id': reference_id, **result})
                 job['progress'] = {'completed': index + 1, 'total': len(refs)}
             return {'references': results}
         return self.submit(download)
@@ -292,9 +256,8 @@ class Workspace:
     def check_folder(self, document_id, reference_id):
         self.library.get_document(document_id)
         def check(job, cancel):
-            with self.download_lock:
-                cfg = self.get_settings()
-                return inbox.check_folder(self.library, document_id, reference_id, cfg.inbox, cfg)
+            cfg = self.get_settings()
+            return inbox.check_folder(self.library, document_id, reference_id, cfg.inbox, cfg)
         return self.submit(check)
 
     def link_file(self, document_id, reference_id, name):
@@ -304,10 +267,7 @@ class Workspace:
 
     def repair_downloads(self, document_id):
         self.library.get_document(document_id)
-        def repair(job, cancel):
-            with self.download_lock:
-                return {'documents': references.repair_downloads(self.library, document_id)}
-        return self.submit(repair)
+        return self.submit(lambda job, cancel: {'documents': references.repair_downloads(self.library, document_id)})
 
 
 class LibraryInUse(RuntimeError):

@@ -1,28 +1,92 @@
-"""The library list: search, open in a tab or quick view, and import PDFs as a background job."""
+"""The library list and paper metadata editor: search, open, edit, refresh, and import PDFs."""
+import re
+
 from PySide6.QtCore import QEvent, QItemSelectionModel, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-                               QMenu, QProgressBar, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
+from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QMenu, QProgressBar, QPushButton,
+                               QTreeWidget, QTreeWidgetItem)
 
-from paperassist.library import manual_fields, pdf_files
+from paperassist.library import MAX_LABEL, manual_fields, pdf_files
+from paperassist.paths import format_size
+from paperassist.settings import PROVIDER_NAMES
 
+from .dialogs import setup_dialog
 from .jobs import JobWatcher
-from .library_source import display_title
-from .metadata_dialog import MetadataDialog
-from .theme import APP_STYLE, serif_heading_font
+from .source import display_title
+from .theme import serif_heading_font, set_props
 
 TITLE, TAB_NAME, AUTHORS, YEAR, METADATA = range(5)
 REVIEW = QColor("#a15c00")  # amber: not an error, a paper whose metadata nobody confirmed
 NEEDS_REVIEW = ("needs_review", "incomplete")
 OCR_TIP = ("OCR runs locally and can take up to about a minute per paper. It never modifies the PDF, "
            "and its results stay provisional until you review them.")
+METADATA_FIELDS = (("title", "Title"), ("label", "Tab name"), ("authors", "Authors"), ("year", "Year"), ("doi", "DOI"))
+SOURCE_LABELS = {
+    "manual": "Corrected by you",
+    "pdf_info": "PDF properties",
+    "xmp": "XMP properties",
+    "filename": "Filename",
+    **PROVIDER_NAMES,
+    "arxiv_submission_date": "Printed arXiv submission date (preprint year)",
+    "first_page_typography": "First-page title typography (provisional)",
+    "first_page_authors": "First-page author lines (provisional)",
+    "ocr_title": "Offline OCR of the first page (provisional)",
+    "ocr_authors": "Offline OCR author lines (provisional)",
+}
 
 
-def size_text(size):
-    for unit in ("bytes", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size} bytes" if unit == "bytes" else f"{size:.1f} {unit}"
-        size /= 1024
+class MetadataDialog(QDialog):
+    """Correct the title, authors, year and DOI of one paper; a rejected value is explained and kept for editing."""
+    saved = Signal(dict)  # the document as stored, after the correction
+
+    def __init__(self, library, document, parent=None):
+        super().__init__(parent)
+        self.library, self.document_id = library, document["id"]
+        self.setMinimumWidth(520)
+        column, _ = setup_dialog(self, "Edit paper details")
+        form = QFormLayout()
+        form.setSpacing(8)
+        self.fields = {}
+        for key, label in METADATA_FIELDS:
+            field = QLineEdit(str(document.get(key) or ""))
+            field.setAccessibleName(label)
+            form.addRow(f"&{label}", field)
+            self.fields[key] = field
+        # Shown in place, so the typed values stay on screen while the user fixes them.
+        self.error = QLabel(wordWrap=True)
+        set_props(self.error, tone="error")
+        self.error.setAccessibleName("Validation message")
+        self.error.hide()
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        if save_btn := buttons.button(QDialogButtonBox.Save):
+            save_btn.setProperty("primary", True)
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        column.addLayout(form)
+        if note := document.get("metadata", {}).get("refresh", {}).get("message"):
+            column.addWidget(QLabel(note, objectName="muted-note", wordWrap=True))
+        column.addWidget(self.error)
+        column.addWidget(buttons)
+        self.fields["title"].setFocus()
+
+    def save(self):
+        values = {key: field.text().strip() for key, field in self.fields.items()}
+        try:
+            if values["year"] and not re.fullmatch(r"\d{1,4}", values["year"]):
+                raise ValueError("Year must be a number such as 2015")
+            if len(values.get("label", "")) > MAX_LABEL:
+                raise ValueError(f"Tab name cannot be longer than {MAX_LABEL} characters")
+            label = values.pop("label", None)
+            document = self.library.update_metadata(self.document_id, values)
+            if label is not None:
+                document = self.library.set_label(self.document_id, label)
+        except ValueError as error:
+            self.error.setText(str(error))
+            self.error.show()
+            return
+        self.saved.emit(document)
+        self.accept()
 
 
 class PaperItem(QTreeWidgetItem):
@@ -46,11 +110,8 @@ class LibraryDialog(QDialog):
     def __init__(self, workspace, parent=None):
         super().__init__(parent)
         self.workspace, self.watcher = workspace, None
-        self.setWindowTitle("Library")
         self.resize(940, 580)
-        self.heading = QLabel("Library")
-        self.heading.setProperty("headingScale", "dialog")
-        self.heading.setFont(serif_heading_font(self.font()))
+        column, self.heading = setup_dialog(self, "Library")
         self.search = QLineEdit(placeholderText="Search title, tab name, author, year or DOI", clearButtonEnabled=True)
         self.search.setAccessibleName("Search the library")
         self.table = QTreeWidget(objectName="dialog-tree", rootIsDecorated=False, uniformRowHeights=True,
@@ -61,8 +122,8 @@ class LibraryDialog(QDialog):
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.AscendingOrder)
         self.table.header().setToolTip("Click a column to sort; click again to reverse the order.")
-        for column, width in ((TITLE, 360), (TAB_NAME, 130), (AUTHORS, 200), (YEAR, 56)):
-            self.table.setColumnWidth(column, width)
+        for col, width in ((TITLE, 360), (TAB_NAME, 130), (AUTHORS, 200), (YEAR, 56)):
+            self.table.setColumnWidth(col, width)
         self.open_button = QPushButton("Open")
         self.open_button.setProperty("primary", True)
         self.quick_button = QPushButton("Quick view")
@@ -131,10 +192,6 @@ class LibraryDialog(QDialog):
         for widget in (self.estimate, self.start_button, self.import_open_button, self.discard_button):
             self.confirm_row.addWidget(widget, 1 if widget is self.estimate else 0)
 
-        column = QVBoxLayout(self)
-        column.setContentsMargins(22, 20, 22, 18)
-        column.setSpacing(10)
-        column.addWidget(self.heading)
         column.addWidget(self.search)
         column.addLayout(metadata_row)
         column.addWidget(self.table, 1)
@@ -146,9 +203,9 @@ class LibraryDialog(QDialog):
         self.pending = []
         self.library_count = 0
         self.review_ids = []
-        self.single_import = self.open_after_import = False
+        self.single_import = False
         self.job_kind = "import"
-        self.typing = QTimer(self, singleShot=True, interval=150, timeout=self.refresh)
+        self.typing = QTimer(self, singleShot=True, interval=150, timeout=lambda: self.refresh(reload_counts=False))
         self.search.textChanged.connect(self.typing.start)
         self.table.itemActivated.connect(lambda: self._request(self.open_requested))
         self.table.itemSelectionChanged.connect(self._enable)
@@ -165,10 +222,8 @@ class LibraryDialog(QDialog):
         self.recover_selected.triggered.connect(lambda: self.start_metadata_refresh(self.selected_ids(), ocr="force"))
         self.discard_button.clicked.connect(self._discard_selection)
         self.cancel_button.clicked.connect(lambda: self.watcher.cancel())
-        self._importing(False)
+        self._set_job_running(False)
         self._discard_selection()
-        if parent is None:
-            self.setStyleSheet(APP_STYLE)
         self.refresh()
 
     def changeEvent(self, event):
@@ -197,12 +252,14 @@ class LibraryDialog(QDialog):
         self.search.setFocus()
 
     # ---- list -----------------------------------------------------------------------------
-    def refresh(self):
+    def refresh(self, *, reload_counts=True):
         selected, current = set(self.selected_ids()), self.selected_id()
-        documents = self.workspace.library.list_documents(self.search.text())
-        everyone = self.workspace.library.list_documents() if self.search.text() else documents
-        self.library_count = len(everyone)
-        self.review_ids = [document["id"] for document in everyone if document["metadata_status"] in NEEDS_REVIEW]
+        query = self.search.text()
+        documents = self.workspace.library.list_documents(query)
+        if not query or reload_counts:
+            everyone = self.workspace.library.list_documents() if query else documents
+            self.library_count = len(everyone)
+            self.review_ids = [document["id"] for document in everyone if document["metadata_status"] in NEEDS_REVIEW]
         blocker = QSignalBlocker(self.table)
         self.table.setSortingEnabled(False)
         self.table.clear()
@@ -218,7 +275,7 @@ class LibraryDialog(QDialog):
                 item.setForeground(METADATA, REVIEW)
             metadata = document["metadata"]
             provider = (metadata.get("verified") or {}).get("provider")
-            provider = {"arxiv": "arXiv", "crossref": "Crossref"}.get(str(provider).lower(), provider)
+            provider = PROVIDER_NAMES.get(str(provider).lower(), provider)
             corrected = "Corrected by you; refresh keeps those fields and can still fill the others."
             note = "\n".join(filter(None, [metadata.get("refresh", {}).get("message"),
                                            corrected if manual_fields(document) else ""])) or (
@@ -228,13 +285,7 @@ class LibraryDialog(QDialog):
             for field, column in (("title", TITLE), ("authors", AUTHORS), ("year", YEAR)):
                 source = metadata.get("sources", {}).get(field)
                 if source:
-                    source = {"manual": "Corrected by you", "pdf_info": "PDF properties", "xmp": "XMP properties", "filename": "Filename",
-                              "arxiv": "arXiv", "crossref": "Crossref",
-                              "arxiv_submission_date": "Printed arXiv submission date (preprint year)",
-                              "first_page_typography": "First-page title typography (provisional)",
-                              "first_page_authors": "First-page author lines (provisional)",
-                              "ocr_title": "Offline OCR of the first page (provisional)",
-                              "ocr_authors": "Offline OCR author lines (provisional)"}.get(source, source)
+                    source = SOURCE_LABELS.get(source, source)
                     if source.startswith("ocr"):  # any other OCR-derived field
                         source = "Offline OCR (provisional)"
                     item.setToolTip(column, item.toolTip(column) + ("\n" if item.toolTip(column) else "") + f"Source: {source}")
@@ -245,7 +296,7 @@ class LibraryDialog(QDialog):
                 self.table.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
         self.table.setSortingEnabled(True)
         blocker.unblock()
-        empty = not documents and not self.search.text()
+        empty = not documents and not query
         self.table.setVisible(not empty)
         self.hint.setVisible(empty)
         if empty:
@@ -307,7 +358,7 @@ class LibraryDialog(QDialog):
         titles = {document["id"]: display_title(document) for document in documents}
         for pane in window.all_panes():
             source = pane.view.doc.source
-            if getattr(source, "document_id", None) in titles:
+            if source.document_id in titles:
                 source.title = titles[source.document_id]
         window.refresh()
         # Open tabs may cite the corrected paper, so drop cached resolutions before reloading the active one.
@@ -322,17 +373,10 @@ class LibraryDialog(QDialog):
         except Exception as error:
             self.message.setText(f"Could not refresh metadata: {error}")
             return
-        self.job_kind = "metadata"
-        self.watcher = JobWatcher(self.workspace, job, self)
-        self.watcher.progress.connect(self._progress)
-        self.watcher.finished.connect(self._metadata_refreshed)
-        self._importing(True)
+        self._watch_job(job, "metadata", self._metadata_refreshed)
         self.message.setText("Refreshing metadata… Fields you corrected are preserved.")
 
     def _metadata_refreshed(self, job):
-        self.watcher.deleteLater()
-        self.watcher = None
-        self._importing(False)
         result = job.get("result", {})
         self._metadata_changed(result.get("documents", []))
         if job["status"] == "failed":
@@ -379,8 +423,8 @@ class LibraryDialog(QDialog):
             except OSError as error:
                 errors.append({"path": str(path), "error": str(error)})
         # Duplicates are not copied, so the total is an upper bound.
-        self.estimate.setText(f"{len(files)} PDF{'s' if len(files) != 1 else ''}, {size_text(total)}. "
-                              f"Importing copies them: up to {size_text(total)} of extra storage.")
+        self.estimate.setText(f"{len(files)} PDF{'s' if len(files) != 1 else ''}, {format_size(total)}. "
+                              f"Importing copies them: up to {format_size(total)} of extra storage.")
         if errors:
             self.estimate.setText(f"Found {len(files)} PDF{'s' if len(files) != 1 else ''}. "
                                   "Total storage estimate unavailable because some paths could not be read. "
@@ -420,12 +464,22 @@ class LibraryDialog(QDialog):
         except Exception as error:  # too many jobs, or an invalid request
             self.message.setText(f"Could not start the import: {error}")
             return
-        self.job_kind, self.open_after_import = "import", open_after
-        self.watcher = JobWatcher(self.workspace, job, self)
-        self.watcher.progress.connect(self._progress)
-        self.watcher.finished.connect(self._imported)
-        self._importing(True)
+        self._watch_job(job, "import", lambda result: self._imported(result, open_after))
         self.message.setText("Importing…")
+
+    def _watch_job(self, job, kind, finished):
+        self.job_kind = kind
+        watcher = self.watcher = JobWatcher(self.workspace, job, self)
+        watcher.progress.connect(self._progress)
+
+        def done(result):
+            watcher.deleteLater()
+            self.watcher = None
+            self._set_job_running(False)
+            finished(result)
+
+        watcher.finished.connect(done)
+        self._set_job_running(True)
 
     def _progress(self, job):
         done = job.get("progress") or {}
@@ -437,15 +491,12 @@ class LibraryDialog(QDialog):
             if done.get("stage") == "ocr":
                 detail = "offline OCR" + (f", page {done['page']}" if done.get("page") else "")
             elif provider:
-                detail = "arXiv" if provider == "arxiv" else "Crossref"
+                detail = PROVIDER_NAMES.get(provider, provider)
             else:
                 detail = ""
             self.message.setText(f"{action} {done['completed']} of {done['total']}…" + (f" ({detail})" if detail else ""))
 
-    def _imported(self, job):
-        self.watcher.deleteLater()
-        self.watcher = None
-        self._importing(False)
+    def _imported(self, job, open_after):
         if job["status"] == "failed":
             text = f"Import failed: {job['error']}"
         elif "result" not in job:  # cancelled before the first file
@@ -463,12 +514,11 @@ class LibraryDialog(QDialog):
         if job.get("result", {}).get("imported") and hasattr(window, "details"):
             window.details.library_changed()
         documents = job.get("result", {}).get("documents", [])
-        open_after, self.open_after_import = self.open_after_import, False
         if open_after and job["status"] == "completed" and len(documents) == 1:
             self.open_requested.emit(documents[0]["id"])
             self.hide()
 
-    def _importing(self, running):
+    def _set_job_running(self, running):
         self.import_button.setEnabled(not running)
         self.folder_button.setEnabled(not running)
         self.progress.setVisible(running)

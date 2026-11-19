@@ -25,7 +25,7 @@ class CrossrefMetadataTests(unittest.TestCase):
 
     def search(self, *items, document=None):
         data = json.dumps({"message": {"items": items}}).encode()
-        with patch("paperassist.retrieval._get", return_value=data) as get:
+        with patch("paperassist.http_client.get", return_value=data) as get:
             result = crossref_metadata.lookup(document or self.doc, self.cfg, self.cancel)
         return result, get
 
@@ -190,7 +190,7 @@ class CrossrefMetadataTests(unittest.TestCase):
         self.doc["doi"] = "10.1234/loops"
         record = {"doi": "10.1234/loops", "title": "Provider correction", "year": 2022}
         with patch("paperassist.retrieval.crossref_metadata", return_value=record) as doi:
-            with patch("paperassist.retrieval._get") as get:
+            with patch("paperassist.http_client.get") as get:
                 self.assertEqual(crossref_metadata.lookup(self.doc, self.cfg, self.cancel), record)
         doi.assert_called_once_with("10.1234/loops", self.cfg, fresh=True)
         get.assert_not_called()
@@ -202,7 +202,7 @@ class CrossrefMetadataTests(unittest.TestCase):
         self.doc["metadata"]["candidates"]["doi"] = ["10.1234/absent", "10.1234/loops"]
         record = {"doi": "10.1234/loops", "title": self.doc["title"], "first_author": "Lovelace", "year": 2021}
         with patch("paperassist.retrieval.crossref_metadata", side_effect=[HTTPError("", 404, "Missing", {}, None), record]) as doi:
-            with patch("paperassist.retrieval._get") as get:
+            with patch("paperassist.http_client.get") as get:
                 self.assertEqual(crossref_metadata.lookup(self.doc, self.cfg, self.cancel), record)
         self.assertEqual(doi.call_count, 2)
         get.assert_not_called()
@@ -221,7 +221,7 @@ class CrossrefMetadataTests(unittest.TestCase):
             cfg = Settings({"enabled": {"crossref": enabled}})
             if cancelled:
                 self.cancel.set()
-            with patch("paperassist.retrieval._get") as get, patch("paperassist.retrieval.crossref_metadata") as doi:
+            with patch("paperassist.http_client.get") as get, patch("paperassist.retrieval.crossref_metadata") as doi:
                 self.assertIsNone(crossref_metadata.lookup(self.doc, cfg, self.cancel))
             get.assert_not_called()
             doi.assert_not_called()

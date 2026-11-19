@@ -1,17 +1,17 @@
-"""The citation-steps.js edge cases, native PDF geometry, and background panel loading."""
+"""Citation matching edge cases, native PDF geometry, and background panel loading."""
 import io
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import make_pdf, needs_pdf, needs_qt, pdf_available
+from support import QtTestCase, make_pdf, needs_pdf, needs_qt, pdf_available
 
 if pdf_available:
-    from paperassist.native.citations import (CitationIndex, build_text_index, citation_matches, citation_position,
-        find_markers, match_rects, merge_links, nearest_item, next_citation_index, normalize, reveal_citation)
+    from paperassist.citations import (CitationIndex, build_text_index, citation_matches,
+        find_markers, match_rects, merge_links, nearest_item, next_citation_index, normalize)
+    from paperassist.native.citations import citation_position, reveal_citation
     from paperassist.native.engine import Pdf, Rect
 
 
@@ -103,7 +103,8 @@ class CitationLogicTests(unittest.TestCase):
     def test_numeric_ranges_groups_duplicates_and_unknown_labels(self):
         refs = [{"id": str(n), "label": f"[{n}]."} for n in range(1, 5)]
         self.assertEqual([r["id"] for r in citation_matches(refs, "[1, 3–4]")], ["1", "3", "4"])
-        for text in ("[4-2]", "[1-99]", "[1, 9]", "[1,]", "Figure 1"):
+        self.assertEqual(citation_matches(refs, "[1—3; 1]"), refs[:3])
+        for text in ("[4-2]", "[2, 3–1]", "[1-102]", "[1, 9]", "[1,]", "Figure 1"):
             self.assertEqual(citation_matches(refs, text), [])
 
     def test_author_year_and_named_destinations_preserve_ambiguous_choices(self):
@@ -170,11 +171,8 @@ class CitationLogicTests(unittest.TestCase):
 
 
 @needs_qt
-class CitationPanelTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from PySide6.QtWidgets import QApplication
-        cls.app = QApplication.instance() or QApplication([])
+class CitationPanelTests(QtTestCase):
+    use_client = False
 
     def delete(self, widget):
         """Destroy now, on this thread: the Mock client keeps the view in a reference cycle, and a
@@ -182,13 +180,6 @@ class CitationPanelTests(unittest.TestCase):
         from PySide6.QtCore import QCoreApplication, QEvent
         widget.deleteLater()
         QCoreApplication.sendPostedEvents(widget, QEvent.DeferredDelete)
-
-    def pump(self, condition):
-        end = time.monotonic() + 10
-        while not condition() and time.monotonic() < end:
-            self.app.processEvents()
-            time.sleep(0.002)
-        self.assertTrue(condition())
 
     def test_reload_waits_for_running_load_or_analysis(self):
         from unittest.mock import Mock
@@ -339,9 +330,9 @@ class CitationPanelTests(unittest.TestCase):
             ui_thread = threading.get_ident()
             analyze_threads = []
             real_analyze = references.analyze
-            def tracked_analyze(lib, doc_id):
+            def tracked_analyze(lib, doc_id, **options):
                 analyze_threads.append(threading.get_ident())
-                return real_analyze(lib, doc_id)
+                return real_analyze(lib, doc_id, **options)
 
             with patch.object(references, "EXTRACTION_VERSION", references.EXTRACTION_VERSION + 1), \
                  patch.object(references, "analyze", side_effect=tracked_analyze):
@@ -357,7 +348,7 @@ class CitationPanelTests(unittest.TestCase):
         from test_library_window import cited_pdf
         from paperassist.native.acquisition import AcquisitionController
         from paperassist.native.window import MainWindow
-        from paperassist.native.renderer import RenderClient
+        from paperassist.native.worker import RenderClient
 
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
@@ -420,7 +411,7 @@ class CitationPanelTests(unittest.TestCase):
         from paperassist import references
         from paperassist.workspace import Workspace
         from test_library_window import cited_pdf
-        from paperassist.native.renderer import RenderClient
+        from paperassist.native.worker import RenderClient
         from paperassist.native.window import MainWindow
 
         with tempfile.TemporaryDirectory() as folder:

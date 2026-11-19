@@ -14,6 +14,8 @@ from typing import NamedTuple
 import pypdfium2 as pdfium
 import pypdfium2.raw as raw
 
+from paperassist.citation import fold
+
 HIGHLIGHT = tuple(value / 255 for value in (245, 215, 110))
 FIT_TOP = {raw.PDFDEST_VIEW_FITR, raw.PDFDEST_VIEW_FITH, raw.PDFDEST_VIEW_FITBH}
 BLANK = {" ", "\r", "\n", "\t", "\ufffe"}
@@ -69,8 +71,9 @@ class Frame:
         # Affine map X = a*u + c*v + e, Y = b*u + d*v + f with u, v measured from the box corner.
         self.origin = (left, bottom)
         self.top = top
+        self.rotation = page.get_rotation() % 360
         self.matrix = {0: (1, 0, 0, -1, 0, h), 90: (0, 1, 1, 0, 0, 0),
-                       180: (-1, 0, 0, 1, w, 0), 270: (0, -1, -1, 0, h, w)}[page.get_rotation() % 360]
+                       180: (-1, 0, 0, 1, w, 0), 270: (0, -1, -1, 0, h, w)}[self.rotation]
 
     def point(self, x, y):
         a, b, c, d, e, f = self.matrix
@@ -89,24 +92,35 @@ class Frame:
 
 
 def _search_ranges(text_page, query):
-    def fold(text):
-        return "".join(c for c in unicodedata.normalize("NFKD", text.casefold())
-                       if not unicodedata.combining(c))
-
     needle = fold(query)
     if not needle:
         return
     letters, owners = [], []
     # PDFium character indices can differ from Python offsets in extracted text.
     for index in range(text_page.count_chars()):
-        letter = fold(chr(raw.FPDFText_GetUnicode(text_page, index)))
-        letters.append(letter)
-        owners.extend([index] * len(letter))
+        ch = chr(raw.FPDFText_GetUnicode(text_page, index))
+        if ch.isspace():
+            if letters and letters[-1] != " ":
+                letters.append(" ")
+                owners.append(index)
+        elif letter := fold(ch):
+            letters.append(letter)
+            owners.extend([index] * len(letter))
     text, start = "".join(letters), 0
     while (found := text.find(needle, start)) >= 0:
         first, last = owners[found], owners[found + len(needle) - 1]
         yield first, last - first + 1
         start = found + len(needle)
+
+
+class RenderedPage:
+    def __init__(self, bitmap):
+        self._bitmap = bitmap
+        self.width, self.height = bitmap.width, bitmap.height
+
+    @property
+    def rgb(self):
+        return memoryview(self._bitmap.buffer)
 
 
 class Pdf:
@@ -125,6 +139,11 @@ class Pdf:
     @property
     def is_closed(self):
         return self._doc.raw is None
+
+    @pdf_locked
+    def render(self, page, scale):
+        with closing(self._doc[page]) as target:
+            return RenderedPage(target.render(scale=scale, rev_byteorder=True, prefer_bgrx=False))
 
     @pdf_locked
     def frame(self, number):
@@ -156,6 +175,30 @@ class Pdf:
         page.close()
         return words
 
+    def _dest_target(self, dest, *, clamp_top=False):
+        target = raw.FPDFDest_GetDestPageIndex(self._doc, dest)
+        if not 0 <= target < len(self.sizes):
+            return None, 0.0
+        has_x, has_y, has_zoom = (ctypes.c_int() for _ in range(3))
+        x, y, zoom = (ctypes.c_float() for _ in range(3))
+        raw.FPDFDest_GetLocationInPage(dest, has_x, has_y, has_zoom, x, y, zoom)
+        if not has_y.value:  # fit modes keep their top edge in the view parameters, not in the location
+            count, params = ctypes.c_ulong(4), (ctypes.c_float * 4)()
+            view = raw.FPDFDest_GetView(dest, count, params)
+            y.value, has_y.value = {raw.PDFDEST_VIEW_FITR: params[3], raw.PDFDEST_VIEW_FITH: params[0],
+                                    raw.PDFDEST_VIEW_FITBH: params[0]}.get(view, 0), view in FIT_TOP
+            if view in (raw.PDFDEST_VIEW_FITR, raw.PDFDEST_VIEW_FITV, raw.PDFDEST_VIEW_FITBV):
+                x.value, has_x.value = params[0], True
+        target_frame = self.frame(target)
+        if clamp_top:
+            if not has_y.value or target_frame.rotation:
+                return target, 0.0
+            return target, max(0.0, target_frame.point(target_frame.origin[0], y.value)[1])
+        top = (target_frame.point(x.value if has_x.value else target_frame.origin[0],
+                                  y.value if has_y.value else target_frame.top)[1]
+               if has_x.value or has_y.value else 0)
+        return target, top
+
     @pdf_locked
     def links(self, number):
         """Resolve internal destinations including XYZ, FitH and FitR to displayed coordinates."""
@@ -172,28 +215,32 @@ class Pdf:
                 raw.FPDFAction_GetURIPath(self._doc, action, buffer, size)
                 item = Link(rect, buffer.value.decode("utf-8", errors="replace"), None, 0)
             elif dest := raw.FPDFLink_GetDest(self._doc, link):
-                target = raw.FPDFDest_GetDestPageIndex(self._doc, dest)
-                if not 0 <= target < len(self.sizes):
+                target, top = self._dest_target(dest)
+                if target is None:
                     continue
-                has_x, has_y, has_zoom = (ctypes.c_int() for _ in range(3))
-                x, y, zoom = (ctypes.c_float() for _ in range(3))
-                raw.FPDFDest_GetLocationInPage(dest, has_x, has_y, has_zoom, x, y, zoom)
-                if not has_y.value:  # fit modes keep their top edge in the view parameters, not in the location
-                    count, params = ctypes.c_ulong(4), (ctypes.c_float * 4)()
-                    view = raw.FPDFDest_GetView(dest, count, params)
-                    y.value, has_y.value = {raw.PDFDEST_VIEW_FITR: params[3], raw.PDFDEST_VIEW_FITH: params[0],
-                                            raw.PDFDEST_VIEW_FITBH: params[0]}.get(view, 0), view in FIT_TOP
-                    if view in (raw.PDFDEST_VIEW_FITR, raw.PDFDEST_VIEW_FITV, raw.PDFDEST_VIEW_FITBV):
-                        x.value, has_x.value = params[0], True
-                target_frame = self.frame(target)
-                top = target_frame.point(x.value if has_x.value else target_frame.origin[0],
-                                         y.value if has_y.value else target_frame.top)[1] if has_x.value or has_y.value else 0
                 item = Link(rect, None, target, top, self._destination_name(dest))
             else:
                 continue
             result.append(item)
         page.close()
         return result
+
+    @pdf_locked
+    def outline(self):
+        """[(title, level, page index, y)] with y in displayed points from the page top; [] without bookmarks."""
+        entries = []
+        for bookmark in self._doc.get_toc():
+            dest = raw.FPDFBookmark_GetDest(self._doc, bookmark)
+            if not dest:
+                action = raw.FPDFBookmark_GetAction(bookmark)
+                if action:
+                    dest = raw.FPDFAction_GetDest(self._doc, action)
+            if not dest:
+                continue
+            page, top = self._dest_target(dest, clamp_top=True)
+            if page is not None:
+                entries.append((bookmark.get_title(), bookmark.level, page, top))
+        return entries
 
     def _destination_name(self, destination):
         if self._named_destinations is None:
@@ -250,8 +297,7 @@ class Pdf:
 
     def _edit(self, kind, page, **values):
         from . import annotations
-        data = annotations.apply(self.data, kind, page, **values)
-        self._replace(data)
+        self._replace(annotations.apply(self.data, kind, page, **values))
 
     @pdf_locked
     def _replace(self, data):
@@ -262,13 +308,16 @@ class Pdf:
         self._named_pages.clear()
 
     def add_highlight(self, page, rects, color=HIGHLIGHT, opacity=1):
+        self.add_highlights({page: rects}, color, opacity)
+
+    def add_highlights(self, pages, color=HIGHLIGHT, opacity=1):
         from . import annotations
-        frame = self.frame(page)
-        quads = []
-        for rect in rects:
-            points = [frame.to_pdf(x, y) for x, y in ((rect.x0, rect.y0), (rect.x1, rect.y1))]
-            quads.append(annotations.bounds(points))
-        self._edit('highlight', page, rects=quads, color=color, opacity=opacity)
+        edits = []
+        for page, rects in pages.items():
+            frame = self.frame(page)
+            quads = [annotations.bounds([frame.to_pdf(r.x0, r.y0), frame.to_pdf(r.x1, r.y1)]) for r in rects]
+            edits.append(('highlight', page, {'rects': quads, 'color': color, 'opacity': opacity}))
+        self._replace(annotations.apply_edits(self.data, edits))
 
     def add_ink(self, page, strokes, color=(0, 0, 0), width=2, freehand=False):
         frame = self.frame(page)
@@ -276,13 +325,18 @@ class Pdf:
                    color=color, width=width, freehand=freehand)
 
     def annotations(self, page):
+        return self.annotations_for_pages([page])[page]
+
+    def annotations_for_pages(self, pages):
         from . import annotations
-        frame = self.frame(page)
-        result = annotations.read(self.data, page)
-        for item in result:
-            item['rect'] = frame.rect(*item['rect'])
-            item['quads'] = [frame.rect(*r) for r in item['quads']]
-            item['strokes'] = [[frame.point(*p) for p in stroke] for stroke in item['strokes']]
+        result = {}
+        for page, items in annotations.read_pages(self.data, pages):
+            frame = self.frame(page)
+            for item in items:
+                item['rect'] = frame.rect(*item['rect'])
+                item['quads'] = [frame.rect(*r) for r in item['quads']]
+                item['strokes'] = [[frame.point(*p) for p in stroke] for stroke in item['strokes']]
+            result[page] = items
         return result
 
     def update_annotation(self, page, index, color=None, width=None):
@@ -307,34 +361,3 @@ class Pdf:
     @pdf_locked
     def close(self):
         self._doc.close()
-
-
-class RenderedPage:
-    def __init__(self, bitmap):
-        self._bitmap = bitmap
-        self.width, self.height = bitmap.width, bitmap.height
-
-    @property
-    def rgb(self):
-        return memoryview(self._bitmap.buffer)
-
-
-class PageRenderer:
-    @pdf_locked
-    def __init__(self, data):
-        self.data = bytes(data)
-        self._doc = pdfium.PdfDocument(self.data)
-
-    @pdf_locked
-    def render(self, page, scale):
-        with closing(self._doc[page]) as target:
-            return RenderedPage(target.render(scale=scale, rev_byteorder=True, prefer_bgrx=False))
-
-    @pdf_locked
-    def close(self):
-        self._doc.close()
-
-
-def trim_caches():
-    # PDFium releases page caches when page handles close; there is no public global trim API.
-    pass

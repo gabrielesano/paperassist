@@ -7,25 +7,28 @@ from PySide6.QtCore import QEvent, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
-from .theme import APP_STYLE, ERROR_INK, TEAL, serif_heading_font
+from paperassist.settings import PROVIDER_NAMES
+
+from .dialogs import setup_dialog
+from .theme import TEAL, serif_heading_font, set_props
 
 # `key` names what a source cannot run without ("token", "key"), or "optional" when a key only raises limits.
 SOURCES = [
-    ("crossref", "Crossref", None, "Open metadata and publisher links. The contact email puts requests in its polite pool.", None),
-    ("arxiv", "arXiv", None, "Preprints. No setup needed.", None),
-    ("openalex", "OpenAlex", "optional", "An optional key raises the rate limit.", None),
-    ("semantic_scholar", "Semantic Scholar", "optional", "An optional key raises the rate limit.",
+    ("crossref", PROVIDER_NAMES["crossref"], None, "Open metadata and publisher links. The contact email puts requests in its polite pool.", None),
+    ("arxiv", PROVIDER_NAMES["arxiv"], None, "Preprints. No setup needed.", None),
+    ("openalex", PROVIDER_NAMES["openalex"], "optional", "An optional key raises the rate limit.", None),
+    ("semantic_scholar", PROVIDER_NAMES["semantic_scholar"], "optional", "An optional key raises the rate limit.",
      ("https://www.semanticscholar.org/product/api", "Request a key")),
-    ("ads", "NASA ADS", "token", "Astrophysics and physics records. Needs a free token.",
+    ("ads", PROVIDER_NAMES["ads"], "token", "Astrophysics and physics records. Needs a free token.",
      ("https://ui.adsabs.harvard.edu/user/settings/token", "Get a token")),
-    ("core", "CORE", "key", "Open-access repository copies. Needs a free key.", ("https://core.ac.uk/services/api", "Get a key")),
-    ("unpaywall", "Unpaywall", None, "Open-access copies found by DOI. Needs the contact email above.", None),
+    ("core", PROVIDER_NAMES["core"], "key", "Open-access repository copies. Needs a free key.", ("https://core.ac.uk/services/api", "Get a key")),
+    ("unpaywall", PROVIDER_NAMES["unpaywall"], None, "Open-access copies found by DOI. Needs the contact email above.", None),
 ]
 CHECKS = set()  # a check outlives a closed dialog until its requests have returned
 
 
 def status_text(source, view, configured, enabled):
-    """The one-line state of a source, as the web dialog words it."""
+    """The one-line state of a source."""
     id_, _, need, _, _ = source
     key = view["keys"].get(id_, {})
     if not enabled:
@@ -65,12 +68,13 @@ class SourceRow(QFrame):
         noun = need if need in ("token", "key") else "key"
         self.removing = False
         self.toggle = QCheckBox(name)
-        self.toggle.setStyleSheet("font-weight: 600;")
+        self.toggle.setProperty("strong", True)
         self.toggle.setChecked(view["enabled"][id_])
         self.toggle.setAccessibleName(f"Use {name}")
         self.status = QLabel()
-        self.status.setStyleSheet("color: #315c54;")
+        self.status.setProperty("tone", "ok")
         self.result = QLabel(wordWrap=True)
+        self.result.setProperty("strong", True)
         self.result.setAccessibleName(f"{name} access check")
         self.key_field = self.remove = None
         head = QHBoxLayout()
@@ -131,21 +135,18 @@ class SourceRow(QFrame):
         self.result.setVisible(bool(outcome))
         if outcome:
             self.result.setText(f"{'Accepted' if outcome['ok'] else 'Problem'}: {outcome['message']}")
-            self.result.setStyleSheet("color: #315c54; font-weight: 600;" if outcome["ok"]
-                                      else f"color: {ERROR_INK}; font-weight: 600;")
+            set_props(self.result, tone="ok" if outcome["ok"] else "error")
 
 
 class SourcesDialog(QDialog):
     def __init__(self, workspace, parent=None):
         super().__init__(parent)
         self.workspace, self.view, self.rows, self.check_thread = workspace, None, [], None
-        self.setWindowTitle("Sources")
         self.resize(660, 720)
-        self.heading = QLabel("Sources")
-        self.heading.setProperty("headingScale", "dialog")
-        self.heading.setFont(serif_heading_font(self.font()))
-        intro = QLabel("Choose which open-access and bibliographic services PaperAssist queries.",
-                       objectName="muted-note", wordWrap=True)
+        column, self.heading = setup_dialog(
+            self, "Sources",
+            subtitle="Choose which open-access and bibliographic services PaperAssist queries.",
+        )
         self.email = QLineEdit(placeholderText="name@example.org")
         self.email.setAccessibleName("Contact email")
         self.proxy = QLineEdit(placeholderText="https://login.proxy.example.edu/login?url=")
@@ -176,11 +177,6 @@ class SourcesDialog(QDialog):
             buttons.addWidget(widget)
         buttons.addWidget(self.message, 1)
         buttons.addWidget(close)
-        column = QVBoxLayout(self)
-        column.setContentsMargins(22, 20, 22, 18)
-        column.setSpacing(10)
-        column.addWidget(self.heading)
-        column.addWidget(intro)
         column.addLayout(form)
         column.addWidget(scroll, 1)
         column.addLayout(buttons)
@@ -188,8 +184,6 @@ class SourcesDialog(QDialog):
         self.check_button.clicked.connect(self.check)
         close.clicked.connect(self.close)
         self.load()
-        if parent is None:
-            self.setStyleSheet(APP_STYLE)
         self.email.setFocus()
 
     def changeEvent(self, event):
@@ -199,7 +193,7 @@ class SourcesDialog(QDialog):
 
     def say(self, text, bad=False):
         self.message.setText(text)
-        self.message.setStyleSheet(f"color: {ERROR_INK};" if bad else "")
+        set_props(self.message, tone="error" if bad else "")
 
     def load(self):
         """Show the saved settings; typed keys and staged removals are dropped."""

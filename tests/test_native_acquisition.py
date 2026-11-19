@@ -5,11 +5,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
-from test_native_support import needs_qt, pdf_available, PySide6
+from support import QtTestCase, needs_qt, pdf_available, PySide6
 
 if pdf_available and PySide6:
     from PySide6.QtGui import QKeySequence
-    from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton
+    from PySide6.QtWidgets import QMainWindow, QPushButton
     from paperassist.native.acquisition import (AcquisitionController, AcquisitionDialog, SelectionStore,
                                                current_retrieval, provider_summary, proxy_url,
                                                reference_status, retrieval_details, search_links, web_url)
@@ -75,15 +75,14 @@ class AcquisitionPresentationTests(unittest.TestCase):
 
 
 @needs_qt
-class AcquisitionWidgetTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
+class AcquisitionWidgetTests(QtTestCase):
+    use_client = False
 
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+        super().setUp()
+        self.directory = self._tmp
         self.window = QMainWindow()
-        self.workspace = self.window.workspace = Mock(data_dir=Path(self.directory.name))
+        self.workspace = self.window.workspace = Mock(data_dir=self.dir)
         self.workspace.get_settings.return_value = Settings()
         self.controller = AcquisitionController(self.window)
         self.refs = [{"id": "1", "title": "Missing paper", "doi": "10.1/test"},

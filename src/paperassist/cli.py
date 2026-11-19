@@ -31,8 +31,8 @@ def import_main(argv: Sequence[str]) -> int:
     from paperassist.workspace import library_lock
     try:
         data_dir, _ = locate_existing(args.data_dir)
-        with library_lock(data_dir):
-            print(json.dumps(Library(data_dir).import_paths(args.paths), indent=2))
+        with library_lock(data_dir), Library(data_dir) as library:
+            print(json.dumps(library.import_paths(args.paths), indent=2))
     except (RuntimeError, OSError) as error:
         print(error, file=sys.stderr)
         return 1

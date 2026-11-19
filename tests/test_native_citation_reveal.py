@@ -1,22 +1,20 @@
 """PDF citation clicks open local papers or reveal missing references."""
 import io
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import PySide6, needs_qt, pdf_available
+from support import PySide6, QtTestCase, needs_qt, pdf_available, pump as support_pump
 
 if pdf_available and PySide6:
     from pypdf import PdfWriter
     from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, TextStringObject
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QPushButton
+    from PySide6.QtWidgets import QPushButton
     from paperassist import references
     from paperassist.native.engine import Pdf, Rect
-    from paperassist.native.renderer import RenderClient
     from paperassist.native.references_panel import ReferencesPanel
     from paperassist.native.window import MainWindow
     from paperassist.workspace import Workspace
@@ -24,24 +22,9 @@ if pdf_available and PySide6:
 
 
 @needs_qt
-class CitationRevealTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
+class CitationRevealTests(QtTestCase):
     def pump(self, condition=lambda: False, timeout=.2):
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            self.app.processEvents()
-            if condition():
-                return True
-            time.sleep(.002)
-        return condition()
+        return support_pump(condition, timeout=timeout)
 
     def test_click_history_is_per_source_and_reference(self):
         panel = ReferencesPanel(None)

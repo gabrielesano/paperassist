@@ -2,13 +2,12 @@
 from copy import deepcopy
 import math
 import re
-from weakref import WeakSet
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
 
-from .theme import ERROR_INK, FlowLayout, TEAL
+from .theme import FlowLayout, set_props
 
 DEFAULT_COLOR = "#aa700f"
 
@@ -227,7 +226,7 @@ class CommentsPanel(QWidget):
         self.view = view
         model = view.notes_model if view else None
         has_error = bool(model and model.error)
-        self.status.setStyleSheet(f"color: {ERROR_INK};" if has_error else "")
+        set_props(self.status, tone="error" if has_error else "")
         self.status.setText(("Comments unavailable: " + model.error) if has_error else
                             "Comments belong to the active paper." if model else
                             "Comments are available for papers in the library.")
@@ -250,9 +249,7 @@ class CommentsPanel(QWidget):
             self._build_rows(view, model, notes)
         selected = view.selected_comment if view else None
         for note, row in self._rows:
-            style = f"#comment-row {{ background: #e6eeeb; border-left: 3px solid {TEAL}; }}" if selected == note else ""
-            if row.styleSheet() != style:
-                row.setStyleSheet(style)
+            set_props(row, selected=(selected == note))
         self.undo.setVisible(bool(model and model.deleted is not None))
 
     def _build_rows(self, view, model, notes):
@@ -300,39 +297,42 @@ class CommentsController(QObject):
 
     def __init__(self, window):
         super().__init__(window)
-        self.window, self.models, self.bound = window, {}, WeakSet()
+        self.window, self.models, self._views_by_key = window, {}, {}
         self.panel = CommentsPanel(self)
+        if hasattr(window, "pane_added"):
+            window.pane_added.connect(self.bind)
         for key, mode in (("1", "references"), ("2", "comments")):
             action = QAction(window, shortcut=key)  # plain keys: text fields claim them first
             action.triggered.connect(lambda _=False, mode=mode: self.show_mode(mode))
             window.addAction(action)
 
     def bind(self, pane):
-        if pane.view in self.bound:
-            return
-        self.bound.add(pane.view)
         source = pane.view.doc.source
-        if not self.window.workspace or not hasattr(source, "document_id"):
+        if not self.window.workspace or source.document_id is None:
             return
         if pane.key not in self.models:
             model = self.models[pane.key] = NotesModel(self.window.workspace.library, source.document_id, self)
             model.changed.connect(self.refresh)
             model.failed.connect(lambda message: self.window.statusBar().showMessage(f"Could not save comment: {message}", 8000))
+        self._views_by_key.setdefault(pane.key, set()).add(pane.view)
         pane.view.set_comment_model(self.models[pane.key])
         pane.released.connect(self._released)
         pane.view.comment_selection_changed.connect(self._selected)
         pane.view.comment_requested.connect(self.compose)
-        pane.view.selection_changed.connect(lambda: self._selection(pane.view))
+        pane.view.selection_changed.connect(lambda view=pane.view: self._selection(view))
 
     def _released(self):
         pane = self.sender()
         view, model = pane.view, pane.view.notes_model
-        self.bound.discard(view)
+        if views := self._views_by_key.get(pane.key):
+            views.discard(view)
+            if not views:
+                self._views_by_key.pop(pane.key, None)
         if model is None:
             return
         model.changed.disconnect(view._comments_changed)
         view.notes_model = None
-        if not any(other.notes_model is model for other in self.bound):
+        if pane.key not in self._views_by_key:
             self.models.pop(pane.key, None)
             model.deleteLater()
 
@@ -401,7 +401,3 @@ class CommentsController(QObject):
         pane.view.focus_comment(None, scroll=False)
         self.refresh()
         self.draft_changed.emit()
-
-
-def install(window):
-    return CommentsController(window)

@@ -6,10 +6,10 @@ import sys
 import tempfile
 import unittest
 
-from pypdf import PdfReader, PdfWriter
+from pypdf import PdfWriter
 from pathlib import Path
 
-from test_native_support import make_pdf, needs_pdf, needs_qt, pdf_available
+from support import make_pdf, needs_pdf, needs_qt, pdf_available
 
 if pdf_available:
     from paperassist.native import worker

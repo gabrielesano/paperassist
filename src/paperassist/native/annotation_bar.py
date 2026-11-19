@@ -1,6 +1,4 @@
 """Annotation tool switchers in the Main bar and a contextual options strip below it."""
-from weakref import WeakSet
-
 from PySide6.QtCore import QRectF, QSignalBlocker, QSize, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QSpinBox, QToolBar, QToolButton, QWidget
@@ -99,7 +97,7 @@ class AnnotationBar(QToolBar):
     def __init__(self, window):
         super().__init__('Annotations', window)
         self.setObjectName('annotation-toolbar')
-        self.window, self.bound = window, WeakSet()
+        self.window = window
         self.setMovable(False)
         self.setIconSize(QSize(16, 16))
 
@@ -119,19 +117,10 @@ class AnnotationBar(QToolBar):
         self.comment.setToolTip('Comment on selected text or the current page (C)')
         self.comment.triggered.connect(lambda: window.comments.compose())
 
-        main_bar = getattr(window, 'main_bar', None)
-        anchor = getattr(window, 'highlight_action', None)
-        if main_bar is not None and anchor is not None:
-            main_bar.insertAction(anchor, self.select)
-            main_bar.insertAction(anchor, self.draw)
-            after = getattr(window, 'after_tools_action', None)
-            if after is not None:
-                main_bar.insertAction(after, self.comment)
-            else:
-                main_bar.addAction(self.comment)
-        else:
-            for action in (self.select, self.draw, self.comment):
-                self.addAction(action)
+        main_bar = window.main_bar
+        main_bar.insertAction(window.highlight_action, self.select)
+        main_bar.insertAction(window.highlight_action, self.draw)
+        main_bar.insertAction(window.after_tools_action, self.comment)
 
         self.label = QLabel(objectName='column-title')
         self.label_action = self.addWidget(self.label)
@@ -151,17 +140,20 @@ class AnnotationBar(QToolBar):
         self.undo = self._icon_action('Undo', 'undo', 'Undo (Ctrl+Z)', lambda: self.call('undo'))
         self.redo = self._icon_action('Redo', 'redo', 'Redo (Ctrl+Shift+Z)', lambda: self.call('redo'))
         self.visibility = QAction('Show highlights', window)
-        if main_bar is not None:
-            main_bar.addAction(self.visibility)
-        else:
-            self.addAction(self.visibility)
+        main_bar.addAction(self.visibility)
         self.visibility.setCheckable(True)
         self.visibility.setChecked(True)
         self.visibility.toggled.connect(lambda visible: self.call('set_highlights_visible', visible))
 
         window.highlight_action.toggled.connect(self.highlight)
         window.tabs.currentChanged.connect(self.refresh)
+        window.pane_added.connect(self._bind_pane)
         self.refresh()
+
+    def _bind_pane(self, pane):
+        pane.view.edited.connect(self.refresh)
+        pane.view.activated.connect(self.refresh)
+        pane.view.annotation_selection_changed.connect(self.refresh)
 
     def _icon_action(self, title, glyph, tooltip, slot):
         action = self.addAction(icon(glyph, INK, 16), title, slot)
@@ -197,13 +189,6 @@ class AnnotationBar(QToolBar):
 
     @Slot()
     def refresh(self, *_):
-        for pane in self.window.all_panes():
-            view = pane.view
-            if view not in self.bound:
-                self.bound.add(view)
-                view.edited.connect(self.refresh)
-                view.activated.connect(self.refresh)
-                view.annotation_selection_changed.connect(self.refresh)
         view = self.view()
         self.visibility.setEnabled(view is not None)
         with QSignalBlocker(self.visibility):
@@ -218,7 +203,7 @@ class AnnotationBar(QToolBar):
         self.select.setEnabled(active)
         self.draw.setEnabled(active)
         self.comment.setEnabled(notes)
-        for action, checked in ((self.select, bool(view and not view.highlighting and not view.drawing and not view.commenting)),
+        for action, checked in ((self.select, bool(view and view.tool == 'select')),
                                 (self.draw, bool(view and view.drawing)),
                                 (self.comment, bool(view and view.commenting)),
                                 (self.window.highlight_action, bool(view and view.highlighting))):
@@ -247,18 +232,8 @@ class AnnotationBar(QToolBar):
         self.redo.setEnabled(has_redo)
 
         contextual = bool(view and (
-            view.highlighting or view.drawing or view.commenting
+            view.tool != 'select'
             or item is not None or comment is not None
             or has_undo or has_redo or not view.highlights_visible
         ))
         self.setVisible(contextual)
-
-
-def install(window):
-    if existing := getattr(window, 'annotation_bar', None):
-        return existing
-    bar = AnnotationBar(window)
-    window.addToolBarBreak(Qt.TopToolBarArea)
-    window.addToolBar(Qt.TopToolBarArea, bar)
-    window.annotation_bar = bar
-    return bar

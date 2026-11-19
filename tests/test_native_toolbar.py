@@ -1,15 +1,14 @@
 """Overflow actions remain reachable and owned by their toolbar across openings."""
 import unittest
 
-from test_native_support import needs_qt
+from support import needs_qt, qt_app
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QLineEdit, QMainWindow, QMenu, QStyle, QToolBar, QToolButton
+from PySide6.QtWidgets import QLineEdit, QMainWindow, QMenu, QStyle, QToolBar, QToolButton
 from shiboken6 import isValid
 
 from paperassist.native.annotation_bar import COLORS, ColorSwatches
-from paperassist.native.interface_zoom import window_style
-from paperassist.native.theme import APP_STYLE
+from paperassist.native.theme import APP_STYLE, build_stylesheet
 from paperassist.native.toolbar import install_overflow
 
 
@@ -17,7 +16,7 @@ from paperassist.native.toolbar import install_overflow
 class ToolbarTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
+        cls.app = qt_app()
 
     def test_overflow_reserves_space_inside_styled_toolbars_at_each_zoom(self):
         for name in ('', 'pane-bar'):
@@ -25,7 +24,7 @@ class ToolbarTests(unittest.TestCase):
                 with self.subTest(toolbar=name, zoom=zoom):
                     window = QMainWindow()
                     self.addCleanup(window.deleteLater)
-                    window.setStyleSheet(window_style(APP_STYLE, window.font(), zoom))
+                    window.setStyleSheet(build_stylesheet(window.font(), zoom))
                     toolbar = QToolBar('Quick view', objectName=name)
                     window.addToolBar(toolbar)
                     for number in range(10):

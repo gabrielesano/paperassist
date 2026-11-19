@@ -1,4 +1,6 @@
 """Continuous vertical PDF view: lazy rendering, selection, links, highlights, search hits."""
+from collections import deque
+import gc
 import math
 import time
 from urllib.parse import urlparse
@@ -11,8 +13,8 @@ from PySide6.QtWidgets import QAbstractScrollArea, QMenu, QScrollBar
 from .document import SaveState
 from .engine import HIGHLIGHT, Rect
 from .layout import MARGIN, PageCache, PageLayout
+from .platform import trim_heap
 from .positions import current_page
-from .trim import trim_heap
 
 CACHE_BYTES = 120 * 1024 * 1024  # about five fit-width pages at 1.5x HiDPI
 ZOOM_RANGE = (0.2, 4.0)
@@ -20,7 +22,7 @@ LINK_SCHEMES = {"http", "https", "mailto"}  # a PDF must not be able to launch l
 BACKGROUND = QColor("#dce2dc")
 PAGE_SHADOW = QColor(39, 59, 57, 28)
 PAGE_BORDER = QColor("#c4cec4")
-SELECTION, HIT, CURRENT_HIT, MARKER = QColor(40, 110, 255, 80), QColor(255, 150, 0, 90), QColor(255, 90, 0, 160), QColor(255, 235, 0)
+SELECTION, HIT, CURRENT_HIT = QColor(40, 110, 255, 80), QColor(255, 150, 0, 90), QColor(255, 90, 0, 160)
 
 
 class PdfView(QAbstractScrollArea):
@@ -36,21 +38,20 @@ class PdfView(QAbstractScrollArea):
         super().__init__()
         self.doc, self.client = doc, client
         self.highlights_visible = True
-        self.doc_id = client.open(doc.source.path)
+        self._rendered_data_id = id(doc.pdf.data)
+        self.doc_id = client.open(self._render_source())
         client.page_ready.connect(self._page_ready)
         self.zoom, self.fit = 1.0, True
         self.cache = PageCache(CACHE_BYTES)  # page -> (scale, render id, QPixmap)
-        self.render_seconds = []  # worker-side time of every page this view received
+        self.render_seconds = deque(maxlen=256)  # worker-side time of recent pages this view received
         self.locked = False  # another view of this PDF has unsaved edits
-        self.highlighting = False
-        self.drawing = False
+        self.tool = 'select'  # 'select', 'highlight', 'ink', or 'comment'
         self.highlight_color, self.ink_color = HIGHLIGHT, (0, 0, 0)
         self.ink_width, self.highlight_width = 2, 12  # a highlight's width only matters for freehand ones
         self.selected_annotation = None
         self.notes_model = None
         self.selected_comment = None
         self.comment_draft = None
-        self.commenting = False
         self._comment_bands, self._comment_paths, self._comment_focus = {}, {}, []
         self._comment_pen = QPen(QColor("#d42020"), 1.5, Qt.DashLine)
         self._comment_focus_pen = QPen(QColor("#aa700f"), 1)
@@ -76,13 +77,44 @@ class PdfView(QAbstractScrollArea):
 
     @property
     def highlighting(self):
-        return self._highlighting
+        return self.tool == 'highlight'
 
     @highlighting.setter
     def highlighting(self, value):
-        self._highlighting = value
         if value:
-            self.drawing = False
+            self.tool = 'highlight'
+        elif self.tool == 'highlight':
+            self.tool = 'select'
+
+    @property
+    def drawing(self):
+        return self.tool == 'ink'
+
+    @drawing.setter
+    def drawing(self, value):
+        if value:
+            self.tool = 'ink'
+        elif self.tool == 'ink':
+            self.tool = 'select'
+
+    @property
+    def commenting(self):
+        return self.tool == 'comment'
+
+    @commenting.setter
+    def commenting(self, value):
+        if value:
+            self.tool = 'comment'
+        elif self.tool == 'comment':
+            self.tool = 'select'
+
+    def _render_source(self):
+        # Library documents pass their hash-verified byte snapshot so the worker cannot read a tampered file.
+        if self.doc.source.document_id is None and not self.doc.modified and self.highlights_visible:
+            path = getattr(self.doc.source, "path", None)
+            if path is not None and path.is_file():
+                return path
+        return self.doc.pdf.render_data(self.highlights_visible)
 
     @property
     def read_only(self):
@@ -202,17 +234,17 @@ class PdfView(QAbstractScrollArea):
         pixmap = QPixmap.fromImage(QImage(rgb, width, height, width * 3, QImage.Format_RGB888))
         pixmap.setDevicePixelRatio(self.devicePixelRatioF())
         self.cache.put(page, (scale, doc_id, pixmap), width * height * 4, protected=self.visible_pages())
-        if not self.doc.modified:
-            self.doc.pending.pop(page, None)  # the saved highlight is part of the pixels now
         self.render_seconds.append(seconds)
         self.viewport().update()
 
     def has_page(self, page):
         return self._fresh(page)
 
-    def refresh_render(self, pages=None):
+    def refresh_render(self, pages=None, *, preserve_citations=True):
         """After the file changed: render from the new bytes, keep showing the old pixels meanwhile."""
-        old, self.doc_id = self.doc_id, self.client.open(self.doc.pdf.render_data(self.highlights_visible))
+        old = self.doc_id
+        self._rendered_data_id = id(self.doc.pdf.data)
+        self.doc_id = self.client.open(self._render_source(), inherit_from=old if preserve_citations else None)
         if pages is not None:
             for page, ((scale, _, pixmap), size) in list(self.cache.entries.items()):
                 if page not in pages:
@@ -233,12 +265,13 @@ class PdfView(QAbstractScrollArea):
 
     def reload(self):
         self.doc.reload()
-        self.refresh_render()
+        self.refresh_render(preserve_citations=False)
         self.viewport().update()
 
     def release(self):
         self.cache.clear()
         self.client.close(self.doc_id)
+        gc.collect()
         trim_heap()
 
     def showEvent(self, event):
@@ -248,7 +281,9 @@ class PdfView(QAbstractScrollArea):
     def hideEvent(self, event):
         super().hideEvent(event)
         self.cache.clear()  # a hidden tab must not keep ~100 MB of pages
+        self.doc.hibernate()
         self.client.want(self.doc_id, [])
+        gc.collect()
         trim_heap()
 
     def resizeEvent(self, event):
@@ -315,7 +350,9 @@ class PdfView(QAbstractScrollArea):
     def paintEvent(self, event):
         painter = QPainter(self.viewport())
         painter.fillRect(event.rect(), BACKGROUND)
-        for page in self.visible_pages():
+        visible = self.visible_pages()
+        visible_set = set(visible)
+        for page in visible:
             entry = self.cache[page] if page in self.cache else None
             pixmap = entry[2] if entry else None
             box = self._target(page, pixmap)
@@ -329,7 +366,7 @@ class PdfView(QAbstractScrollArea):
             painter.setPen(PAGE_BORDER)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(box.adjusted(-0.5, -0.5, 0.5, 0.5))
-        if self.selected_annotation:
+        if self.selected_annotation and self.selected_annotation[0] in visible_set:
             page, index = self.selected_annotation
             item = next((a for a in self.doc.annotations(page) if a['index'] == index), None)
             if item:
@@ -351,13 +388,15 @@ class PdfView(QAbstractScrollArea):
                 painter.drawLine(self._band(page, Rect(*a, *a)).topLeft(), self._band(page, Rect(*b, *b)).topLeft())
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
         for page, rect, _ in self.selection_lines:
-            painter.fillRect(self._band(page, rect), SELECTION)
+            if page in visible_set:
+                painter.fillRect(self._band(page, rect), SELECTION)
         for i, (page, rect) in enumerate(self.hits):
-            painter.fillRect(self._band(page, rect), CURRENT_HIT if i == self.hit else HIT)
+            if page in visible_set:
+                painter.fillRect(self._band(page, rect), CURRENT_HIT if i == self.hit else HIT)
         painter.setBrush(Qt.NoBrush)
         self._comment_pen.setWidthF(1.5 / self.zoom)
         painter.setPen(self._comment_pen)
-        for page in self.visible_pages():
+        for page in visible:
             if page in self._comment_paths:
                 x, y, _, _ = self.pages.rect(page)
                 offset = self._offset()
@@ -368,12 +407,14 @@ class PdfView(QAbstractScrollArea):
                 painter.restore()
         painter.setPen(self._comment_focus_pen)
         for page, rect in self._comment_focus:
-            painter.drawRect(self._band(page, rect))
+            if page in visible_set:
+                painter.drawRect(self._band(page, rect))
         if self._outlines:
             painter.setPen(self._outline_pen)
             painter.setBrush(Qt.NoBrush)
             for page, rect in self._outlines:
-                painter.drawRect(self._band(page, rect))
+                if page in visible_set:
+                    painter.drawRect(self._band(page, rect))
 
     # ---- mouse: selection, links, highlight -------------------------------------------
     def _locate(self, pos):
@@ -608,8 +649,7 @@ class PdfView(QAbstractScrollArea):
         self._annotation_changed(list(pages), reveal=True)
 
     def set_tool(self, tool):
-        self.highlighting, self.drawing = tool == 'highlight', tool == 'ink'
-        self.commenting = tool == 'comment'
+        self.tool = tool if tool in ('select', 'highlight', 'ink', 'comment') else 'select'
         self.select_annotation(None)
         self.select_comment(None)
 
@@ -624,7 +664,6 @@ class PdfView(QAbstractScrollArea):
         """A new highlight appears at once, even if highlights were hidden: then every page redraws."""
         shown = reveal and not self.highlights_visible
         self.highlights_visible = self.highlights_visible or reveal
-        self.doc.pending.clear()
         self.refresh_render(None if shown else pages)
         self.viewport().update()
         self.annotation_selection_changed.emit()
@@ -753,7 +792,7 @@ class PdfView(QAbstractScrollArea):
         """Explicit save of this view's document. False keeps the unsaved state for a retry."""
         self.finish_interaction()
         saved = self.doc.save(on_saving=self._show_saving)
-        if saved:
+        if saved and id(self.doc.pdf.data) != self._rendered_data_id:
             self.refresh_render()
         self.edited.emit()
         return saved

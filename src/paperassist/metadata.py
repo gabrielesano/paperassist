@@ -8,12 +8,10 @@ from urllib.parse import unquote
 
 from pypdf import PdfReader
 
-from .citation import printed_references
+from .citation import ARXIV_ID, ARXIV_ID_PATTERN, ARXIV_REF, DOI, PARTICLES, printed_references, strip_arxiv_version
 
-DOI = re.compile(r"10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+", re.I)
 PARSER_VERSION = 5
-ARXIV_ID = r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?"
-ARXIV = re.compile(rf"(?:\barxiv\s*:\s*|https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/)({ARXIV_ID})", re.I)
+_PARTICLE_PATTERN = '|'.join(sorted(PARTICLES, key=len, reverse=True))
 GENERIC = re.compile(r"(?:download|document|file|untitled|unknown)(?:[\s_()-]*\d+[\s_()-]*)?|[\d_.-]+(?:v\d+)?|[a-f\d]{16,}", re.I)
 BOILERPLATE = re.compile(
     r"arxiv|doi\s*:|https?://|abstract|journal|copyright|©|typeset|latex|preprint|received|accepted|"
@@ -114,7 +112,7 @@ def _header_authors(lines, title):
     start = max((i + 1 for i, line in enumerate(lines[:6]) if len(line) >= 8 and
                  re.sub(r"\W", "", line).casefold() in normalized_title), default=1)
     found = []
-    name = re.compile(r"(?:[^\W\d_][\w’'’-]*\.?|[A-Z](?:\.[A-Z])*\.|van|von|de|der|den|del|la|le)", re.UNICODE)
+    name = re.compile(rf"(?:[^\W\d_][\w’'’-]*\.?|[A-Z](?:\.[A-Z])*\.|{_PARTICLE_PATTERN})", re.UNICODE)
     for line in lines[start:]:
         if re.search(r"\b(?:Figure|Project Page)\b", line, re.I):
             break
@@ -132,7 +130,7 @@ def _header_authors(lines, title):
                             for part in parts if part):
             continue
         # Every non-particle word starts with a capital; this excludes ordinary body prose.
-        if any(any(word[0].islower() and word not in ("van", "von", "de", "der", "den", "del", "la", "le")
+        if any(any(word[0].islower() and word not in PARTICLES
                    for word in part.split()) for part in parts if part):
             continue
         found.extend(part for part in parts if part)
@@ -140,14 +138,13 @@ def _header_authors(lines, title):
 
 
 def _arxiv_year(text, identifiers):
-    base = lambda value: re.sub(r"v\d+$", "", value.lower())
-    strong = {base(value) for value, source in identifiers.items() if source in ("pdf_info", "xmp")}
-    own = strong or {base(value) for value in identifiers}
+    strong = {strip_arxiv_version(value) for value, source in identifiers.items() if source in ("pdf_info", "xmp")}
+    own = strong or {strip_arxiv_version(value) for value in identifiers}
     if len(own) != 1:
         return None
     dates = set()
-    for match in ARXIV.finditer(text):
-        if base(match.group(1)) not in own:
+    for match in ARXIV_REF.finditer(text):
+        if strip_arxiv_version(match.group(1)) not in own:
             continue
         stamp = re.match(r"\s*(?:\[[^\]\n]{1,30}\]\s*)?\d{1,2}\s+"
                          r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
@@ -239,7 +236,7 @@ def extract_ocr_metadata(report: dict) -> dict:
     identifier_sources = {"doi": {}, "arxiv": {}}
     for match in DOI.finditer(text):
         identifier_sources["doi"].setdefault(match.group().rstrip(".,;)").lower(), "ocr")
-    for match in ARXIV.finditer(text):
+    for match in ARXIV_REF.finditer(text):
         identifier_sources["arxiv"].setdefault(match.group(1), "ocr")
     year = _arxiv_year(text, identifier_sources["arxiv"])
     sources = {"year": "ocr_arxiv_submission_date"} if year else {}
@@ -285,9 +282,9 @@ def extract_metadata(path: Path, filename: str) -> dict:
             for match in DOI.finditer(value):
                 identifier_sources["doi"].setdefault(match.group().rstrip(".,;)").lower(), source)
         if kind in (None, "arxiv"):
-            values = [match.group(1) for match in ARXIV.finditer(value)]
-            values += re.findall(rf"10\.48550/arxiv\.({ARXIV_ID})", value, re.I)
-            if bare and re.fullmatch(ARXIV_ID, value.strip(), re.I):
+            values = [match.group(1) for match in ARXIV_REF.finditer(value)]
+            values += re.findall(rf"10\.48550/arxiv\.({ARXIV_ID_PATTERN})", value, re.I)
+            if bare and ARXIV_ID.fullmatch(value.strip()):
                 values.append(value.strip())
             for arxiv in values:
                 identifier_sources["arxiv"].setdefault(arxiv, source)
@@ -368,7 +365,4 @@ def extract_metadata(path: Path, filename: str) -> dict:
     return {"title": title or Path(filename).stem, "authors": authors, "year": year,
             "doi": None, "pages": pages, "sources": sources, "candidates": candidates,
             "first_page_text_status": text_status, "parser_version": PARSER_VERSION,
-            "extraction_status": "partial" if text_status != "extracted" else "complete",
-            "header_text": header_text, "identifier_sources": identifier_sources,
-            "candidate_sources": {"doi": "first_page", "arxiv": "first_page",
-                                  "title": "first_page_lines", "year": "first_page"}}
+            "header_text": header_text, "identifier_sources": identifier_sources}

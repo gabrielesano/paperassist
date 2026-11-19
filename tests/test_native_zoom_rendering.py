@@ -4,38 +4,18 @@ import time
 import unittest
 from pathlib import Path
 
-from test_native_support import PySide6, make_pdf, needs_qt, pdf_available
+from support import PySide6, QtTestCase, make_pdf, needs_qt, pdf_available
 
 if pdf_available and PySide6:
     from pypdf import PdfReader, PdfWriter
-    from PySide6.QtWidgets import QApplication
     from paperassist.native.document import PdfDocument
     from paperassist.native.layout import PageCache
-    from paperassist.native.renderer import RenderClient
     from paperassist.native.source import FileSource
     from paperassist.native.view import PdfView
 
 
 @needs_qt
-class ZoomRenderingTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        cls.client = RenderClient()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.client.shutdown()
-
-    def pump(self, until, timeout=20):
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            self.app.processEvents()
-            if until():
-                return
-            time.sleep(.005)
-        self.fail("render timed out")
-
+class ZoomRenderingTests(QtTestCase):
     def test_visible_entries_are_evicted_after_prefetch_entries(self):
         cache = PageCache(100)
         cache.put(0, "visible", 40)

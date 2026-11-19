@@ -1,7 +1,10 @@
-"""PyInstaller entry point: the same start as `python -m paperassist.native`."""
+"""PyInstaller entry point: routes through `paperassist.cli:main`."""
+import multiprocessing
+
+from paperassist.cli import main
 from paperassist.retrieval import configure_ssl_env
-from paperassist.native.__main__ import main
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     configure_ssl_env()
-    main()
+    raise SystemExit(main())

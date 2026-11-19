@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from paperassist import paths
+from paperassist import paths, references, settings
 from paperassist.workspace import JobsFull, LibraryInUse, Workspace, WorkspaceConflict, library_lock
 from tests.test_library import pdf
 
@@ -39,44 +39,44 @@ class WorkspaceTests(unittest.TestCase):
             time.sleep(.005)
         self.fail('Job did not finish')
 
-    def test_import_progress_failures_deduplication_and_staging_cleanup(self):
-        job = self.workspace.import_files([('same.pdf', io.BytesIO(pdf())), ('bad.pdf', io.BytesIO(b'not a PDF'))])
+    def pdf_path(self, name, data=None):
+        path = self.root / name
+        path.write_bytes(pdf() if data is None else data)
+        return str(path)
+
+    def test_import_progress_failures_and_deduplication(self):
+        source = self.pdf_path('same.pdf')
+        bad = self.pdf_path('bad.pdf', b'not a PDF')
+        job = self.workspace.import_paths([source, bad])
         done = self.finish(job)
         self.assertEqual(done['status'], 'completed')
         self.assertEqual(done['progress'], {'completed': 2, 'total': 2})
-        self.assertTrue(done['result']['files'][0]['document']['duplicate'])
-        self.assertIn('error', done['result']['files'][1])
-        self.assertFalse(list(self.workspace.data_dir.glob('paperassist-upload-*')))
-        source = self.root / 'other.pdf'
-        source.write_bytes(pdf())
-        done = self.finish(self.workspace.import_paths([str(source)]))
-        self.assertEqual(done['progress'], {'completed': 1, 'total': 1})
-        self.assertEqual(source.read_bytes(), pdf())
+        self.assertEqual(done['result']['duplicates'], 1)
+        self.assertEqual(done['result']['errors'][0]['path'], bad)
+        self.assertEqual(Path(source).read_bytes(), pdf())
 
     def test_cancel_between_imported_files(self):
         entered, release = threading.Event(), threading.Event()
-        original = self.workspace.library.import_stream
+        original = self.workspace.library._import_stream
         def first(*args):
             entered.set()
             release.wait(2)
             return original(*args)
-        with patch.object(self.workspace.library, 'import_stream', side_effect=first):
-            job = self.workspace.import_files([('one.pdf', io.BytesIO(pdf())), ('two.pdf', io.BytesIO(pdf()))])
+        with patch.object(self.workspace.library, '_import_stream', side_effect=first):
+            job = self.workspace.import_paths([self.pdf_path('one.pdf'), self.pdf_path('two.pdf')])
             self.assertTrue(entered.wait(2))
             self.workspace.cancel_job(job['id'])
             release.set()
             done = self.finish(job)
         self.assertEqual(done['status'], 'cancelled')
-        self.assertEqual(len(done['result']['files']), 1)
-        self.assertFalse(list(self.workspace.data_dir.glob('paperassist-upload-*')))
+        self.assertEqual(len(done['result']['documents']), 1)
 
     def test_job_limits_failure_and_independent_snapshots(self):
         release = threading.Event()
         try:
             jobs = [self.workspace.submit(lambda job, cancel: release.wait(2)) for _ in range(8)]
             with self.assertRaises(JobsFull):
-                self.workspace.import_files([('one.pdf', io.BytesIO(pdf()))])
-            self.assertFalse(list(self.workspace.data_dir.glob('paperassist-upload-*')))
+                self.workspace.import_paths([self.pdf_path('one.pdf')])
             with self.assertRaisesRegex(WorkspaceConflict, 'running tasks'):
                 self.workspace.prepare_switch(str(self.root / 'next'), 'move')
         finally:
@@ -111,7 +111,7 @@ class WorkspaceTests(unittest.TestCase):
             done['progress']['completed'] = 99
             self.assertEqual(self.workspace.job_status(job['id'])['progress']['completed'], 1)
 
-    def test_shutdown_cleans_queued_uploads_without_importing_them(self):
+    def test_shutdown_cancels_queued_imports(self):
         entered = threading.Barrier(3)
         def wait(job, cancel):
             entered.wait(2)
@@ -119,12 +119,11 @@ class WorkspaceTests(unittest.TestCase):
         self.workspace.submit(wait)
         self.workspace.submit(wait)
         entered.wait(2)
-        with patch.object(self.workspace.library, 'import_stream') as import_stream:
-            job = self.workspace.import_files([('queued.pdf', io.BytesIO(pdf()))])
+        with patch.object(self.workspace.library, '_import_stream') as import_stream:
+            job = self.workspace.import_paths([self.pdf_path('queued.pdf')])
             self.workspace.close()
             import_stream.assert_not_called()
         self.assertEqual(self.workspace.job_status(job['id'])['status'], 'cancelled')
-        self.assertFalse(list(self.workspace.data_dir.glob('paperassist-upload-*')))
 
     def test_references_download_refreshes_local_state_and_records_outcomes(self):
         refs = {'references': [{'id': '1'}, {'id': '2'}]}
@@ -135,13 +134,37 @@ class WorkspaceTests(unittest.TestCase):
             return {'status': 'local', 'document_id': self.doc['id'] + 1}
         with patch('paperassist.workspace.references.get', return_value=refs) as get, \
              patch('paperassist.workspace.retrieval.download', side_effect=download), \
-             patch('paperassist.workspace.references.link') as link, \
              patch('paperassist.workspace.references.set_retrieval') as store:
             result = self.finish(self.workspace.download_references(self.doc['id'], ['1', '2']))
         self.assertEqual([r['status'] for r in result['result']['references']], ['local', 'failed'])
         self.assertEqual(store.call_count, 2)
-        self.assertEqual(link.call_count, 1)
+        self.assertEqual(store.call_args_list[0].kwargs, {'target_id': self.doc['id'] + 1})
+        self.assertFalse(store.call_args_list[1].kwargs)
         self.assertEqual(get.call_count, 3)
+
+    def test_successful_download_resolves_once_and_saves_the_link_with_the_outcome(self):
+        library, source_id = self.workspace.library, self.doc['id']
+        target = library.import_stream(io.BytesIO(pdf() + b'\n% downloaded copy\n'), 'downloaded.pdf')
+        ref = {'id': '0', 'raw': 'Smith, A. 2020, Journal, 1, 2'}
+        references._save(library, source_id, {'status': 'partial', 'references': [ref],
+                                              'extraction_version': references.EXTRACTION_VERSION,
+                                              'destination_version': references.DESTINATION_VERSION})
+        outcome = {'status': 'downloaded', 'document_id': target['id'], 'identity': {'doi': '10.1234/cited'}}
+        with patch('paperassist.workspace.retrieval.download', return_value=outcome), \
+             patch.object(references, '_resolve', wraps=references._resolve) as resolve, \
+             patch.object(references, '_save', wraps=references._save) as save:
+            job = self.finish(self.workspace.download_references(source_id, [ref['id']]))
+        self.assertEqual(job['status'], 'completed')
+        self.assertEqual(job['result']['references'], [{'id': ref['id'], **outcome}])
+        resolve.assert_not_called()
+        save.assert_called_once()
+        saved = references.get(library, source_id)['references'][0]
+        self.assertTrue(saved['manual_link'])
+        self.assertEqual(saved['manual_target_id'], target['id'])
+        self.assertEqual(saved['local_document_id'], target['id'])
+        self.assertEqual(saved['retrieval']['status'], 'downloaded')
+        self.assertEqual(saved['identity'], outcome['identity'])
+        self.assertEqual(saved['doi'], outcome['identity']['doi'])
 
     def test_download_self_match_keeps_success_without_linking_source(self):
         refs = {'references': [{'id': 'legacy-0'}]}
@@ -154,6 +177,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(done['result']['references'][0]['status'], 'local')
         link.assert_not_called()
         store.assert_called_once()
+        self.assertEqual(store.call_args.kwargs, {'target_id': None})
 
     def test_download_removed_reference_does_not_abort_batch(self):
         refs = {'references': [{'id': '1'}, {'id': '2'}]}
@@ -201,7 +225,6 @@ class WorkspaceTests(unittest.TestCase):
         self.workspace.library.save_pdf(document_id, pdf(), 0)
         reopened = self.open_workspace(self.workspace.data_dir)
         self.assertEqual(reopened.get_view(document_id), view)
-        self.assertEqual(reopened.save_view(document_id, {'page': 1, 'scale': 'page-fit'}, True), view)
         # Two different byte contents with the same DOI remain independent files.
         from pypdf import PdfWriter
         writer = PdfWriter()
@@ -228,21 +251,20 @@ class WorkspaceTests(unittest.TestCase):
     def test_preferences_are_user_scoped_and_keep_the_library_choice(self):
         paths.save_library(self.workspace.data_dir)
         saved = {'ui_zoom': 1.25, 'quick_view_layout': 'side', 'outline_expanded': False, 'details_expanded': True}
-        self.assertEqual(self.workspace.get_preferences(), {})
-        self.workspace.save_preferences(saved)
+        self.assertEqual(settings.preferences(), {})
+        settings.update_preferences(saved)
         other = self.open_workspace(self.root / 'other')
-        self.assertEqual(other.get_preferences(), saved)
-        self.assertEqual(other.save_preferences({'ui_zoom': .8}, True), saved)
+        self.assertEqual(settings.preferences(), saved)
         paths.save_library(other.data_dir)
-        self.assertEqual(self.workspace.get_preferences(), saved)
+        self.assertEqual(settings.preferences(), saved)
         self.assertEqual(paths.saved_library(), other.data_dir)
         for bad in ([], {'ui_zoom': True}, {'ui_zoom': 4}, {'quick_view_layout': 'up'}, {'outline_expanded': 1}, {'unknown': False}):
             with self.assertRaises(ValueError):
-                self.workspace.save_preferences(bad)
+                settings.update_preferences(bad)
         self.assertEqual(json.loads(paths.config_file().read_text())['preferences'], saved)
 
     def test_switch_rechecks_target_lock_and_preserves_preferences(self):
-        self.workspace.save_preferences({'ui_zoom': 1.1})
+        settings.update_preferences({'ui_zoom': 1.1})
         target = self.root / 'other'
         self.open_workspace(target)
         with library_lock(target):
@@ -253,13 +275,6 @@ class WorkspaceTests(unittest.TestCase):
                 self.workspace.prepare_switch(str(target), 'open')
         self.assertEqual(self.workspace.prepare_switch(str(target), 'open'), target)
         self.assertEqual(paths.saved_library(), target)
-        self.assertEqual(self.workspace.get_preferences(), {'ui_zoom': 1.1})
+        self.assertEqual(settings.preferences(), {'ui_zoom': 1.1})
         with self.assertRaises(WorkspaceConflict):
             self.open_workspace(target, 'option').prepare_switch(str(self.root / 'new'), 'move')
-
-    def test_partial_preference_migration_preserves_existing_values(self):
-        self.workspace.save_preferences({'ui_zoom': 1.25})
-        migrated = self.workspace.save_preferences({'ui_zoom': .8, 'details_expanded': False}, True)
-        self.assertEqual(migrated, {'ui_zoom': 1.25, 'details_expanded': False})
-        self.workspace.save_preferences({'quick_view_layout': 'side'})
-        self.assertEqual(self.workspace.get_preferences(), {**migrated, 'quick_view_layout': 'side'})

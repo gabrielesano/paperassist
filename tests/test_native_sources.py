@@ -1,16 +1,13 @@
 """The native Sources dialog on a disposable library; every network call is mocked."""
 import json
-import tempfile
 import threading
-import time
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from test_native_support import needs_qt, pdf_available
+from support import QtTestCase, needs_qt, pdf_available
 
 if pdf_available:
-    from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox, QWidget
+    from PySide6.QtWidgets import QLineEdit, QMessageBox, QWidget
 
     from paperassist.native.sources_dialog import SOURCES, SourcesDialog, show_sources
     from paperassist.workspace import Workspace
@@ -19,18 +16,11 @@ FAKE_KEY = "fake-key-for-tests-1234"
 
 
 @needs_qt
-class SourcesDialogTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
+class SourcesDialogTests(QtTestCase):
+    use_client = False
 
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        self.dir = Path(folder.name).resolve()
-        config = patch("paperassist.paths.config_file", return_value=self.dir / "config.json")
-        config.start()
-        self.addCleanup(config.stop)
+        super().setUp()
         env = patch.dict("os.environ", {"PAPERASSIST_EMAIL": "", "OPENALEX_API_KEY": ""})
         env.start()
         self.addCleanup(env.stop)
@@ -50,11 +40,7 @@ class SourcesDialogTests(unittest.TestCase):
         return json.loads((self.workspace.data_dir / "settings.json").read_text())
 
     def pump(self, until, seconds=10):
-        end = time.perf_counter() + seconds
-        while time.perf_counter() < end and not until():
-            self.app.processEvents()
-            time.sleep(0.002)
-        self.assertTrue(until(), "timed out")
+        return super().pump(until, timeout=seconds)
 
     def test_every_source_has_a_row_with_a_switch_and_accessible_names(self):
         self.assertEqual([r.source[0] for r in self.dialog.rows], [s[0] for s in SOURCES])

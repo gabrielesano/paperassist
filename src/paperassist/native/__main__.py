@@ -12,7 +12,7 @@ def startup_error(message):
         print(message, file=sys.stderr)
 
 
-def main(argv=None):
+def main(argv=None) -> int:
     multiprocessing.freeze_support()  # a frozen app starts its render process through the same executable
     try:
         import_module("PySide6.QtWidgets")
@@ -25,11 +25,11 @@ def main(argv=None):
             message += ('Install native support from the PaperAssist source folder:\n'
                         '  python -m pip install -e .')
         startup_error(message)
-        raise SystemExit(1) from None
+        return 1
     # Application errors must not be mistaken for an incomplete installation.
     from .app import run
-    raise SystemExit(run(argv))
+    return run(argv)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import types
+from io import BytesIO
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -40,9 +41,10 @@ def main():
         path = args.data_dir / 'originals' / (stored_name or filename)
         if not path.is_file():
             continue
-        digest = hashlib.sha256(path.read_bytes()).digest()
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).digest()
         started = time.perf_counter()
-        reader = PdfReader(path)
+        reader = PdfReader(BytesIO(data))
         pages = [page.extract_text() or '' for page in reader.pages]
         old = baseline.extract(pages)
         baseline.map_destinations(reader, pages, old)
@@ -53,7 +55,7 @@ def main():
         text_counts = {ref['id']: ref['citation_count'] for ref in refs}
         mapping_seconds = time.perf_counter() - started
         started = time.perf_counter()
-        references.crosscheck_links(path, pages, refs)
+        references.crosscheck_links(data, pages, refs)
         old_owners = {name: ref['raw'] for ref in old for name in ref.get('destinations', [])}
         new_owners = {name: ref['raw'] for ref in refs for name in ref.get('destinations', [])}
         result = {'document': str(document_id), 'pages': len(pages), 'references': len(refs),

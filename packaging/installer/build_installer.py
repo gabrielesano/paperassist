@@ -11,10 +11,11 @@ import gzip
 import hashlib
 import io
 import os
-import re
 import sys
 import tarfile
 from pathlib import Path
+
+from paperassist import __version__
 
 
 def get_repo_root() -> Path:
@@ -22,15 +23,35 @@ def get_repo_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
-def get_default_version(repo_root: Path) -> str:
-    """Read default application version from src/paperassist/__init__.py."""
-    init_py = repo_root / "src" / "paperassist" / "__init__.py"
-    if init_py.is_file():
-        content = init_py.read_text(encoding="utf-8")
-        match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
-        if match:
-            return match.group(1)
-    return "0.1.0a1"
+def _tarinfo(
+    name: str,
+    *,
+    mode: int,
+    size: int = 0,
+    entry_type: bytes = tarfile.REGTYPE,
+    linkname: str = "",
+) -> tarfile.TarInfo:
+    """Build a deterministic TarInfo entry with normalized ownership and mtime."""
+    ti = tarfile.TarInfo(name=name)
+    ti.type = entry_type
+    ti.mode = mode
+    ti.size = size
+    ti.linkname = linkname
+    ti.mtime = 0
+    ti.uid = 0
+    ti.gid = 0
+    ti.uname = ""
+    ti.gname = ""
+    return ti
+
+
+def _render_shell_template(script_path: Path) -> str:
+    """Read a shell template and inline shared lock helpers if referenced."""
+    text = script_path.read_text(encoding="utf-8")
+    if "@@LOCK_COMMON@@" in text:
+        lock_common = script_path.with_name("lock_common.sh").read_text(encoding="utf-8").rstrip("\n")
+        text = text.replace("@@LOCK_COMMON@@", lock_common)
+    return text
 
 
 def create_payload_archive(
@@ -46,7 +67,6 @@ def create_payload_archive(
         with tarfile.open(fileobj=gz, mode="w:") as tar:
             # 1. Add bundle directory files (preserving relative symlinks)
             for root, dirs, files in os.walk(bundle_dir, followlinks=False):
-                # Sort dirs and files for deterministic archive order
                 dirs.sort()
                 files.sort()
                 rel_root = Path(root).relative_to(bundle_dir)
@@ -55,19 +75,10 @@ def create_payload_archive(
                 for d in dirs:
                     dir_path = Path(root) / d
                     arcname = str(rel_root / d).replace("\\", "/")
-                    ti = tarfile.TarInfo(name=arcname)
-                    ti.mtime = 0
-                    ti.uid = 0
-                    ti.gid = 0
-                    ti.uname = ""
-                    ti.gname = ""
                     if dir_path.is_symlink():
-                        ti.type = tarfile.SYMTYPE
-                        ti.linkname = os.readlink(dir_path)
-                        ti.mode = 0o777
+                        ti = _tarinfo(arcname, mode=0o777, entry_type=tarfile.SYMTYPE, linkname=os.readlink(dir_path))
                     else:
-                        ti.type = tarfile.DIRTYPE
-                        ti.mode = 0o755
+                        ti = _tarinfo(arcname, mode=0o755, entry_type=tarfile.DIRTYPE)
                         kept_dirs.append(d)
                     tar.addfile(ti)
                 dirs[:] = kept_dirs
@@ -75,21 +86,12 @@ def create_payload_archive(
                 for f in files:
                     file_path = Path(root) / f
                     arcname = str(rel_root / f).replace("\\", "/")
-                    ti = tarfile.TarInfo(name=arcname)
-                    ti.mtime = 0
-                    ti.uid = 0
-                    ti.gid = 0
-                    ti.uname = ""
-                    ti.gname = ""
                     if file_path.is_symlink():
-                        ti.type = tarfile.SYMTYPE
-                        ti.linkname = os.readlink(file_path)
-                        ti.mode = 0o777
+                        ti = _tarinfo(arcname, mode=0o777, entry_type=tarfile.SYMTYPE, linkname=os.readlink(file_path))
                         tar.addfile(ti)
                     else:
-                        is_exec = os.access(file_path, os.X_OK)
-                        ti.size = file_path.stat().st_size
-                        ti.mode = 0o755 if is_exec else 0o644
+                        mode = 0o755 if os.access(file_path, os.X_OK) else 0o644
+                        ti = _tarinfo(arcname, mode=mode, size=file_path.stat().st_size)
                         with file_path.open("rb") as fp:
                             tar.addfile(ti, fp)
 
@@ -100,41 +102,17 @@ def create_payload_archive(
                     if p.is_file() and p.suffix.lower() in {".desktop", ".svg", ".png"}
                 )
                 if desktop_files:
-                    # Add desktop directory entry
-                    dir_ti = tarfile.TarInfo(name="desktop")
-                    dir_ti.type = tarfile.DIRTYPE
-                    dir_ti.mode = 0o755
-                    dir_ti.mtime = 0
-                    dir_ti.uid = 0
-                    dir_ti.gid = 0
-                    dir_ti.uname = ""
-                    dir_ti.gname = ""
-                    tar.addfile(dir_ti)
-
+                    tar.addfile(_tarinfo("desktop", mode=0o755, entry_type=tarfile.DIRTYPE))
                     for df in desktop_files:
-                        ti = tarfile.TarInfo(name=f"desktop/{df.name}")
-                        ti.size = df.stat().st_size
-                        ti.mode = 0o644
-                        ti.mtime = 0
-                        ti.uid = 0
-                        ti.gid = 0
-                        ti.uname = ""
-                        ti.gname = ""
+                        ti = _tarinfo(f"desktop/{df.name}", mode=0o644, size=df.stat().st_size)
                         with df.open("rb") as fp:
                             tar.addfile(ti, fp)
 
-            # 3. Add uninstall.sh if provided
+            # 3. Add uninstall.sh with shared lock helpers inlined
             if uninstall_script and uninstall_script.is_file():
-                ti = tarfile.TarInfo(name="uninstall.sh")
-                ti.size = uninstall_script.stat().st_size
-                ti.mode = 0o755
-                ti.mtime = 0
-                ti.uid = 0
-                ti.gid = 0
-                ti.uname = ""
-                ti.gname = ""
-                with uninstall_script.open("rb") as fp:
-                    tar.addfile(ti, fp)
+                uninstall_bytes = _render_shell_template(uninstall_script).encode("utf-8")
+                ti = _tarinfo("uninstall.sh", mode=0o755, size=len(uninstall_bytes))
+                tar.addfile(ti, io.BytesIO(uninstall_bytes))
 
     return buffer.getvalue()
 
@@ -146,21 +124,22 @@ def assemble_installer(
     payload_bytes: bytes,
 ) -> tuple[bytes, int, str]:
     """Assemble the self-extracting script by embedding the payload and exact byte offsets."""
-    template_text = template_path.read_text(encoding="utf-8")
+    template_text = _render_shell_template(template_path)
     payload_size = len(payload_bytes)
     payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
 
-    header_template = template_text.replace("@@APP_NAME@@", app_name)
-    header_template = header_template.replace("@@VERSION@@", version)
-    header_template = header_template.replace("@@PAYLOAD_SIZE@@", str(payload_size))
-    header_template = header_template.replace("@@PAYLOAD_SHA256@@", payload_sha256)
+    header_template = (
+        template_text
+        .replace("@@APP_NAME@@", app_name)
+        .replace("@@VERSION@@", version)
+        .replace("@@PAYLOAD_SIZE@@", str(payload_size))
+        .replace("@@PAYLOAD_SHA256@@", payload_sha256)
+    )
 
     # Iteratively calculate exact byte offset for @@PAYLOAD_START_BYTE@@
-    dummy_header = header_template.replace("@@PAYLOAD_START_BYTE@@", "0")
-    offset = len(dummy_header.encode("utf-8"))
+    offset = len(header_template.replace("@@PAYLOAD_START_BYTE@@", "0").encode("utf-8"))
     while True:
-        candidate_header = header_template.replace("@@PAYLOAD_START_BYTE@@", str(offset))
-        candidate_bytes = candidate_header.encode("utf-8")
+        candidate_bytes = header_template.replace("@@PAYLOAD_START_BYTE@@", str(offset)).encode("utf-8")
         new_offset = len(candidate_bytes)
         if new_offset == offset:
             break
@@ -181,8 +160,7 @@ def build_installer(
     app_name: str = "PaperAssist",
 ) -> tuple[Path, Path]:
     """Build the installer .sh and .sha256 files."""
-    repo_root = get_repo_root()
-    version = version or get_default_version(repo_root)
+    version = version or __version__
 
     # Validate bundle
     if not bundle_dir.is_dir():
@@ -200,18 +178,16 @@ def build_installer(
     if not bundle_license.is_file():
         raise FileNotFoundError(f"Missing LICENSE file in bundle directory: {bundle_license}")
 
-    template_path = Path(__file__).resolve().parent / "installer_template.sh"
+    script_dir = Path(__file__).resolve().parent
+    template_path = script_dir / "installer_template.sh"
     if not template_path.is_file():
         raise FileNotFoundError(f"Installer template not found: {template_path}")
 
-    uninstall_path = Path(__file__).resolve().parent / "uninstall.sh"
+    uninstall_path = script_dir / "uninstall.sh"
 
     print(f"Building {app_name} Linux installer v{version}...")
     print(f"  Bundle directory:   {bundle_dir}")
-    if desktop_dir and desktop_dir.is_dir():
-        print(f"  Desktop directory:  {desktop_dir}")
-    else:
-        print(f"  Desktop directory:  (none)")
+    print(f"  Desktop directory:  {desktop_dir if desktop_dir and desktop_dir.is_dir() else '(none)'}")
 
     payload_bytes = create_payload_archive(bundle_dir, desktop_dir, uninstall_path)
     print(f"  Payload size:       {len(payload_bytes):,} bytes ({len(payload_bytes) / (1024*1024):.2f} MiB)")
@@ -225,19 +201,14 @@ def build_installer(
     print(f"  Payload offset:     {payload_offset:,} bytes")
     print(f"  Payload SHA-256:    {payload_hash}")
 
-    # Ensure output parent directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write .sh package
     output_path.write_bytes(installer_bytes)
     os.chmod(output_path, 0o755)
     print(f"  Created package:    {output_path} ({len(installer_bytes):,} bytes)")
 
-    # Compute installer SHA-256 and write checksum file
     installer_sha256 = hashlib.sha256(installer_bytes).hexdigest()
     checksum_path = output_path.with_name(output_path.name + ".sha256")
-    checksum_content = f"{installer_sha256}  {output_path.name}\n"
-    checksum_path.write_text(checksum_content, encoding="utf-8")
+    checksum_path.write_text(f"{installer_sha256}  {output_path.name}\n", encoding="utf-8")
     print(f"  Created checksum:   {checksum_path}")
     print(f"  Installer SHA-256:  {installer_sha256}")
 
@@ -277,7 +248,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--version",
         type=str,
         default=None,
-        help="Application version string (default: read from src/paperassist/__init__.py)",
+        help="Application version string (default: paperassist.__version__)",
     )
     parser.add_argument(
         "--app-name",
@@ -290,14 +261,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    repo_root = get_repo_root()
-    version = args.version or get_default_version(repo_root)
+    version = args.version or __version__
 
     if args.output:
         output_path = args.output
     else:
-        filename = f"{args.app_name}-{version}-linux-x86_64.sh"
-        output_path = args.output_dir / filename
+        output_path = args.output_dir / f"{args.app_name}-{version}-linux-x86_64.sh"
 
     desktop_dir = args.desktop_dir if args.desktop_dir and args.desktop_dir.is_dir() else None
 

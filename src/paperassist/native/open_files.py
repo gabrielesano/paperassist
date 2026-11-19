@@ -40,7 +40,6 @@ class OpenFiles(QObject):
         self.window = window
         self.pending = deque()
         self.watcher = None
-        self.quick = False
         self.wait = QTimer(self, singleShot=True, interval=100, timeout=self._next)
 
     @property
@@ -51,13 +50,14 @@ class OpenFiles(QObject):
         if getattr(self.window, '_closing', False):
             raise RuntimeError('PaperAssist is closing this window. Finish the close dialog and try again.')
         paths = absolute_paths(paths)
+        tab = self.window.tab() if quick else None
         self.activate()
         if not paths:
             if not self.window.tabs.count():
                 self.window.show_library()
             return
         for path in paths:
-            request = (path, quick)
+            request = (path, tab)
             if request not in self.pending:
                 self.pending.append(request)
         self._next()
@@ -80,7 +80,7 @@ class OpenFiles(QObject):
             return
         if self.window.library_dialog:
             self.window.library_dialog.hide()
-        path, self.quick = self.pending.popleft()
+        path, tab = self.pending.popleft()
         try:
             job = self.window.workspace.open_files([path])
         except (OSError, ValueError, RuntimeError) as error:
@@ -89,16 +89,20 @@ class OpenFiles(QObject):
             return
         self.window.statusBar().showMessage(f'Opening {Path(path).name} as a managed library copy…')
         self.watcher = JobWatcher(self.window.workspace, job, self)
-        self.watcher.finished.connect(self._opened)
+        self.watcher.finished.connect(lambda job: self._opened(job, tab))
 
-    def _opened(self, job):
+    def _opened(self, job, tab):
         self.watcher.deleteLater()
         self.watcher = None
         result = job.get('result', {})
         errors = [entry['error'] for entry in result.get('errors', [])]
         for document in result.get('documents', []):
-            if self.quick and self.window.tab():
-                opened = self.window.open_library_document_in_quick_view(document['id'])
+            if tab is not None:
+                tabs = self.window.tabs
+                if not any(tabs.widget(i) is tab for i in range(tabs.count())):
+                    errors.append('The Quick view tab was closed. The PDF is available in Library.')
+                    continue
+                opened = self.window.open_library_document_in_quick_view(document['id'], tab=tab)
             else:
                 opened = self.window.open_library_document(document['id'])
             if opened is None:

@@ -10,13 +10,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 try:
-    from test_native_support import needs_qt
+    from support import needs_qt
 except ModuleNotFoundError:
-    from tests.test_native_support import needs_qt
+    from tests.support import needs_qt
 
 try:
-    from PySide6.QtCore import QMessageLogContext, QtMsgType, qFormatLogMessage, qInstallMessageHandler
-    from paperassist.native.wayland import (
+    from PySide6.QtCore import QMessageLogContext, QtMsgType, qInstallMessageHandler
+    from paperassist.native.platform import (
         install_wayland_warning_filter,
         is_spurious_wayland_warning,
     )
@@ -120,15 +120,14 @@ from PySide6.QtWidgets import QApplication, QLineEdit
 
 from paperassist.native.about import AboutDialog
 from paperassist.native.comments import NotesModel
-from paperassist.native.library_dialog import LibraryDialog
-from paperassist.native.metadata_dialog import MetadataDialog
+from paperassist.native.library_dialog import LibraryDialog, MetadataDialog
+from paperassist.native.platform import install_wayland_warning_filter
 from paperassist.native.positions import current_page
 from paperassist.native.preferences_dialog import PreferencesDialog
-from paperassist.native.renderer import RenderClient
 from paperassist.native.source import FileSource
 from paperassist.native.sources_dialog import SourcesDialog
-from paperassist.native.wayland import install_wayland_warning_filter
 from paperassist.native.window import MainWindow
+from paperassist.native.worker import RenderClient
 from paperassist.workspace import Workspace
 
 def simulate_typing(widget, text):

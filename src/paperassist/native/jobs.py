@@ -1,5 +1,9 @@
 """Follow a Workspace job from the UI thread: a timer polls its status, so no widget ever waits."""
+import gc
+
 from PySide6.QtCore import QObject, QTimer, Signal
+
+from .platform import trim_heap
 
 DONE = ("completed", "failed", "cancelled")
 
@@ -25,5 +29,7 @@ class JobWatcher(QObject):
         if job["status"] in DONE:
             self.timer.stop()
             self.finished.emit(job)
+            gc.collect()
+            trim_heap()
         else:
             self.progress.emit(job)
