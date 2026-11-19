@@ -6,7 +6,7 @@ import time
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QEvent, QEventLoop, QKeyCombination, QPointF, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QContextMenuEvent, QDesktopServices, QGuiApplication, QImage,
+from PySide6.QtGui import (QColor, QContextMenuEvent, QCursor, QDesktopServices, QGuiApplication, QImage,
                          QKeySequence, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QAbstractScrollArea, QMenu, QScrollBar
 
@@ -45,7 +45,7 @@ class PdfView(QAbstractScrollArea):
         self.cache = PageCache(CACHE_BYTES)  # page -> (scale, render id, QPixmap)
         self.render_seconds = deque(maxlen=256)  # worker-side time of recent pages this view received
         self.locked = False  # another view of this PDF has unsaved edits
-        self.tool = 'select'  # 'select', 'highlight', 'ink', or 'comment'
+        self.tool = 'select'  # 'select', 'pan', 'highlight', 'ink', or 'comment'
         self.highlight_color, self.ink_color = HIGHLIGHT, (0, 0, 0)
         self.ink_width, self.highlight_width = 2, 12  # a highlight's width only matters for freehand ones
         self.selected_annotation = None
@@ -65,6 +65,8 @@ class PdfView(QAbstractScrollArea):
         self._outline_timer = QTimer(self, singleShot=True, timeout=self.clear_outlines)
         self.first_paint = None
         self._press, self._anchor_word, self._drag = None, None, QPointF()
+        self._pan = None
+        self._space_pan, self._space_panned = False, False
         self._transform = None
         self._autoscroll = QTimer(self, interval=40, timeout=self._autoscroll_step)
         self._context_menu = QMenu(self)
@@ -76,6 +78,18 @@ class PdfView(QAbstractScrollArea):
         self._update_scrollbars()
 
     @property
+    def panning(self):
+        return self.tool == 'pan'
+
+    @panning.setter
+    def panning(self, value):
+        if value:
+            self.tool = 'pan'
+        elif self.tool == 'pan':
+            self.tool = 'select'
+        self._update_cursor()
+
+    @property
     def highlighting(self):
         return self.tool == 'highlight'
 
@@ -85,6 +99,7 @@ class PdfView(QAbstractScrollArea):
             self.tool = 'highlight'
         elif self.tool == 'highlight':
             self.tool = 'select'
+        self._update_cursor()
 
     @property
     def drawing(self):
@@ -96,6 +111,7 @@ class PdfView(QAbstractScrollArea):
             self.tool = 'ink'
         elif self.tool == 'ink':
             self.tool = 'select'
+        self._update_cursor()
 
     @property
     def commenting(self):
@@ -107,6 +123,7 @@ class PdfView(QAbstractScrollArea):
             self.tool = 'comment'
         elif self.tool == 'comment':
             self.tool = 'select'
+        self._update_cursor()
 
     def _render_source(self):
         # Library documents pass their hash-verified byte snapshot so the worker cannot read a tampered file.
@@ -280,11 +297,19 @@ class PdfView(QAbstractScrollArea):
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        self._space_pan, self._space_panned, self._pan = False, False, None
+        self._update_cursor()
         self.cache.clear()  # a hidden tab must not keep ~100 MB of pages
         self.doc.hibernate()
         self.client.want(self.doc_id, [])
         gc.collect()
         trim_heap()
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        if self._space_pan or self._pan:
+            self._space_pan, self._space_panned, self._pan = False, False, None
+            self._update_cursor()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -325,9 +350,28 @@ class PdfView(QAbstractScrollArea):
         elif event.key() in steps:
             bar.triggerAction(steps[event.key()])
         elif event.key() == Qt.Key_Space:
-            bar.triggerAction(QScrollBar.SliderPageStepSub if event.modifiers() & Qt.ShiftModifier else QScrollBar.SliderPageStepAdd)
+            if event.modifiers() & Qt.ShiftModifier:
+                bar.triggerAction(QScrollBar.SliderPageStepSub)
+            elif event.modifiers() == Qt.NoModifier:
+                if not event.isAutoRepeat() and not self._space_pan:
+                    self._space_pan, self._space_panned = True, False
+                    self._update_cursor()
+            else:
+                super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space and self._space_pan:
+            if event.isAutoRepeat():
+                return
+            panned = self._space_panned
+            self._space_pan, self._space_panned = False, False
+            self._update_cursor()
+            if not panned:
+                self.verticalScrollBar().triggerAction(QScrollBar.SliderPageStepAdd)
+            return
+        super().keyReleaseEvent(event)
 
     # ---- painting -------------------------------------------------------------------
     def _offset(self):
@@ -416,14 +460,44 @@ class PdfView(QAbstractScrollArea):
                 if page in visible_set:
                     painter.drawRect(self._band(page, rect))
 
-    # ---- mouse: selection, links, highlight -------------------------------------------
+    # ---- mouse: pan, selection, links, highlight --------------------------------------
     def _locate(self, pos):
         """(page, x, y in points) for a viewport position, snapped to the nearest page."""
         return self.pages.to_page(pos.x() + self.horizontalScrollBar().value(), pos.y() + self._scroll_top())
 
+    def _update_cursor(self, pos=None):
+        if self._pan:
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            return
+        if self._space_pan:
+            self.viewport().setCursor(Qt.OpenHandCursor)
+            return
+        if pos is None:
+            local = self.viewport().mapFromGlobal(QCursor.pos())
+            if self.viewport().rect().contains(local):
+                pos = QPointF(local)
+        if pos is not None and len(self.doc):
+            page, x, y = self._locate(pos)
+            if self.doc.link_at(page, x, y):
+                self.viewport().setCursor(Qt.PointingHandCursor)
+                return
+        self.viewport().setCursor(Qt.OpenHandCursor if self.panning else Qt.IBeamCursor)
+
     def mousePressEvent(self, event):
         self.setFocus()
         self.activated.emit()
+        if self._pan or self._transform or self._stroke:
+            return
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and (self._space_pan or self.panning)):
+            link = None
+            if event.button() == Qt.LeftButton and self.panning and not self._space_pan and len(self.doc):
+                page, x, y = self._locate(event.position())
+                link = self.doc.link_at(page, x, y)
+            if self._space_pan:
+                self._space_panned = True
+            self._pan = {"pos": event.position(), "button": event.button(), "moved": False, "link": link}
+            self._update_cursor(event.position())
+            return
         if event.button() != Qt.LeftButton:
             return
         page, x, y = self._locate(event.position())
@@ -473,6 +547,15 @@ class PdfView(QAbstractScrollArea):
             self._extend_selection(self._drag)
 
     def mouseMoveEvent(self, event):
+        if self._pan:
+            delta = event.position() - self._pan["pos"]
+            dx, dy = round(delta.x()), round(delta.y())
+            if dx or dy:
+                self._pan["moved"] = True
+                self._pan["pos"] = QPointF(self._pan["pos"].x() + dx, self._pan["pos"].y() + dy)
+                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - dx)
+                self.verticalScrollBar().setValue(self.verticalScrollBar().value() - dy)
+            return
         if self._transform:
             drag = self._transform
             dx = (event.position().x() - drag['start'].x()) / self.zoom
@@ -496,7 +579,7 @@ class PdfView(QAbstractScrollArea):
                 self.viewport().update()
             return
         if self._press is None:
-            self.viewport().setCursor(Qt.PointingHandCursor if self.doc.link_at(page, x, y) else Qt.IBeamCursor)
+            self._update_cursor(event.position())
             return
         self.select_annotation(None)
         self._press["moved"] = True
@@ -506,6 +589,14 @@ class PdfView(QAbstractScrollArea):
         self._extend_selection(event.position())
 
     def mouseReleaseEvent(self, event):
+        if self._pan:
+            if event.button() != self._pan["button"] and event.buttons() & self._pan["button"]:
+                return
+            pan, self._pan = self._pan, None
+            self._update_cursor(event.position())
+            if not pan["moved"] and pan["link"]:
+                self.follow(pan["link"])
+            return
         if self._transform:
             self._finish_transform()
             return
@@ -649,9 +740,10 @@ class PdfView(QAbstractScrollArea):
         self._annotation_changed(list(pages), reveal=True)
 
     def set_tool(self, tool):
-        self.tool = tool if tool in ('select', 'highlight', 'ink', 'comment') else 'select'
+        self.tool = tool if tool in ('select', 'pan', 'highlight', 'ink', 'comment') else 'select'
         self.select_annotation(None)
         self.select_comment(None)
+        self._update_cursor()
 
     def select_annotation(self, selection):
         self.selected_annotation = selection
@@ -783,6 +875,9 @@ class PdfView(QAbstractScrollArea):
         QGuiApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     def finish_interaction(self):
+        if self._pan:
+            self._pan = None
+            self._update_cursor()
         if self._transform:
             self._finish_transform()
         if self._stroke:

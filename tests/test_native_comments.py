@@ -45,6 +45,7 @@ class CommentsTests(QtTestCase):
     def setUp(self):
         super().setUp()
         self.library = Library(self.dir)
+        self.addCleanup(self.library.close)
         self.data = (FIXTURES / "pdfjs-annotations.pdf").read_bytes()
         self.document = self.library.import_stream(io.BytesIO(self.data), "synthetic.pdf")
         self.notes = json.loads((FIXTURES / "pdfjs-notes.json").read_text())

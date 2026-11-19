@@ -189,8 +189,7 @@ class ReferenceTests(unittest.TestCase):
                 self.get_document(document_id)
                 return 'paper.pdf'
 
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             ref = {'raw': 'Smith, A., Jones, B. 2020', 'authors': 'Smith', 'label': 'Smith 2020', 'citation_count': 0,
                    'year': '2020', 'doi': '10.1234/example', 'local_document_id': None}
             library.documents = [{'id': 1, 'title': 'Paper', 'authors': 'Smith A., Jones B.',
@@ -230,8 +229,7 @@ class ReferenceTests(unittest.TestCase):
                     raise FileNotFoundError
                 return 'paper.pdf'
 
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             ref = {'id': '0', 'raw': 'Guarrasi, M., Reale, F. 2014, A&A, 564, A48',
                    'authors': 'Guarrasi', 'year': '2014', 'doi': ''}
             _save(library, 9, {'references': [ref], 'status': 'partial',
@@ -265,8 +263,7 @@ class ReferenceTests(unittest.TestCase):
                 return [{'id': 2, 'sha256': 'paper', 'authors': 'IOP Publishing'}]
             def get_path(self, document_id, annotated=False):
                 return 'paper.pdf'
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             ref = {'id': '0', 'raw': 'Antolin, P., & Rouppe van der Voort, L. 2012, ApJ, 745, 152',
                    'authors': 'Antolin', 'year': '2012'}
             _save(library, 1, {'references': [ref], 'status': 'partial',
@@ -292,8 +289,8 @@ class ReferenceTests(unittest.TestCase):
                 return 'paper.pdf'
         ref = {'id': '0', 'raw': 'Antolin, P., & Rouppe van der Voort, L. 2012, ApJ, 745, 152', 'authors': 'Antolin', 'year': '2012'}
         for manual, expected in ((['title'], 2), (['authors'], None)):
-            with self.subTest(manual=manual), TemporaryDirectory() as directory:
-                library = Library(Path(directory) / 'library.sqlite', {'manual': manual})
+            with (self.subTest(manual=manual), TemporaryDirectory() as directory,
+                  Library(Path(directory) / 'library.sqlite', {'manual': manual}) as library):
                 _save(library, 1, {'references': [dict(ref)], 'status': 'partial',
                                    'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
                 with patch('paperassist.references.PdfReader', return_value=Reader()):
@@ -308,8 +305,7 @@ class ReferenceTests(unittest.TestCase):
             def get_path(self, document_id, annotated=False):
                 return 'paper.pdf'
 
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             ref = {'id': '0', 'raw': 'Smith, A., Jones, B. 2020', 'authors': 'Smith', 'year': '2020'}
             payload = {'references': [ref], 'status': 'partial', 'destination_version': DESTINATION_VERSION,
                        'extraction_version': EXTRACTION_VERSION}
@@ -334,8 +330,7 @@ class ReferenceTests(unittest.TestCase):
             def get_path(self, document_id, annotated=False):
                 return 'paper.pdf'
 
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             ref = {'id': '0', 'raw': 'Smith, A. 2020', 'authors': 'Smith', 'year': '2020',
                    'doi': '10.1234/example', 'manual_link': True, 'local_document_id': 1}
             _save(library, 1, {'references': [ref], 'status': 'partial',
@@ -361,8 +356,7 @@ class ReferenceTests(unittest.TestCase):
                     raise FileNotFoundError('Missing saved revision')
                 return 'original.pdf'
 
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             ref = {'id': '0', 'raw': 'Smith, A. 2020', 'authors': 'Smith', 'year': '2020',
                    'doi': '10.1234/example'}
             _save(library, 1, {'references': [ref], 'status': 'partial',
@@ -465,8 +459,7 @@ class ReferenceTests(unittest.TestCase):
             def list_documents(self):
                 return [{'id': 3}]
 
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             ref = {'raw': 'Smith, A. 2020', 'authors': 'Smith', 'year': '2020',
                    'manual_link': True, 'local_document_id': 3}
             _save(library, 1, {'references': [ref], 'status': 'partial'})
@@ -527,8 +520,7 @@ class ReferenceTests(unittest.TestCase):
             def list_documents(self):
                 return [{'id': 3}, {'id': 4}]
 
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             old = {'id': '0', 'label': 'Testa 2012', 'authors': 'Testa', 'year': '2012',
                    'raw': 'Testa, P., & Reale, F. 2012, ApJ, 750, L10 Török, T., Kliem, B., & Titov, V. 2004, A&A, 413, L27',
                    'manual_link': True, 'local_document_id': 3, 'retrieval': {'status': 'found'}}
@@ -595,7 +587,8 @@ class ConflictTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
 
     def library(self, *documents):
-        return FakeLibrary(Path(self.directory.name) / 'library.sqlite', list(documents), FakeLibrary.pages)
+        library = FakeLibrary(Path(self.directory.name) / 'library.sqlite', list(documents), FakeLibrary.pages)
+        return self.enterContext(library)
 
     def save(self, library, *refs):
         _save(library, 9, {'references': list(refs), 'status': 'partial', 'destination_version': DESTINATION_VERSION,
@@ -972,8 +965,7 @@ class OutlierTests(unittest.TestCase):
 
 class ShortenedEntryCarryOverTests(unittest.TestCase):
     def test_manual_link_stays_with_the_previous_entry_when_two_prefixes_match(self):
-        with TemporaryDirectory() as directory:
-            library = Catalog(directory)
+        with TemporaryDirectory() as directory, Catalog(directory) as library:
             raw = 'Smith, J. 2001, Journal 5, 100'
             entry = {'label': 'Smith 2001', 'authors': 'Smith', 'year': '2001', 'doi': '', 'citation_count': 1}
             old = {**entry, 'id': '7', 'raw': f'{raw}. Brown, C. 2005, Journal 7, 25',
@@ -1007,8 +999,7 @@ class ShortenedEntryCarryOverTests(unittest.TestCase):
                 return [{'id': 3}]
 
         old_raw = f'{WINEBARGER} Figure Captions Figure 1 Active region observed on 2010 June 19 using SDO/AIA. All 6 images are coaligned.'
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library.sqlite')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library.sqlite') as library:
             old = {'id': '1', 'label': 'Winebarger 2011', 'authors': 'Winebarger', 'year': '2011', 'raw': old_raw,
                    'manual_link': True, 'local_document_id': 3, 'retrieval': {'status': 'found'}}
             # A short entry must match too: the prefix rule is not reserved for long ones.

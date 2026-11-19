@@ -591,12 +591,12 @@ class WindowEditingTests(QtTestCase):
         QTest.keyClick(view, Qt.Key_Y, Qt.ControlModifier)
         self.assertTrue(view.doc.modified)
 
-    def test_the_toolbars_offer_no_tool_beyond_select_draw_highlight_and_comment(self):
+    def test_the_toolbars_offer_no_tool_beyond_select_pan_draw_highlight_and_comment(self):
         view = self.open("tools-only")
         strip_names = {a.text() for a in self.bar.actions() if a.text()}
         self.assertEqual(strip_names, {'Delete', 'Undo', 'Redo'})
         checkable_tools = {a.text() for a in self.window.main_bar.actions() if a.isCheckable() and a.text() not in ('Panels', 'Show highlights')}
-        self.assertEqual(checkable_tools, {'Select', 'Draw', 'Highlight', 'Comment'})
+        self.assertEqual(checkable_tools, {'Select', 'Pan', 'Draw', 'Highlight', 'Comment'})
         self.assertIsNotNone(view)
 
     def test_controls_follow_the_selection_and_go_quiet_when_read_only(self):

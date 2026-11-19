@@ -29,6 +29,8 @@ throttling, and consolidates the native UI and packaging stack. See
 
 ## Completed transitions and automated acceptance
 
+- Added the Pan tool in `0.3.1`, with a toolbar toggle, middle-button drag,
+  and temporary panning while holding Space. See the [release notes](releases/0.3.1.md).
 - Prepared `0.3.0` with the multi-paper memory and worker optimizations,
   library/annotation integrity hardening, batch reference resolution, per-host
   HTTP throttling, and native/packaging consolidation. See

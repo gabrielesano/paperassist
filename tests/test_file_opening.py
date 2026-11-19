@@ -18,6 +18,7 @@ class ManagedOpeningTests(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name).resolve()
         self.library = Library(self.root / 'library')
+        self.addCleanup(self.library.close)
         self.path = self.root / 'Paper with spaces è.pdf'
         self.path.write_bytes(pdf())
 
@@ -64,6 +65,7 @@ class ManagedOpeningTests(unittest.TestCase):
 
     def test_another_librarys_managed_files_are_not_imported(self):
         other = Library(self.root / 'other')
+        self.addCleanup(other.close)
         document = other.import_stream(io.BytesIO(pdf()), 'owned.pdf')
         for path in (other.get_path(document['id']),):
             with self.assertRaisesRegex(ValueError, 'another PaperAssist library'):

@@ -35,6 +35,7 @@ class LibraryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.library = Library(Path(self.tmp.name) / 'library')
+        self.addCleanup(self.library.close)
         self.payload = pdf()
 
     def test_duplicate_and_corrections(self):
@@ -219,6 +220,7 @@ class VerifiedMetadataTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.library = Library(Path(self.tmp.name) / 'library')
+        self.addCleanup(self.library.close)
         self.payload = pdf()
         self.record = {'provider': 'crossref', 'title': 'Nanoflares in a twisted loop', 'authors': 'A. F. Rappazzo',
                        'year': 2013, 'doi': '10.1088/0004-637x/771/2/76', 'publication': ['APJ', '771', '76', '2013']}
@@ -284,6 +286,7 @@ class ReadableNameTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / 'library'
         self.library = Library(self.root)
+        self.addCleanup(self.library.close)
         self.payload = pdf()
         self.record = {'provider': 'crossref', 'title': 'Nanoflares in a twisted loop', 'authors': 'A. F. Rappazzo, M. Velli',
                        'year': 2013, 'doi': '10.1088/0004-637x/771/2/76', 'publication': ['APJ', '771', '76', '2013'],
@@ -414,6 +417,7 @@ class ReadableNameTests(unittest.TestCase):
             self.legacy(i)
         self.assertEqual(self.names(), sorted(f'{sha}.pdf' for sha in shas.values()))
         library = Library(self.root)
+        self.addCleanup(library.close)
         after = self.names()
         self.assertEqual(after, ['paper0.pdf', 'paper1.pdf', 'paper2.pdf'])
         for i, sha in shas.items():
@@ -427,6 +431,7 @@ class ReadableNameTests(unittest.TestCase):
         doc = self.library.import_stream(io.BytesIO(self.payload), 'paper.pdf')
         self.library.get_path(doc['id'], False).rename(self.library.originals / 'moved.pdf')
         library = Library(self.root)
+        self.addCleanup(library.close)
         self.assertEqual(library.get_document(doc['id'])['stored_name'], 'moved.pdf')
         self.assertEqual(library.get_path(doc['id'], False).read_bytes(), self.payload)
 
@@ -437,6 +442,7 @@ class ReadableNameTests(unittest.TestCase):
         with self.library._connect() as db:  # ... while the database already records the new one
             db.execute("UPDATE documents SET stored_name = 'Rappazzo_2013_ApJ_771_76.pdf' WHERE id = ?", (doc['id'],))
         library = Library(self.root)
+        self.addCleanup(library.close)
         self.assertEqual(library.get_document(doc['id'])['stored_name'], 'Rappazzo_2013_ApJ_771_76.pdf')
         self.assertEqual(self.names(), ['Rappazzo_2013_ApJ_771_76.pdf'])
 
@@ -445,6 +451,7 @@ class ReadableNameTests(unittest.TestCase):
         self.library.get_path(doc['id'], False).unlink()
         (self.library.originals / 'other.pdf').write_bytes(self.variant(200))
         library = Library(self.root)
+        self.addCleanup(library.close)
         self.assertEqual(library.get_document(doc['id'])['stored_name'], 'paper.pdf')
         self.assertEqual(sorted(self.names()), ['other.pdf'])
 
@@ -455,6 +462,7 @@ class ReadableNameTests(unittest.TestCase):
             db.execute('DROP INDEX documents_stored_name')
             db.execute('ALTER TABLE documents DROP COLUMN stored_name')
         library = Library(self.root)
+        self.addCleanup(library.close)
         path = library.get_path(doc['id'], False)
         self.assertEqual(path.name, 'paper.pdf')
         self.assertEqual(library.open_file(path)['id'], doc['id'])
@@ -480,6 +488,7 @@ class OcrMetadataTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.library = Library(Path(self.tmp.name) / 'library')
+        self.addCleanup(self.library.close)
         self.doc = self.library.import_stream(io.BytesIO(pdf()), 'scan.pdf')
 
     def test_provisional_gaps_are_filled_with_ocr_provenance_and_stay_reviewable(self):
@@ -545,6 +554,7 @@ class ManualFieldTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.library = Library(Path(self.tmp.name) / 'library')
+        self.addCleanup(self.library.close)
         writer = PdfWriter()
         writer.add_blank_page(width=72, height=72)
         writer.add_metadata({'/Title': 'Original title', '/Author': 'Original Author'})

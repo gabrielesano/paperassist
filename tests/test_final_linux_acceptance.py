@@ -11,6 +11,7 @@ in this test class.
 import ctypes
 import ctypes.util
 import hashlib
+import io
 import json
 import os
 import re
@@ -25,7 +26,12 @@ import time
 import unittest
 from pathlib import Path
 
-from paperassist import __version__
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, TextStringObject
+
+from paperassist import __version__, references
+from paperassist.native.engine import Pdf
+from paperassist.workspace import Workspace
 
 # Add installer directory to sys.path so synthetic packages can be built
 REPO_ROOT = Path(__file__).resolve().parent.parent

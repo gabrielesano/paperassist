@@ -107,6 +107,11 @@ class AnnotationBar(QToolBar):
         self.select.setToolTip('Select text or annotations (V)')
         self.select.triggered.connect(lambda: self.tool('select'))
 
+        self.pan = QAction('Pan', window, checkable=True)
+        self.pan.setShortcut('M')
+        self.pan.setToolTip('Pan the document (M) — or hold Space / middle-drag')
+        self.pan.triggered.connect(lambda checked=False: self.tool('pan' if checked else 'select'))
+
         self.draw = QAction('Draw', window, checkable=True)
         self.draw.setShortcut('D')
         self.draw.setToolTip('Draw freehand ink (D)')
@@ -119,6 +124,7 @@ class AnnotationBar(QToolBar):
 
         main_bar = window.main_bar
         main_bar.insertAction(window.highlight_action, self.select)
+        main_bar.insertAction(window.highlight_action, self.pan)
         main_bar.insertAction(window.highlight_action, self.draw)
         main_bar.insertAction(window.after_tools_action, self.comment)
 
@@ -201,9 +207,11 @@ class AnnotationBar(QToolBar):
         comment = view.selected_comment if view else None
         notes = bool(view and view.notes_model)
         self.select.setEnabled(active)
+        self.pan.setEnabled(view is not None)
         self.draw.setEnabled(active)
         self.comment.setEnabled(notes)
         for action, checked in ((self.select, bool(view and view.tool == 'select')),
+                                (self.pan, bool(view and view.panning)),
                                 (self.draw, bool(view and view.drawing)),
                                 (self.comment, bool(view and view.commenting)),
                                 (self.window.highlight_action, bool(view and view.highlighting))):
@@ -232,7 +240,7 @@ class AnnotationBar(QToolBar):
         self.redo.setEnabled(has_redo)
 
         contextual = bool(view and (
-            view.tool != 'select'
+            view.tool not in ('select', 'pan')
             or item is not None or comment is not None
             or has_undo or has_redo or not view.highlights_visible
         ))

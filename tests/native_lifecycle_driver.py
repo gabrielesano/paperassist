@@ -1,13 +1,14 @@
 """Disposable real-app process used by the native lifecycle tests."""
 import io
 import json
+import os
 import signal
 import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from paperassist import paths
@@ -63,6 +64,9 @@ def run(mode, root):
                 box.button(answer).click()
             QTimer.singleShot(150, respond)
             return
+        # Cocoa dispatches events during window creation, before the Qt event loop starts.
+        if not QThread.currentThread().loopLevel():
+            return
         windows = [widget for widget in app.topLevelWidgets() if isinstance(widget, MainWindow) and widget.isVisible()]
         if not windows:
             return
@@ -76,11 +80,11 @@ def run(mode, root):
                 pane = window.pane()
                 emit("cancelled", modified=pane.modified, draft=window.comments.has_draft(pane), prompts=state["prompts"])
             return
-        state["started"] = True
-        window.library_dialog.reject()
+        state.update(started=True, old_workspace=window.workspace)
+        if window.library_dialog is not None:
+            window.library_dialog.reject()
         window.acquisition.main_opened = lambda document_id: None
         if mode == "fallback":
-            state["old_workspace"] = window.workspace
             prepare = window.workspace.prepare_switch
 
             def disconnect(path, action):
@@ -116,6 +120,6 @@ def run(mode, root):
 
 
 if __name__ == "__main__":
-    root = Path(sys.argv[2]).resolve()
+    root = Path(os.environ["PAPERASSIST_TEST_ROOT"]).resolve()
     with patch("paperassist.paths.config_file", return_value=root / "config.json"):
-        raise SystemExit(run(sys.argv[1], root))
+        raise SystemExit(run(os.environ["PAPERASSIST_TEST_MODE"], root))

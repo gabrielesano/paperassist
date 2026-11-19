@@ -213,10 +213,15 @@ class Library:
         if db is None:
             # Each thread keeps its own connection; check_same_thread=False lets close() clean up across threads.
             db = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA journal_mode = WAL")
-            db.execute("PRAGMA busy_timeout = 30000")
-            db.execute("PRAGMA foreign_keys = ON")
+            try:
+                db.row_factory = sqlite3.Row
+                db.execute("PRAGMA journal_mode = WAL")
+                db.execute("PRAGMA busy_timeout = 30000")
+                db.execute("PRAGMA foreign_keys = ON")
+            except BaseException:
+                # An exception traceback can retain the connection and lock a corrupt DB on Windows.
+                db.close()
+                raise
             self._local.db = db
             self._local.depth = 0
             with self._conn_lock:

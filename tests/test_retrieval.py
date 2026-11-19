@@ -82,9 +82,12 @@ def ran(result):
 class Base(unittest.TestCase):
     def setUp(self):
         http_client.clear_cache()
-        for target in (patch('time.sleep'), patch.dict(os.environ, {}, clear=True)):
+        for target in (patch('time.sleep'), patch.dict(os.environ, {})):
             target.start()
             self.addCleanup(target.stop)
+        # Keep the OS environment that OpenSSL uses to initialize on Windows.
+        for key in ('PAPERASSIST_EMAIL', 'OPENALEX_API_KEY', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
+            os.environ.pop(key, None)
 
     def attempt(self, result, provider):
         return next(a for a in result['attempts'] if a['provider'] == provider)

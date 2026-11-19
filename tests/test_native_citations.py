@@ -3,6 +3,7 @@ import io
 import tempfile
 import threading
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -317,14 +318,14 @@ class CitationPanelTests(QtTestCase):
         from test_library_window import cited_pdf
         from paperassist.native.references_panel import ReferencesPanel
 
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as cleanup:
             root = Path(folder).resolve()
             workspace = Workspace(root / "library")
-            self.addCleanup(workspace.close)
+            cleanup.callback(workspace.close)
             doc = workspace.library.import_stream(io.BytesIO(cited_pdf(root / "p.pdf").read_bytes()), "p.pdf")
             references.analyze(workspace.library, doc["id"])
             panel = ReferencesPanel(workspace)
-            self.addCleanup(panel.close)
+            cleanup.callback(panel.close)
 
             # A bumped extraction version triggers reanalysis inside the background Workspace job, never on the UI thread.
             ui_thread = threading.get_ident()
@@ -350,13 +351,13 @@ class CitationPanelTests(QtTestCase):
         from paperassist.native.window import MainWindow
         from paperassist.native.worker import RenderClient
 
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as cleanup:
             root = Path(folder).resolve()
             with patch("paperassist.paths.config_file", return_value=root / "config.json"):
                 workspace = Workspace(root / "library")
-                self.addCleanup(workspace.close)
+                cleanup.callback(workspace.close)
                 client = RenderClient()
-                self.addCleanup(client.shutdown)
+                cleanup.callback(client.shutdown)
                 docs = [
                     workspace.library.import_stream(io.BytesIO(cited_pdf(root / f"p{n}.pdf", pages=n).read_bytes()), f"p{n}.pdf")
                     for n in (3, 4)
@@ -368,7 +369,7 @@ class CitationPanelTests(QtTestCase):
                 window.acquisition.main_opened = lambda document_id: None
                 window.resize(1200, 800)
                 window.show()
-                self.addCleanup(lambda: (window.close(), window.deleteLater()))
+                cleanup.callback(lambda: (window.close(), window.deleteLater()))
 
                 ui_thread = threading.get_ident()
                 disk_reads = []
@@ -414,13 +415,13 @@ class CitationPanelTests(QtTestCase):
         from paperassist.native.worker import RenderClient
         from paperassist.native.window import MainWindow
 
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as cleanup:
             root = Path(folder).resolve()
             with patch("paperassist.paths.config_file", return_value=root / "config.json"):
                 workspace = Workspace(root / "library")
-                self.addCleanup(workspace.close)
+                cleanup.callback(workspace.close)
                 client = RenderClient()
-                self.addCleanup(client.shutdown)
+                cleanup.callback(client.shutdown)
                 doc = workspace.library.import_stream(io.BytesIO(cited_pdf(root / "p.pdf", pages=3).read_bytes()), "p.pdf")
                 references.analyze(workspace.library, doc["id"])
 
@@ -428,7 +429,7 @@ class CitationPanelTests(QtTestCase):
                 window.acquisition.main_opened = lambda document_id: None
                 window.resize(1200, 800)
                 window.show()
-                self.addCleanup(lambda: (window.close(), window.deleteLater()))
+                cleanup.callback(lambda: (window.close(), window.deleteLater()))
                 tab = window.open_library_document(doc["id"])
                 self.pump(lambda: window.details.list.count() == 2 and tab.main.view.has_page(0))
 

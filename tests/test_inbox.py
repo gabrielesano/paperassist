@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
@@ -54,6 +55,7 @@ class InboxTests(unittest.TestCase):
         self.folder = root / 'downloads'
         self.folder.mkdir()
         self.library = Library(root / 'library')
+        self.addCleanup(self.library.close)
         self.source = self.library.import_stream(BytesIO(pdf()), 'source.pdf')['id']
         self.reference(REF)
 
@@ -280,12 +282,12 @@ class InboxTests(unittest.TestCase):
 @mock.patch('paperassist.retrieval.resolve_identity', return_value=None)
 class InboxWorkspaceTests(unittest.TestCase):
     def test_folder_job_and_explicit_link_use_stored_settings(self, identify):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup:
             root = Path(directory)
             folder = root / 'downloads'
             folder.mkdir()
             workspace = Workspace(root / 'library')
-            self.addCleanup(workspace.close)
+            cleanup.callback(workspace.close)
             source = workspace.library.import_stream(BytesIO(pdf()), 'source.pdf')['id']
             references._save(workspace.library, source, {'status': 'analyzed',
                 'extraction_version': references.EXTRACTION_VERSION,

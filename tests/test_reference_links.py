@@ -149,10 +149,9 @@ def make_cross_page_paper(path, rotation=0, linked=True, complete=False):
 
 class EventTests(unittest.TestCase):
     def test_analysis_finds_the_heading_once_for_text_and_links(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, Library(Path(directory) / 'library') as library:
             path = Path(directory) / 'source.pdf'
             make_link_paper(path)
-            library = Library(Path(directory) / 'library')
             document_id = library.open_file(path)['id']
             with patch.object(references, '_find_heading', wraps=references._find_heading) as find_heading:
                 ref = references.analyze(library, document_id)['references'][0]
@@ -247,7 +246,7 @@ class EventTests(unittest.TestCase):
         self.assertIsNone(refs[0]['citation_count'])
 
     def test_destination_migration_reextracts_saved_link_occurrences(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, Library(Path(directory) / 'library') as library:
             path = Path(directory) / 'source.pdf'
             make_link_paper(path)
             reader = PdfReader(path)
@@ -256,7 +255,6 @@ class EventTests(unittest.TestCase):
             references.map_destinations(reader, pages, refs)
             references.crosscheck_links(path.read_bytes(), pages, refs)
             expected = copy.deepcopy(refs[0]['occurrences'])
-            library = Library(Path(directory) / 'library')
             document_id = library.open_file(path)['id']
             references._save(library, document_id, {'references': refs, 'status': 'partial',
                                                     'destination_version': references.DESTINATION_VERSION - 1,

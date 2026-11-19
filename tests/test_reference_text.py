@@ -100,8 +100,7 @@ class BibliographyTextTests(unittest.TestCase):
     def test_removing_backreference_rows_preserves_entry_ids_and_retrieval(self):
         text = ('References\n[1] Alice Author. First work. arXiv:2101.00001,\n2021. 6\n'
                 '[2] Bob Writer. Second work. Journal 4, 2020.\n[3] Carol Researcher. A new work. 2022.')
-        with TemporaryDirectory() as directory:
-            library = Library(Path(directory) / 'library')
+        with TemporaryDirectory() as directory, Library(Path(directory) / 'library') as library:
             references._save(library, 1, {'status': 'partial', 'references': [
                 {'id': '0', 'label': '1', 'raw': 'Alice Author. First work. arXiv:2101.00001,',
                  'retrieval': {'status': 'not_found'}},

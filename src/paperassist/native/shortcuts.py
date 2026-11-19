@@ -38,7 +38,7 @@ TABLE = [
     Entry("Navigation", ("End",), "Last page", lambda s: s.go_to_page(LAST)),
     Entry("Navigation", ("G",), "Go to page: type a number, then Enter", lambda s: s.focus_page()),
     Entry("Navigation", ("Up", "Down"), "Scroll the document (click it first)"),
-    Entry("Navigation", ("Space", "Shift+Space"), "Scroll a screen down or up"),
+    Entry("Navigation", ("Space", "Shift+Space"), "Scroll a screen down or up; hold Space + drag or middle-drag to pan"),
     Entry("Navigation", ("PgUp", "PgDown"), "Scroll a screen up or down"),
     Entry("Annotations", ("C",), "Comment on the selected text or the current page"),
     Entry("Annotations", ("Delete", "Backspace"), "Delete the selected annotation or comment"),

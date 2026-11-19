@@ -59,8 +59,7 @@ class NativeFixtureTests(unittest.TestCase):
             for x0, y0, x1, y1 in part['rects']:
                 self.assertTrue(0 <= x0 < x1 <= float(page.mediabox.width))
                 self.assertTrue(0 <= y0 < y1 <= float(page.mediabox.height))
-        with tempfile.TemporaryDirectory() as directory:
-            library = Library(directory)
+        with tempfile.TemporaryDirectory() as directory, Library(directory) as library:
             doc = library.import_stream(io.BytesIO(payload), 'synthetic.pdf')
             library.save_notes(doc['id'], notes)
             self.assertEqual(Library(directory).get_notes(doc['id']), notes)
