@@ -4,7 +4,7 @@ import re
 from PySide6.QtCore import QEvent, QItemSelectionModel, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QMenu, QProgressBar, QPushButton,
+                               QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton,
                                QTreeWidget, QTreeWidgetItem)
 
 from paperassist.library import MAX_LABEL, manual_fields, pdf_files
@@ -129,6 +129,8 @@ class LibraryDialog(QDialog):
         self.quick_button = QPushButton("Quick view")
         self.edit_button = QPushButton("Edit details…")
         self.edit_button.setToolTip("Correct the title, authors, year or DOI (F2)")
+        self.remove_button = QPushButton("Remove…")
+        self.remove_button.setToolTip("Remove selected papers from this library (Delete)")
         self.selection_hint = QLabel("Select papers with Ctrl-click or Shift-click.", objectName="muted-note")
         self.refresh_button = QPushButton("Refresh metadata")
         self.refresh_button.setToolTip("Recover metadata locally from the PDF, with optional online verification. Fields you corrected are preserved.")
@@ -185,6 +187,7 @@ class LibraryDialog(QDialog):
         metadata_row = QHBoxLayout()
         metadata_row.addWidget(self.selection_hint, 1)
         metadata_row.addWidget(self.edit_button)
+        metadata_row.addWidget(self.remove_button)
         metadata_row.addWidget(self.refresh_button)
 
         self.confirm_row = QHBoxLayout()
@@ -212,6 +215,7 @@ class LibraryDialog(QDialog):
         self.open_button.clicked.connect(lambda: self._request(self.open_requested))
         self.quick_button.clicked.connect(lambda: self._request(self.quick_requested))
         self.edit_button.clicked.connect(self.edit_metadata)
+        self.remove_button.clicked.connect(self.remove_selected)
         self.import_button.clicked.connect(self.import_dialog)
         self.folder_button.clicked.connect(self.import_folder_dialog)
         self.start_button.clicked.connect(lambda: self._confirm_import())
@@ -224,7 +228,6 @@ class LibraryDialog(QDialog):
         self.cancel_button.clicked.connect(lambda: self.watcher.cancel())
         self._set_job_running(False)
         self._discard_selection()
-        self.refresh()
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -243,6 +246,10 @@ class LibraryDialog(QDialog):
                 and event.key() in (Qt.Key_Return, Qt.Key_Enter)
                 and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier)):
             self._request(self.open_requested)
+            return True
+        if (watched is self.table and event.type() == QEvent.KeyPress
+                and event.key() == Qt.Key_Delete and event.modifiers() == Qt.NoModifier):
+            self.remove_selected()
             return True
         return super().eventFilter(watched, event)
 
@@ -319,6 +326,7 @@ class LibraryDialog(QDialog):
         for button in (self.open_button, self.quick_button, self.edit_button):
             button.setEnabled(count == 1 and (button is not self.edit_button or not self.watcher))
         available = not self.watcher and not self.pending
+        self.remove_button.setEnabled(count > 0 and available)
         self.refresh_selected.setEnabled(count > 0 and available)
         self.refresh_selected.setText(f"Refresh selected papers ({count})")
         self.recover_selected.setEnabled(count > 0 and available)
@@ -345,6 +353,44 @@ class LibraryDialog(QDialog):
         self.editor = MetadataDialog(self.workspace.library, self.workspace.library.get_document(document_id), self)
         self.editor.saved.connect(self._corrected)
         self.editor.open()
+
+    def confirm_remove(self, documents):
+        count = len(documents)
+        subject = f'"{display_title(documents[0])}"' if count == 1 else f"{count} selected papers"
+        box = QMessageBox(QMessageBox.Warning, "Remove from library", f"Remove {subject} from this library?",
+                          QMessageBox.Yes | QMessageBox.Cancel, self)
+        box.setInformativeText(
+            "Managed PDF copies, saved annotations, and comments in this library will be permanently deleted. "
+            "External files outside PaperAssist stay untouched."
+        )
+        box.button(QMessageBox.Yes).setText("Remove")
+        box.setDefaultButton(QMessageBox.Cancel)
+        return box.exec() == QMessageBox.Yes
+
+    def remove_selected(self):
+        ids = self.selected_ids()
+        if not ids or self.watcher or self.pending:
+            return
+        try:
+            documents = [self.workspace.library.get_document(document_id) for document_id in ids]
+        except KeyError:
+            self.refresh()
+            return
+        if not self.confirm_remove(documents):
+            return
+        window = self.parent()
+        # Close open tabs/quick views first so PositionKeeper does not write to deleted rows.
+        if window is not None and hasattr(window, "close_documents"):
+            window.close_documents(ids)
+        try:
+            removed = self.workspace.library.remove_documents(ids)
+        except Exception as error:
+            self.message.setText(f"Could not remove selected papers: {error}")
+            return
+        self.refresh()
+        self.message.setText(f"Removed {removed} paper{'s' if removed != 1 else ''} from the library.")
+        if window is not None and hasattr(window, "details"):
+            window.details.library_changed()
 
     def _corrected(self, document):
         """Bring every place that shows this paper up to date: the list, the tab titles and the references."""

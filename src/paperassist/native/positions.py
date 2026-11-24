@@ -49,7 +49,7 @@ class PositionKeeper(QObject):
         self.pane, self.view, self.workspace, self.document_id = pane, pane.view, workspace, pane.view.doc.source.document_id
         self.active = self.dirty = False  # moves before the restore are the window settling, not the reader
         self.closed = False
-        self.known = self.restored = None  # the stored (page, scale); the restored (scale, zoom, fit)
+        self.known = self.restored = None
         self.timer = QTimer(self, singleShot=True, interval=SAVE_DELAY_MS, timeout=self.save)
         self.view.moved.connect(self._moved)
         pane.released.connect(self.close)
@@ -73,9 +73,12 @@ class PositionKeeper(QObject):
             zoom, fit = to_zoom(saved["scale"], (area.width() - 2 * MARGIN) / widest,
                                 min((area.width() - 2 * MARGIN) / width, (area.height() - 2 * MARGIN) / height))
             view.fit_width() if fit or self._beside() else view.zoom_by(zoom / view.zoom)
-            view.goto(page)
-            self.known = (saved["page"], saved["scale"])
+            if "offset" in saved:
+                view.restore_position(page, saved["offset"])
+            else:
+                view.goto(page)
             self.restored = (saved["scale"], view.zoom, view.fit)
+            self.known = self.position()
         self.active = True
 
     def _beside(self):
@@ -98,15 +101,19 @@ class PositionKeeper(QObject):
             return self.restored[0]
         return to_scale(self.view.zoom, self.view.fit)
 
+    def position(self):
+        page, offset = self.view.reading_position()
+        return {"page": page + 1, "scale": self.scale(), "offset": offset}
+
     def save(self):
         if not (self.active and self.dirty):
             return
         self.dirty = False
-        position = (current_page(self.view) + 1, self.scale())
+        position = self.position()
         if position == self.known:
             return
         try:
-            self.workspace.save_view(self.document_id, {"page": position[0], "scale": position[1]})
+            self.workspace.save_view(self.document_id, position)
         except Exception as error:  # the reading position is a convenience; say so, keep reading
             self.failed.emit(f"Could not save the reading position: {error}")
         else:

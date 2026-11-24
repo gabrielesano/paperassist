@@ -14,9 +14,11 @@ from weakref import WeakValueDictionary
 
 from pypdf import PdfReader
 
-from paperassist.citation import (DOI, NUMERIC_MARKER, PARTICLES, SURNAME, citation_numbers, describe, fold,
-                                  has_surname, pdf_name, publication as _publication, surnames)
-from paperassist.library import Library, manual_fields
+from paperassist.citation import (ARXIV_ID, DOI, NUMERIC_MARKER, PARTICLES, SURNAME, arxiv_id, citation_numbers,
+                                  clean_text as _clean, describe, fold, has_surname, pdf_name,
+                                  publication as _publication, reference_key as _normalize,
+                                  strip_arxiv_version, surnames)
+from paperassist.library import Library, manual_fields, sync_manual_links
 from paperassist.retrieval import identify
 
 HEADING = re.compile(r'^\s*(?:\d+\.?\s+)?(?:references|bibliography|literature\s+cited)\s*[.:]?\s*$', re.I | re.M)
@@ -40,8 +42,6 @@ PARTICLE = '(?:' + '|'.join(sorted(PARTICLES, key=len, reverse=True)) + ')'
 SECOND_AUTHOR = rf"(?:[^\W\d_]+\s+(?={PARTICLE}\s))?(?:{PARTICLE}\s+)*[^\W\d_]+(?:[-'’][^\W\d_]+)*(?:\s[a-z]{{2,4}}(?![a-z]))?"
 # "B" in "A & B 2001" is a second author, not a citation of B.
 AFTER_NAME = re.compile(r'[^\W\d_]{2}\s*(?:&|\band)\s+$', re.I)
-SPACING_ACCENT = re.compile(r'\s*([´¨˜ˆˇ˚¸])\s*([A-Za-zı])')
-COMBINING = {'´': '\u0301', '¨': '\u0308', '˜': '\u0303', 'ˆ': '\u0302', 'ˇ': '\u030c', '˚': '\u030a', '¸': '\u0327'}
 DESTINATION_VERSION = 6
 # Sections printed after the references. Bare words must fill the line, so a wrapped title such as
 # "Table of integrals" stays in its entry.
@@ -95,13 +95,6 @@ def _synchronized(function):
         with lock:
             return function(library, *args, **kwargs)
     return synchronized
-
-
-def _clean(text):
-    """Repair what PDF text extraction breaks: detached accents ("M¨ uller"), ligatures and
-    names hyphenated at a line end."""
-    joined = SPACING_ACCENT.sub(lambda m: m.group(2).replace('ı', 'i') + COMBINING[m.group(1)], text)
-    return re.sub(r'(?<=[^\W\d_])-\n(?=[a-z])', '', unicodedata.normalize('NFKC', joined))
 
 
 def _citation_end(pattern, raw):
@@ -622,11 +615,6 @@ def _store_analysis(library, document_id, refs, *, resolve=True):
     return _resolve(library, document_id, payload, library.list_documents()) if resolve else payload
 
 
-def _normalize(text):
-    # Entries saved before accents were repaired must still match their new text.
-    return ''.join(c for c in _clean(text).casefold() if c.isalnum())
-
-
 def crosscheck_links(data, pages, refs):
     """Reconcile link and text events by position, retaining ambiguous counts as unknown."""
     _, heading = _prepare_bibliography(pages)
@@ -824,6 +812,7 @@ def has_conflict(ref, document, evidence):
 def _save(library, document_id, payload):
     with library._connect() as db:
         db.execute('INSERT OR REPLACE INTO reference_analyses VALUES (?, ?)', (str(document_id), json.dumps(payload)))
+        sync_manual_links(db, str(document_id), payload.get('references', []))
 
 
 def _load(library, document_id):
@@ -880,26 +869,44 @@ def _load_evidence_batch(library, documents):
 def _resolve(library, document_id, payload, documents):
     source = str(document_id)
     with library._connect() as db:
-        rows = db.execute('SELECT source_id, payload FROM reference_analyses WHERE source_id != ?', (source,)).fetchall()
+        rows = db.execute('SELECT raw_key, target_id FROM reference_manual_links WHERE source_id != ?', (source,)).fetchall()
     shared = {}
-    for source_id, saved_payload in rows:
-        for old in json.loads(saved_payload).get('references', []):
-            target = old.get('manual_target_id') or old.get('local_document_id')
-            if (old.get('manual_link') and not old.get('legacy') and not old.get('local_invalid')
-                    and target and str(target) != source_id):
-                shared.setdefault(_normalize(old['raw']), set()).add(str(target))
+    for raw_key, target_id in rows:
+        shared.setdefault(raw_key, set()).add(target_id)
     available = {str(d['id']): d for d in documents if _available(library, d)}
     possible = [d for key, d in available.items() if key != source]
     possible_by_id = {str(d['id']): d for d in possible}
     by_doi = {}
     by_first_page_doi = {}
+    by_arxiv = {}
+    by_first_page_arxiv = {}
+    by_bibcode = {}
     folded_authors = {}
     manual_authors = {}
     for d in possible:
-        if doi := (d.get('doi') or '').lower():
+        doi = (d.get('doi') or '').lower()
+        if doi:
             by_doi.setdefault(doi, []).append(d)
-        for printed_doi in {value.lower() for value in d.get('metadata', {}).get('candidates', {}).get('doi', [])}:
+        meta = d.get('metadata') or {}
+        candidates = meta.get('candidates') or {}
+        for printed_doi in {value.lower() for value in candidates.get('doi', [])}:
             by_first_page_doi.setdefault(printed_doi, []).append(d)
+        verified = meta.get('verified') or {}
+        doc_arxiv_ids = set()
+        if aid := strip_arxiv_version(verified.get('arxiv_id') or ''):
+            if ARXIV_ID.fullmatch(aid):
+                doc_arxiv_ids.add(aid)
+        if doi.startswith('10.48550/arxiv.'):
+            aid = strip_arxiv_version(doi.removeprefix('10.48550/arxiv.'))
+            if ARXIV_ID.fullmatch(aid):
+                doc_arxiv_ids.add(aid)
+        for aid in doc_arxiv_ids:
+            by_arxiv.setdefault(aid, []).append(d)
+        for printed_arxiv in {strip_arxiv_version(value) for value in candidates.get('arxiv', [])}:
+            if ARXIV_ID.fullmatch(printed_arxiv):
+                by_first_page_arxiv.setdefault(printed_arxiv, []).append(d)
+        if bib := str(verified.get('bibcode') or '').strip().lower():
+            by_bibcode.setdefault(bib, []).append(d)
         folded_authors[d['id']] = fold(d.get('authors') or '')
         manual_authors[d['id']] = 'authors' in manual_fields(d)
 
@@ -941,6 +948,15 @@ def _resolve(library, document_id, payload, documents):
         if not matches and ref_doi:
             matches = [d for d in by_first_page_doi.get(ref_doi, []) if _first_page_doi(ref, d, evidence_for)]
             reason = 'first_page_doi'
+        if not matches and (ref_arxiv := strip_arxiv_version(arxiv_id(ref))) and ARXIV_ID.fullmatch(ref_arxiv):
+            matches = by_arxiv.get(ref_arxiv, [])
+            reason = 'arxiv'
+            if not matches:
+                matches = [d for d in by_first_page_arxiv.get(ref_arxiv, []) if _first_page_arxiv(ref, d, ref_arxiv, evidence_for)]
+                reason = 'first_page_arxiv'
+        if not matches and (ref_bib := str((ref.get('identity') or {}).get('bibcode') or '').strip().lower()):
+            matches = by_bibcode.get(ref_bib, [])
+            reason = 'bibcode'
         if not matches:
             targets = shared.get(_normalize(ref['raw']), set())
             matches = [possible_by_id[t] for t in targets if t in possible_by_id] if len(targets) == 1 else []
@@ -980,6 +996,17 @@ def _first_page_doi(ref, document, evidence_for):
     """The reference's DOI is printed on the PDF's first page and nothing else disagrees."""
     printed = {value.lower() for value in document.get('metadata', {}).get('candidates', {}).get('doi', [])}
     if ref['doi'].lower() not in printed:
+        return False
+    evidence = evidence_for(document)
+    author = ref.get('authors', '')
+    seen = f"{document.get('authors') or ''} {' '.join((evidence or {}).get('lines', []))}"
+    return bool(author) and not has_conflict(ref, document, evidence) and has_surname(seen, author)
+
+
+def _first_page_arxiv(ref, document, ref_arxiv, evidence_for):
+    """The reference's arXiv ID is printed on the PDF's first page and nothing else disagrees."""
+    printed = {strip_arxiv_version(value) for value in document.get('metadata', {}).get('candidates', {}).get('arxiv', [])}
+    if ref_arxiv not in printed:
         return False
     evidence = evidence_for(document)
     author = ref.get('authors', '')

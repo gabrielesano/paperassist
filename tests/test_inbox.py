@@ -313,3 +313,65 @@ class InboxWorkspaceTests(unittest.TestCase):
             self.assertEqual(linked['retrieval']['status'], 'local')
             self.assertEqual(linked['local_document_id'], 2)
             self.assertTrue(os.path.samefile(identify.call_args.args[1].inbox, folder))
+
+    def test_batch_folder_scans_once_and_links_multiple_verified_papers(self, identify):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup:
+            root = Path(directory)
+            folder = root / 'downloads'
+            folder.mkdir()
+            workspace = Workspace(root / 'library')
+            cleanup.callback(workspace.close)
+            source = workspace.library.import_stream(BytesIO(pdf()), 'source.pdf')['id']
+            other_doi = '10.1051/0004-6361/202012345'
+            refs = [
+                {**REF, 'id': '0', 'doi': DOI, 'status': 'blocked',
+                 'retrieval': {'version': 2, 'status': 'blocked', 'pdf_url': 'https://pub.example/0.pdf', 'attempts': []}},
+                {'id': '1', 'label': 'Parker 2020', 'authors': 'Parker', 'year': '2020', 'doi': other_doi,
+                 'raw': 'Parker, E. 2020, A&A, 640, 10', 'occurrences': [], 'citation_count': 0},
+                {'id': '2', 'label': 'Ambiguous 2019', 'authors': 'Smith', 'year': '2019', 'doi': '10.1000/ambig',
+                 'raw': 'Smith, A. 2019, ApJ, 800, 1', 'occurrences': [], 'citation_count': 0},
+                {'id': '3', 'label': 'Legacy', 'authors': 'Old', 'year': '1999', 'doi': '10.1000/legacy',
+                 'raw': 'Old 1999', 'legacy': True, 'occurrences': [], 'citation_count': 0},
+            ]
+            references._save(workspace.library, source, {
+                'status': 'analyzed', 'extraction_version': references.EXTRACTION_VERSION,
+                'destination_version': references.DESTINATION_VERSION, 'references': refs})
+
+            self.assertEqual(inbox.check_folder_batch(workspace.library, source, ''), inbox.NO_FOLDER)
+            (folder / 'first.pdf').write_bytes(text_pdf(FILLER, f'Rappazzo et al. doi:{DOI}'))
+            (folder / 'second.pdf').write_bytes(text_pdf(FILLER, f'Parker et al. doi:{other_doi}'))
+            (folder / 'ambig1.pdf').write_bytes(text_pdf(FILLER, 'Smith doi:10.1000/ambig v1'))
+            (folder / 'ambig2.pdf').write_bytes(text_pdf(FILLER, 'Smith doi:10.1000/ambig v2'))
+            (folder / 'legacy.pdf').write_bytes(text_pdf(FILLER, 'Old doi:10.1000/legacy'))
+            before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.iterdir()}
+
+            workspace.update_settings({'inbox': str(folder)})
+            with mock.patch('paperassist.inbox._scan', wraps=inbox._scan) as scan_spy:
+                job = workspace.check_folder_batch(source)
+                for _ in range(200):
+                    status = workspace.job_status(job['id'])
+                    if status['status'] in ('completed', 'failed'):
+                        self.assertEqual(status['status'], 'completed', status)
+                        result = status['result']
+                        break
+                    time.sleep(.01)
+                else:
+                    self.fail('Batch folder check did not finish')
+
+            self.assertEqual(scan_spy.call_count, 1)
+            identify.assert_not_called()
+            self.assertEqual(result['status'], 'linked')
+            self.assertEqual({item['reference_id'] for item in result['linked']}, {'0', '1'})
+            self.assertEqual(result['ambiguous'], ['2'])
+            self.assertIn('Linked 2 PDFs', result['summary'])
+            self.assertIn('1 reference has multiple matches', result['summary'])
+            updated = {r['id']: r for r in references.get(workspace.library, source)['references']}
+            self.assertIsNotNone(updated['0'].get('local_document_id'))
+            self.assertIsNotNone(updated['1'].get('local_document_id'))
+            self.assertIsNone(updated['2'].get('local_document_id'))
+            self.assertIsNone(updated['3'].get('local_document_id'))
+            self.assertEqual({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.iterdir()}, before)
+
+            cancelled = mock.Mock()
+            cancelled.is_set.return_value = True
+            self.assertEqual(inbox.check_folder_batch(workspace.library, source, str(folder), cancel=cancelled)['linked'], [])

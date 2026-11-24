@@ -29,6 +29,12 @@ throttling, and consolidates the native UI and packaging stack. See
 
 ## Completed transitions and automated acceptance
 
+- Released `0.3.2` with async worker-side `Ctrl+F`, reading marks, **Copy with
+  source**, batch **Check folder** / **Open blocked**, indexed SQLite
+  manual-link lookup, first-class `arXiv`/`bibcode` work identities and local
+  reuse, **Remove…** (`Delete`) in **Library**, Markdown **Copy notes** in
+  **Comments**, and non-splitting modifier handling plus `Escape` stroke
+  cancellation in the reader. See the [release notes](releases/0.3.2.md).
 - Added the Pan tool in `0.3.1`, with a toolbar toggle, middle-button drag,
   and temporary panning while holding Space. See the [release notes](releases/0.3.1.md).
 - Prepared `0.3.0` with the multi-paper memory and worker optimizations,
@@ -98,3 +104,41 @@ citation-format coverage, advanced search, annotation export and bibliographic
 integrations follow actual observed needs. A Rust implementation stays deferred;
 see the [native stack decision](development/native-stack.md). LLMs are not used
 for importing or organizing the local collection.
+
+### Planned engineering & workflow upgrades
+
+1. **Zero-copy PDF IPC & worker-side highlight visibility:**
+   - Replace full-PDF byte pickling over `multiprocessing.Pipe` in
+     `native/view.py` and `native/worker.py` with `multiprocessing.shared_memory.SharedMemory`
+     (once Python 3.11's `resource_tracker` lifetime constraints are managed by a
+     parent-owned pool) so multi-megabyte figure-heavy PDFs are not duplicated
+     across processes on open and every annotation edit.
+   - Filter `/Highlight` and `/InkHighlight` annotations inside the render
+     worker's PDFium pass before `page.render()` so toggling **Show highlights**
+     and editing while highlights are hidden never triggers full-PDF `pypdf`
+     `without_highlights()` rewrites on the UI thread.
+2. **PDFium-unified bibliography & layout extraction:**
+   - Replace the initial `pypdf` page-text pass in `references._analyze_pdf()`
+     with `pypdfium2` text/coordinate extraction so PDFs are opened once instead
+     of twice during analysis, lowering peak RSS on vector-heavy pages and
+     enabling position-ordered two-column reading (addressing interleaved column
+     order in scanned layouts).
+   - Expand deterministic citation coverage for superscript/`(n)` numeric styles
+     and explicit 3+-author inline forms (`Author1, Author2, & Author3 Year`).
+3. **Sidecar searchable OCR text layer & OCR cache bounds:**
+   - Cache per-page Tesseract TSV word boxes in `cache/ocr/` keyed by original
+     `sha256` on demand, letting `PdfDocument.words()` and worker `search_page()`
+     fall back to the sidecar cache to unlock `Ctrl+F`, text copy, line-aligned
+     highlights, and phrase comments on scanned PDFs without modifying originals.
+   - Add an LRU/disk-size bound on `cache/ocr/` so repeated OCR passes stay
+     bounded on disk.
+4. **Catalog scaling, explicit snapshot compaction, session restore & BibTeX:**
+   - Add SQLite FTS5 indexing and lightweight column projections for
+     `Library.list_documents()` so libraries with thousands of papers filter
+     without parsing every `extracted` JSON blob in Python.
+   - Offer an explicit library maintenance action to compact superseded
+     `working/<id>-<rev>.pdf` revisions while preserving the no-auto-delete rule
+     during normal Save.
+   - Add opt-in open-tab/split-view session restoration (preserving default
+     launch-to-Library behavior), BibTeX citation export from verified work
+     metadata, and Windows ACL/DPAPI hardening for API keys in `settings.json`.

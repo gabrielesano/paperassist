@@ -6,8 +6,10 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current release is **0.3.1**, which adds the Pan tool and includes fixes
-for cross-platform verification. See the [release notes](../docs/releases/0.3.1.md).
+The current release is **0.3.2**, which adds async worker search, reading
+marks, Copy with source, Markdown note export, library removal, `arXiv`/`bibcode`
+identities, and batch manual-download matching. See the
+[release notes](../docs/releases/0.3.2.md).
 The build commands below produce the current source version. See
 [0.3.0 release acceptance](../docs/development/release-0.3.0.md)
 for the previous release and

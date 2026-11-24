@@ -18,6 +18,8 @@ class FindBar(QWidget):
         self.field = QLineEdit(placeholderText="Find in document", clearButtonEnabled=True)
         self.field.setAccessibleName("Find in document")
         self.status = QLabel(objectName="muted-note")
+        view.search_updated.connect(self.status.setText)
+        self.field.textChanged.connect(self._clear_search)
         previous = QToolButton(toolTip="Previous match (Shift+Enter)", accessibleName="Previous match")
         previous.setIcon(icon("up", INK, 15))
         following = QToolButton(toolTip="Next match (Enter)", accessibleName="Next match")
@@ -43,11 +45,13 @@ class FindBar(QWidget):
     def _run(self, direction):
         if self.field.text() != self._last:
             self._last = self.field.text()
-            count = self.view.find(self._last, direction)
+            self.view.find(self._last, direction)
         else:
             self.view.step_hit(direction)
-            count = len(self.view.hits)
-        self.status.setText(f"{self.view.hit + 1} / {count}" if count else "No matches")
+
+    def _clear_search(self):
+        self._last = None
+        self.view.find("")
 
     def open(self):
         self.show()
@@ -56,10 +60,8 @@ class FindBar(QWidget):
 
     def close_bar(self):
         self.hide()
-        self.view.find("")
+        self._clear_search()
         self.view.setFocus()
-        self._last = None
-        self.status.clear()
 
 
 class Pane(QFrame):

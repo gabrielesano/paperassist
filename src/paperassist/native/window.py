@@ -197,6 +197,8 @@ class MainWindow(QMainWindow):
 
         # Keep secondary navigation shortcuts active and listed in Help without cluttering the bar.
         for text, keys, slot in (
+            ("Set reading mark", ["Ctrl+Shift+J"], lambda: self._on_pane(lambda p: p.view.set_reading_mark())),
+            ("Return to reading mark", ["Ctrl+J"], lambda: self._on_pane(lambda p: p.view.return_to_mark())),
             ("Back", ["Alt+Left"], lambda: self._on_pane(lambda p: p.view.go_back())),
             ("Quick view", ["Ctrl+E"], self.quick_dialog),
             ("Close tab", ["Ctrl+W"], lambda: self.close_tab(self.tabs.currentIndex())),
@@ -394,6 +396,7 @@ class MainWindow(QMainWindow):
     def _new_pane(self, source):
         pane = Pane(source, self.client)
         pane.view.highlighting = self.highlight_action.isChecked()
+        pane.view.message.connect(lambda text: self.statusBar().showMessage(text, 4500))
         pane.view.edited.connect(self.refresh)
         pane.view.moved.connect(self._on_view_moved)
         if self.workspace and source.document_id is not None:
@@ -673,6 +676,34 @@ class MainWindow(QMainWindow):
         if pane.modified and not self._save_pane(pane):
             return False
         return not self.comments.has_draft(pane) or self.comments.save_draft(pane)
+
+    def close_documents(self, document_ids):
+        """Close any open tabs or quick views showing these document IDs before deleting them."""
+        targets = set(document_ids)
+        if not targets:
+            return
+        closed = []
+        for i in range(self.tabs.count() - 1, -1, -1):
+            tab = self.tabs.widget(i)
+            if tab.main.view.doc.source.document_id in targets:
+                panes = tab.panes()
+                for pane in panes:
+                    if pane.view.comment_draft is not None:
+                        self.comments.discard_draft(pane)
+                self.tabs.removeTab(i)
+                for pane in panes:
+                    pane.release()
+                closed.extend(panes)
+                tab.deleteLater()
+            elif tab.quick and tab.quick.view.doc.source.document_id in targets:
+                quick = tab.quick
+                if quick.view.comment_draft is not None:
+                    self.comments.discard_draft(quick)
+                tab.close_quick()
+                closed.append(quick)
+        if closed:
+            self._evict_closed(closed)
+            self.refresh()
 
     def close_tab(self, index):
         tab = self.tabs.widget(index)

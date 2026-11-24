@@ -36,6 +36,24 @@ class QuickViewTests(LibraryWindowCase):
             self.assertEqual((first.quick.key, second.quick.key), (f"library:{self.docs[2]['id']}", f"library:{self.docs[0]['id']}"))
             self.assertEqual([call.args[0] for call in proposed.call_args_list], [self.docs[0]["id"], self.docs[1]["id"]])
 
+    def test_whole_document_comment_draft_waits_for_explicit_comment_save(self):
+        window = self.window()
+        pane = self.open_document(window, self.docs[2]).main
+        view = pane.view
+        window.comments.compose()
+        with patch.object(view.doc, "page_selection", wraps=view.doc.page_selection) as read:
+            view.select_all()
+            read.assert_not_called()
+        # The chosen anchor survives clearing the selection before saving the comment.
+        view._clear_selection()
+        view.comment_draft["text"] = "Entire paper"
+        self.assertTrue(window.comments.save_draft(pane))
+        note = self.workspace.library.get_notes(self.docs[2]["id"])[-1]
+        self.assertEqual([p["page"] for p in note["anchor"]["pages"]], list(range(1, len(view.doc) + 1)))
+        self.assertNotIn("all_text", note)
+        self.assertIn("Page 5.", note["quote"])
+        self.assertFalse(view.doc.modified)
+
     def test_side_by_side_a_quick_view_fits_its_half_until_the_user_zooms(self):
         self.workspace.save_view(self.docs[1]["id"], {"page": 2, "scale": "1.5"})
         window = self.window()

@@ -15,8 +15,9 @@ from support import QtTestCase, needs_qt, pdf_available
 
 if pdf_available:
     from PySide6.QtCore import QObject, Qt, Signal
+    from PySide6.QtGui import QGuiApplication
     from PySide6.QtTest import QTest
-    from paperassist.native.comments import NotesModel, capture_anchor, line_bands, note_color, note_rects, quote
+    from paperassist.native.comments import CommentsPanel, NotesModel, capture_anchor, format_notes_markdown, line_bands, note_color, note_rects, quote
     from paperassist.native.document import PdfDocument
     from paperassist.native.engine import Pdf, Rect
     from paperassist.native.source import LibrarySource
@@ -196,10 +197,9 @@ class CommentsTests(QtTestCase):
             try:
                 rect = pdf.frame(0).rect(50, 530, 300, 550)
                 class Selection:
-                    selection_lines = [(0, rect, "Synthetic phrase")]
+                    def selected_lines(self):
+                        return [(0, rect, "Synthetic phrase")]
                     doc = type("Document", (), {"pdf": pdf})()
-                    def selected_text(self):
-                        return "Synthetic phrase"
                 anchor = capture_anchor(Selection())
                 values = anchor["anchor"]["pages"][0]["rects"][0]
                 for actual, expected in zip(values, (50, 530, 300, 550)):
@@ -313,6 +313,47 @@ class CommentsTests(QtTestCase):
             self.assertEqual(build_rows.call_count, 3)
             panel.refresh(other)
             self.assertEqual(build_rows.call_count, 3)
+
+    def test_copy_notes_formats_markdown_and_follows_panel_state(self):
+        from types import SimpleNamespace
+        from PySide6.QtWidgets import QMainWindow
+
+        host = QMainWindow()
+        self.addCleanup(host.deleteLater)
+        controller = SimpleNamespace(
+            compose=lambda: None,
+            save_draft=lambda p: None,
+            discard_draft=lambda p: None,
+            draft_changed=SimpleNamespace(emit=lambda: None),
+            window=host,
+        )
+        panel = CommentsPanel(controller)
+        host.setCentralWidget(panel)
+        host.show()
+
+        panel.refresh(self.view)
+        self.assertTrue(panel.copy_notes.isVisibleTo(host))
+        self.assertTrue(panel.copy_notes.isEnabled())
+        panel.copy_notes.click()
+        copied = QGuiApplication.clipboard().text()
+        self.assertIn(f"# {self.document['title']}", copied)
+        self.assertIn(f"## Page {self.notes[0]['page']}", copied)
+        self.assertIn("> A phrase comment anchors this synthetic sentence.\n> Second line of the comment anchor.", copied)
+        self.assertIn(self.notes[0]["text"], copied)
+        self.assertIn("Copied 1 comment as Markdown.", host.statusBar().currentMessage())
+        self.assertFalse(self.view.doc.modified)
+
+        # Hidden when drafting or when no notes exist.
+        self.view.comment_draft = {"page": 1, "text": "Draft"}
+        panel.refresh(self.view)
+        self.assertFalse(panel.copy_notes.isVisibleTo(host))
+        self.view.comment_draft = None
+        self.model.update(self.model.notes[0])
+        panel.refresh(self.view)
+        self.assertFalse(panel.copy_notes.isVisibleTo(host))
+
+        md = format_notes_markdown("Paper", [{"page": 3, "quote": "a\nb", "text": "body"}], "Author, 2024")
+        self.assertEqual(md, "# Paper\n\n*Author, 2024*\n\n## Page 3\n\n> a\n> b\n\nbody\n")
 
 
 if __name__ == "__main__":

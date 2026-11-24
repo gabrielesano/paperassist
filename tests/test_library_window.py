@@ -207,11 +207,26 @@ class LibraryDialogTests(LibraryWindowCase):
         super().setUp()
         self.workspace.library.update_metadata(self.docs[1]["id"], {"title": "Loops and nanoflares", "authors": "Ada Lovelace", "year": 2019})
         self.dialog = LibraryDialog(self.workspace)
+        self.dialog.show()
         self.addCleanup(self.dialog.deleteLater)
         self.addCleanup(self.dialog.typing.stop)  # a pending search must not run once the library is gone
 
     def titles(self):
         return [self.dialog.table.topLevelItem(i).text(0) for i in range(self.dialog.table.topLevelItemCount())]
+
+    def test_each_catalog_open_reads_the_list_once_and_sees_external_changes(self):
+        library = self.workspace.library
+        with patch.object(library, "list_documents", wraps=library.list_documents) as query:
+            dialog = LibraryDialog(self.workspace)
+            self.addCleanup(dialog.deleteLater)
+            dialog.show()
+            self.assertEqual(query.call_count, 1)
+            dialog.hide()
+            library.update_metadata(self.docs[0]["id"], {"title": "Changed while hidden"})
+            dialog.show()
+            self.assertEqual(query.call_count, 2)
+            self.assertTrue(dialog.table.findItems("Changed while hidden", Qt.MatchExactly))
+            dialog.close()
 
     def test_search_covers_title_authors_year_and_doi_and_flags_papers_to_review(self):
         self.assertEqual(len(self.titles()), 3)
@@ -399,6 +414,7 @@ class OcrControlTests(LibraryWindowCase):
     def setUp(self):
         super().setUp()
         self.dialog = LibraryDialog(self.workspace)
+        self.dialog.show()
         self.addCleanup(self.dialog.deleteLater)
         self.addCleanup(self.dialog.typing.stop)
         self.set_statuses("needs_review", "verified", "incomplete")
@@ -593,6 +609,37 @@ class PositionTests(LibraryWindowCase):
         first = self.open_document(window, self.docs[0]).main.view
         second = self.open_document(window, self.docs[1]).main.view
         self.pump(lambda: current_page(first) == 1 and current_page(second) == 2)
+
+    def test_midpage_offset_survives_close_and_a_different_window_width(self):
+        document = self.docs[2]
+        window = self.make_window()
+        view = self.open_document(window, document).main.view
+        self.pump(lambda: view.has_page(0))
+        view.restore_position(1, 0.37)
+        window.close_tab(0)
+        saved = self.workspace.get_view(document["id"])
+        self.assertAlmostEqual(saved["offset"], 0.37, delta=0.002)
+        window.resize(1200, 700)
+        restored = self.open_document(window, document).main.view
+        self.pump(lambda: restored.has_page(1))
+        page, fraction = restored.reading_position()
+        self.assertEqual(page, 1)
+        self.assertAlmostEqual(fraction, saved["offset"], delta=0.002)
+
+    def test_copy_with_source_uses_the_selected_pdf_and_latest_catalog_details(self):
+        document = self.docs[2]
+        view = self.open_document(self.make_window(), document).main.view
+        self.workspace.library.update_metadata(document["id"], {
+            "title": "A corrected title", "authors": "M. Smith", "year": 2020, "doi": "10.1234/example"})
+        self.workspace.library.set_label(document["id"], "Session shorthand")
+        view.selection_lines = view.doc.selection_lines((0, 9), (1, 3))
+        action = next(a for a in view._build_context_menu().actions() if a.text() == "Copy with source")
+        action.trigger()
+        self.assertEqual(self.app.clipboard().text(), view.selected_text() +
+                         "\n\nM. Smith, 2020, A corrected title, PDF pp. 1–2, https://doi.org/10.1234/example")
+        view.copy()
+        self.assertEqual(self.app.clipboard().text(), view.selected_text())
+        self.assertFalse(view.doc.modified)
 
     def test_loose_files_have_no_position_store(self):
         window = self.make_window(workspace=False)
@@ -938,6 +985,48 @@ class ReferenceCardTests(LibraryWindowCase):
         self.panel.payload_status = "complete"
         self.panel._fill()
         self.assertFalse(self.panel.analysis_note.isVisibleTo(self.window))
+
+    def test_remove_selected_closes_open_views_deletes_files_and_refreshes_references(self):
+        refs = references.get(self.workspace.library, self.docs[0]["id"])["references"]
+        references.link(self.workspace.library, self.docs[0]["id"], refs[0]["id"], self.docs[1]["id"])
+        self.panel.reload(self.docs[0]["id"])
+        self.pump(lambda: self.panel.list.count() == 2 and not self.panel.analyzing)
+
+        # Open target paper in a dirty tab and in Quick view to verify clean teardown without PositionKeeper errors.
+        target_id = self.docs[1]["id"]
+        target_tab = self.open_document(self.window, self.docs[1])
+        target_tab.main.view.doc.add_highlight(0, [Rect(40, 60, 120, 74)])
+        target_tab.main.view.edited.emit()
+        self.window.tabs.setCurrentIndex(0)
+        self.window.open_library_document_in_quick_view(target_id)
+        self.pump(lambda: self.window.tab().quick is not None)
+        target_original = self.workspace.library.get_path(target_id, annotated=False)
+
+        self.window.show_library()
+        dialog = self.window.library_dialog
+        item = next(dialog.table.topLevelItem(i) for i in range(dialog.table.topLevelItemCount())
+                    if dialog.table.topLevelItem(i).data(0, Qt.UserRole) == target_id)
+        dialog.table.clearSelection()
+        dialog.table.setCurrentItem(item)
+        item.setSelected(True)
+
+        with patch.object(dialog, "confirm_remove", return_value=False):
+            QTest.keyClick(dialog.table, Qt.Key_Delete)
+        self.assertTrue(target_original.is_file())
+        self.assertEqual(self.window.tabs.count(), 2)
+
+        with patch.object(dialog, "confirm_remove", return_value=True):
+            QTest.keyClick(dialog.table, Qt.Key_Delete)
+        self.pump(lambda: not self.panel.analyzing)
+        self.assertFalse(target_original.exists())
+        self.assertEqual(self.window.tabs.count(), 1)
+        self.assertIsNone(self.window.tab().quick)
+        self.assertEqual(dialog.table.topLevelItemCount(), len(self.docs) - 1)
+        self.assertIn("Removed 1 paper", dialog.message.text())
+        self.assertNotIn("Could not save the reading position", self.window.statusBar().currentMessage())
+        updated_ref = next(r for r in self.panel.refs if r["id"] == refs[0]["id"])
+        self.assertIsNone(updated_ref.get("local_document_id"))
+        self.assertTrue(updated_ref.get("local_missing"))
 
 
 if __name__ == "__main__":

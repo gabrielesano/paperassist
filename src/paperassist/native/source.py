@@ -17,6 +17,8 @@ class DocumentSource(Protocol):
     path: Path             # location of the saved PDF
     document_id: int | None
 
+    def citation(self, pages: str) -> str: ...
+
     def open(self) -> Pdf: ...
 
     def save(self, pdf: Pdf) -> None:
@@ -29,6 +31,9 @@ class FileSource:
     def __init__(self, path):
         self.path = Path(path).resolve()
         self.key, self.title = str(self.path), self.path.name
+
+    def citation(self, pages):
+        return f"{self.path.name}, {pages}"
 
     def open(self):
         return Pdf(self.path.read_bytes())
@@ -57,6 +62,12 @@ class LibrarySource:
         self.revision = document["revision"]
         # The document, not a revision, is the identity: every view of it shares one save authority.
         self.key = f"library:{self.document_id}"
+
+    def citation(self, pages):
+        doc = self.library.get_document(self.document_id)
+        fields = (doc["authors"], doc["year"], doc["title"] or doc["filename"], pages,
+                  f"https://doi.org/{doc['doi']}" if doc["doi"] else None)
+        return ", ".join(str(field) for field in fields if field)
 
     @property
     def path(self):

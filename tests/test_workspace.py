@@ -241,7 +241,8 @@ class WorkspaceTests(unittest.TestCase):
         self.workspace.save_view(self.doc['id'], view)
         for bad in (None, [], {}, {'page': True, 'scale': 1}, {'page': 0, 'scale': 1},
                     {'page': 2, 'scale': 1}, {'page': 1, 'scale': float('nan')},
-                    {'page': 1, 'scale': True}, {'page': 1, 'scale': 'broken'}):
+                    {'page': 1, 'scale': True}, {'page': 1, 'scale': 'broken'},
+                    {**view, 'offset': True}, {**view, 'offset': float('nan')}, {**view, 'offset': 1.5}):
             with self.assertRaises(ValueError):
                 self.workspace.save_view(self.doc['id'], bad)
         self.assertEqual(self.workspace.get_view(self.doc['id']), view)

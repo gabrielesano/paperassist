@@ -107,6 +107,7 @@ class WindowTests(QtTestCase):
         view.zoom_by(1.25)
         first.main.find_bar.field.setText("nanoflares")
         first.main.find_bar._run(1)
+        self.pump(lambda: not view.search_pending)
         view.goto(2)
         self.pump()
         position, zoom = view.verticalScrollBar().value(), view.zoom
@@ -188,14 +189,19 @@ class WindowTests(QtTestCase):
         writer.write(path)
         pane = self.window.open_source(FileSource(path)).main
         for query in ("cafe", "CAFÉ", "CaFé"):
-            self.assertEqual(pane.view.find(query), 3, query)
+            pane.view.find(query)
+            self.pump(lambda: not pane.view.search_pending)
+            self.assertEqual(len(pane.view.hits), 3, query)
         pane.find_bar.open()
         pane.find_bar.field.setText("cafe")
         QTest.keyClick(pane.find_bar.field, Qt.Key_Return)
+        self.pump(lambda: not pane.view.search_pending)
         self.assertEqual(pane.view.hit, 0)
         QTest.keyClick(pane.find_bar.field, Qt.Key_Return)
+        self.pump(lambda: not pane.view.search_pending)
         self.assertEqual(pane.view.hit, 1)
         QTest.keyClick(pane.find_bar.field, Qt.Key_Return, Qt.ShiftModifier)
+        self.pump(lambda: not pane.view.search_pending)
         self.assertEqual(pane.view.hit, 0)
 
     def test_highlight_visibility_changes_rendering_without_editing_or_saving(self):
@@ -273,12 +279,61 @@ class WindowTests(QtTestCase):
         pane.find_bar.open()
         pane.find_bar.field.setText("nanoflares")
         QTest.keyClick(pane.find_bar.field, Qt.Key_Return)
+        self.pump(lambda: not pane.view.search_pending)
         self.assertEqual((len(pane.view.hits), pane.find_bar.status.text()), (32, "1 / 32"))
         QTest.keyClick(pane.find_bar.field, Qt.Key_Return)
+        self.pump(lambda: not pane.view.search_pending)
         self.assertEqual(pane.find_bar.status.text(), "2 / 32")
         QTest.keyClick(pane.find_bar.field, Qt.Key_Escape)
         self.assertTrue(pane.find_bar.isHidden())
         self.assertEqual(pane.view.hits, [])
+
+    def test_search_streams_from_current_page_and_drops_replaced_and_closed_results(self):
+        pane = self.open("replace-search", pages=16).main
+        view, bar = pane.view, pane.find_bar
+        view.goto(5)
+        bar.open()
+        first_pages = []
+        view.search_updated.connect(lambda _: first_pages.append(view.hits[view.hit][0])
+                                    if view.hits and view.search_pending else None)
+        with patch.object(view.doc, "search", side_effect=AssertionError("Search ran on GUI thread")):
+            bar.field.setText("nanoflares")
+            bar._run(1)
+            self.assertTrue(view.search_pending)
+            self.pump(lambda: bool(first_pages))
+            self.assertEqual(first_pages[0], 5)
+            bar.field.setText("Journal")
+            self.assertFalse(view.search_pending)
+            bar._run(1)
+            self.pump(lambda: not view.search_pending)
+            self.assertEqual([p for p, _ in view.hits], [15])
+            bar.field.setText("nanoflares")
+            bar._run(1)
+            bar.close_bar()
+            self.pump()
+            self.assertEqual((view.hits, bar.status.text()), ([], ""))
+
+    def test_reading_marks_belong_to_the_pane_and_survive_zoom(self):
+        tab = self.open("mark")
+        quick = self.window.open_quick(FileSource(self.pdf("other-mark")))
+        view = quick.view
+        view.zoom_by(2)
+        view.restore_position(1, 0.35)
+        view.horizontalScrollBar().setValue(view.horizontalScrollBar().maximum() // 2)
+        self.window.activateWindow()
+        self.pump()
+        view.setFocus()
+        QTest.keyClick(view, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier)
+        self.assertIsNotNone(view.reading_mark)
+        self.assertIsNone(tab.main.view.reading_mark)
+        view.goto(3)
+        view.zoom_by(1.15)
+        QTest.keyClick(view, Qt.Key_J, Qt.ControlModifier)
+        page, offset = view.reading_position()
+        self.assertEqual(page, 1)
+        self.assertAlmostEqual(offset, 0.35, delta=0.005)
+        self.assertAlmostEqual(view.horizontalScrollBar().value() / view.horizontalScrollBar().maximum(), 0.5, delta=0.01)
+        self.assertFalse(view.doc.modified)
 
     def test_search_starts_from_the_current_page_in_both_directions_and_wraps(self):
         pane = self.open("search-pos").main
@@ -291,18 +346,23 @@ class WindowTests(QtTestCase):
         bar.open()
         bar.field.setText("Page")
         QTest.keyClick(bar.field, Qt.Key_Return)
+        self.pump(lambda: not view.search_pending)
         self.assertEqual((len(view.hits), view.hit, view.hits[view.hit][0]), (4, 2, 2))
         self.assertEqual(bar.status.text(), "3 / 4")
         QTest.keyClick(bar.field, Qt.Key_Return)
+        self.pump(lambda: not view.search_pending)
         self.assertEqual((view.hit, view.hits[view.hit][0], bar.status.text()), (3, 3, "4 / 4"))
         # Wraps around to document start
         QTest.keyClick(bar.field, Qt.Key_Return)
+        self.pump(lambda: not view.search_pending)
         self.assertEqual((view.hit, view.hits[view.hit][0], bar.status.text()), (0, 0, "1 / 4"))
 
         # Direct view.find forward starts from the current page
         view.goto(2)
         self.pump(lambda: current_page(view) == 2)
-        self.assertEqual(view.find("nanoflares"), 32)
+        view.find("nanoflares")
+        self.pump(lambda: not view.search_pending)
+        self.assertEqual(len(view.hits), 32)
         self.assertEqual((view.hit, view.hits[view.hit][0]), (16, 2))
 
         # Forward search wraps when all matches precede the current page
@@ -310,6 +370,7 @@ class WindowTests(QtTestCase):
         self.pump(lambda: current_page(view) == 2)
         bar.field.setText("Page 1")
         QTest.keyClick(bar.field, Qt.Key_Return)
+        self.pump(lambda: not view.search_pending)
         self.assertEqual((view.hit, view.hits[view.hit][0], bar.status.text()), (0, 0, "1 / 1"))
 
         # Backward search (Shift+Enter / find -1) starts on/before the current page
@@ -317,14 +378,18 @@ class WindowTests(QtTestCase):
         self.pump(lambda: current_page(view) == 2)
         bar.field.setText("Page")
         QTest.keyClick(bar.field, Qt.Key_Return, Qt.ShiftModifier)
+        self.pump(lambda: not view.search_pending)
         self.assertEqual((view.hit, view.hits[view.hit][0], bar.status.text()), (2, 2, "3 / 4"))
         QTest.keyClick(bar.field, Qt.Key_Return, Qt.ShiftModifier)
+        self.pump(lambda: not view.search_pending)
         self.assertEqual((view.hit, view.hits[view.hit][0], bar.status.text()), (1, 1, "2 / 4"))
 
         # Direct view.find backwards picks the last match on/before current page
         view.goto(2)
         self.pump(lambda: current_page(view) == 2)
-        self.assertEqual(view.find("nanoflares", -1), 32)
+        view.find("nanoflares", -1)
+        self.pump(lambda: not view.search_pending)
+        self.assertEqual(len(view.hits), 32)
         self.assertEqual((view.hit, view.hits[view.hit][0]), (23, 2))
 
         # Backward search wraps when all matches succeed the current page
@@ -332,6 +397,7 @@ class WindowTests(QtTestCase):
         self.pump(lambda: current_page(view) == 1)
         bar.field.setText("Journal")
         QTest.keyClick(bar.field, Qt.Key_Return, Qt.ShiftModifier)
+        self.pump(lambda: not view.search_pending)
         self.assertEqual((view.hit, view.hits[view.hit][0], bar.status.text()), (0, 3, "1 / 1"))
 
     def test_a_citation_link_navigates_and_back_returns(self):

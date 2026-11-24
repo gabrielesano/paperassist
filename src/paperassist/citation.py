@@ -203,6 +203,21 @@ def squash(text):
     return re.sub(r'[^a-z0-9]', '', fold(text))
 
 
+SPACING_ACCENT = re.compile(r'\s*([´¨˜ˆˇ˚¸])\s*([A-Za-zı])')
+COMBINING = {'´': '\u0301', '¨': '\u0308', '˜': '\u0303', 'ˆ': '\u0302', 'ˇ': '\u030c', '˚': '\u030a', '¸': '\u0327'}
+
+
+def clean_text(text):
+    """Repair detached accents ("M¨ uller"), ligatures and line-end hyphenated names."""
+    joined = SPACING_ACCENT.sub(lambda m: m.group(2).replace('ı', 'i') + COMBINING[m.group(1)], text or '')
+    return re.sub(r'(?<=[^\W\d_])-\n(?=[a-z])', '', unicodedata.normalize('NFKC', joined))
+
+
+def reference_key(text):
+    """Normalized alphanumeric key for matching bibliography entries across analyses."""
+    return ''.join(c for c in clean_text(text).casefold() if c.isalnum())
+
+
 def has_surname(text, surname):
     """Whether `surname` appears as a whole word in `text` (case- and accent-insensitive)."""
     target = fold(surname)

@@ -229,31 +229,43 @@ class PdfDocument:
         band by geometry: same block, mostly overlapping vertically, further to the right.
         """
         start, end = sorted([start, end])
-        bands = []
+        lines = []
         for page in range(start[0], end[0] + 1):
+            first = start[1] if page == start[0] else 0
+            last = end[1] if page == end[0] else None
+            lines.extend(self.page_selection(page, first, last))
+        return lines
+
+    def page_selection(self, page, first=0, last=None, *, transient=False):
+        # Whole-document operations can consume a page without retaining its word geometry.
+        if transient and page not in self._words:
+            words = self.pdf.words(page)
+            ignored = detect_margin_line_numbers(words, self.sizes[page][0])
+        else:
             words = self.words(page)
             ignored = self._line_number_indices(page)
-            first = start[1] if page == start[0] else 0
-            last = end[1] if page == end[0] else len(words) - 1
-            for idx in range(first, last + 1):
-                if idx in ignored:
+        if last is None:
+            last = len(words) - 1
+        bands = []
+        for idx in range(first, last + 1):
+            if idx in ignored:
+                continue
+            w = words[idx]
+            rect = Rect(*w[:4])
+            if bands and bands[-1][0] == w[5]:
+                key, band, texts = bands[-1]
+                across_y = min(band.y1, rect.y1) - max(band.y0, rect.y0)
+                across_x = min(band.x1, rect.x1) - max(band.x0, rect.x0)
+                # A gap wider than two line heights is a column gutter, not a word space.
+                gap_x = max(rect.x0 - band.x1, band.x0 - rect.x1)
+                gap_y = max(rect.y0 - band.y1, band.y0 - rect.y1)
+                horizontal = across_y > 0.5 * min(band.height, rect.height) and -2 <= gap_x <= 2 * max(band.height, rect.height)
+                vertical = across_x > 0.5 * min(band.width, rect.width) and -2 <= gap_y <= 2 * max(band.width, rect.width)
+                if horizontal or vertical:
+                    bands[-1] = (key, band.union(rect), texts + [w[4]])
                     continue
-                w = words[idx]
-                rect = Rect(*w[:4])
-                if bands and bands[-1][0] == (page, w[5]):
-                    key, band, texts = bands[-1]
-                    across_y = min(band.y1, rect.y1) - max(band.y0, rect.y0)
-                    across_x = min(band.x1, rect.x1) - max(band.x0, rect.x0)
-                    # A gap wider than two line heights is a column gutter, not a word space.
-                    gap_x = max(rect.x0 - band.x1, band.x0 - rect.x1)
-                    gap_y = max(rect.y0 - band.y1, band.y0 - rect.y1)
-                    horizontal = across_y > 0.5 * min(band.height, rect.height) and -2 <= gap_x <= 2 * max(band.height, rect.height)
-                    vertical = across_x > 0.5 * min(band.width, rect.width) and -2 <= gap_y <= 2 * max(band.width, rect.width)
-                    if horizontal or vertical:
-                        bands[-1] = (key, band.union(rect), texts + [w[4]])
-                        continue
-                bands.append(((page, w[5]), rect, [w[4]]))
-        return [(key[0], rect, " ".join(texts)) for key, rect, texts in bands]
+            bands.append((w[5], rect, [w[4]]))
+        return [(page, rect, " ".join(texts)) for _, rect, texts in bands]
 
     def search(self, text):
         return self.pdf.search(text)

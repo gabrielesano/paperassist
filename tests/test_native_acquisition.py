@@ -11,8 +11,9 @@ if pdf_available and PySide6:
     from PySide6.QtGui import QKeySequence
     from PySide6.QtWidgets import QMainWindow, QPushButton
     from paperassist.native.acquisition import (AcquisitionController, AcquisitionDialog, SelectionStore,
-                                               current_retrieval, provider_summary, proxy_url,
+                                               blocked_urls, current_retrieval, provider_summary, proxy_url,
                                                reference_status, retrieval_details, search_links, web_url)
+    from paperassist.native.references_panel import ReferencesPanel
     from paperassist.settings import Settings
 
 
@@ -341,3 +342,72 @@ class AcquisitionWidgetTests(QtTestCase):
         self.controller.jobs["repair-1"]._poll()
         self.assertIn("2 results", self.controller.status.text())
         self.assertEqual(changed, [11])
+
+    def test_blocked_urls_filters_valid_unresolved_blocked_references_only(self):
+        refs = [
+            {"id": "1", "retrieval": {"version": 2, "status": "blocked", "pdf_url": "https://pub.example/1.pdf"}},
+            {"id": "2", "retrieval": {"version": 2, "status": "blocked", "pdf_url": "https://pub.example/1.pdf"}},
+            {"id": "3", "local_document_id": 5, "retrieval": {"version": 2, "status": "blocked", "pdf_url": "https://pub.example/2.pdf"}},
+            {"id": "4", "legacy": True, "retrieval": {"version": 2, "status": "blocked", "pdf_url": "https://pub.example/3.pdf"}},
+            {"id": "5", "retrieval": {"version": 2, "status": "blocked", "pdf_url": "file:///tmp/evil.pdf"}},
+            {"id": "6", "retrieval": {"version": 2, "status": "not_found", "pdf_url": "https://pub.example/4.pdf"}},
+        ]
+        self.assertEqual(blocked_urls(refs), ["https://pub.example/1.pdf"])
+
+    def test_open_blocked_opens_browser_only_on_explicit_click_and_batch_folder_checks_inbox(self):
+        refs = [
+            {"id": "1", "title": "Blocked one", "retrieval": {"version": 2, "status": "blocked", "pdf_url": "https://pub.example/1.pdf"}},
+            {"id": "2", "title": "Blocked two", "retrieval": {"version": 2, "status": "blocked", "pdf_url": "https://pub.example/2.pdf"}},
+            {"id": "3", "title": "In library", "local_document_id": 7},
+        ]
+        self.controller.set_reference_data(11, refs)
+        self.controller.offer(11)
+        dialog = self.controller.dialogs[11]
+        self.assertTrue(dialog.open_blocked_button.isVisible())
+        self.assertEqual(dialog.open_blocked_button.text(), "Open 2 blocked in browser")
+
+        with patch("paperassist.native.acquisition.QDesktopServices.openUrl") as open_url:
+            open_url.assert_not_called()
+            dialog.open_blocked_button.click()
+            self.assertEqual([call.args[0].toString() for call in open_url.call_args_list],
+                             ["https://pub.example/1.pdf", "https://pub.example/2.pdf"])
+
+        requested = []
+        self.controller.preferences_requested.connect(requested.append)
+        dialog.check_folder_button.click()
+        self.assertEqual(requested, ["inbox"])
+        self.assertTrue(dialog.isVisible())
+
+        self.workspace.get_settings.return_value = Settings({"inbox": str(self.dir)})
+        self.workspace.check_folder_batch.return_value = {"id": "batch-1", "status": "pending"}
+        changed = []
+        self.controller.changed.connect(changed.append)
+        dialog.check_folder_button.click()
+        self.workspace.check_folder_batch.assert_called_once_with(11, None)
+        self.workspace.job_status.return_value = {
+            "id": "batch-1", "status": "completed", "result": {"status": "linked", "summary": "Linked 2 PDFs from your folder."},
+        }
+        self.controller.jobs["batch-1"]._poll()
+        self.assertEqual(self.controller.status.text(), "Linked 2 PDFs from your folder.")
+        self.assertEqual(changed, [11])
+
+    def test_references_panel_actions_show_open_blocked_only_when_blocked_exist(self):
+        panel = ReferencesPanel(self.workspace)
+        panel.set_acquisition(self.controller)
+        panel.document_id = 11
+        panel.refs = [{"id": "1", "title": "Missing paper"}]
+        panel._fill()
+        self.assertFalse(panel.open_blocked.isVisibleTo(panel))
+        self.assertTrue(panel.check_folder.isVisibleTo(panel))
+
+        panel.refs = [{"id": "1", "title": "Blocked paper",
+                       "retrieval": {"version": 2, "status": "blocked", "pdf_url": "https://pub.example/1.pdf"}}]
+        panel._fill()
+        self.assertTrue(panel.open_blocked.isVisibleTo(panel))
+        self.assertEqual(panel.open_blocked.text(), "Open blocked (1)")
+        self.controller.set_reference_data(11, panel.refs)
+        with patch("paperassist.native.acquisition.QDesktopServices.openUrl") as open_url:
+            open_url.assert_not_called()
+            panel.open_blocked.click()
+            self.assertEqual(open_url.call_count, 1)
+        panel.deleteLater()

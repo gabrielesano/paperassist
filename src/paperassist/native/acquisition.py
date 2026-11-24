@@ -19,7 +19,8 @@ from .dialogs import PickerDialog, setup_dialog
 from .jobs import JobWatcher
 from .theme import FlowLayout, reference_palette, reference_tone, set_props
 
-PROVIDERS = {**PROVIDER_NAMES, "local": "Local library"}
+PROVIDERS = {**PROVIDER_NAMES, "local": "Local library", "folder": "downloads folder"}
+MAX_BROWSER_TABS = 10
 RESULTS = {"downloaded": "Downloaded", "local": "Already in library", "not_identified": "Not identified",
            "ambiguous": "Several matches", "blocked": "PDF to open in browser", "not_found": "No open-access PDF found",
            "failed": "Search incomplete"}
@@ -65,6 +66,18 @@ def web_url(url):
         return url if parts.scheme in ("http", "https") and parts.hostname else None
     except (TypeError, ValueError):
         return None
+
+
+def blocked_urls(refs):
+    """Deduplicated public web PDF URLs for unresolved, non-legacy blocked references."""
+    urls = []
+    for ref in refs or ():
+        if ref.get("local_document_id") or ref.get("legacy"):
+            continue
+        result = current_retrieval(ref)
+        if result.get("status") == "blocked" and (url := web_url(result.get("pdf_url"))):
+            urls.append(url)
+    return list(dict.fromkeys(urls))
 
 
 def proxy_url(proxy, target):
@@ -179,7 +192,7 @@ class AcquisitionDialog(QDialog):
     def __init__(self, controller, document_id, refs):
         super().__init__(controller.window)
         self.setAttribute(Qt.WA_DeleteOnClose)  # a closed offer would otherwise keep a checkbox per reference alive
-        self.controller, self.document_id, self.boxes, self.rows = controller, document_id, [], {}
+        self.controller, self.document_id, self.refs, self.boxes, self.rows = controller, document_id, list(refs), [], {}
         self.resize(680, 560)
         column, _ = setup_dialog(
             self, "Acquire references",
@@ -211,6 +224,18 @@ class AcquisitionDialog(QDialog):
         self.message = QLabel(wordWrap=True)
         self.message.setProperty("tone", "error")
         column.addWidget(self.message)
+
+        self.manual_bar = QWidget()
+        manual = FlowLayout(self.manual_bar, margin=0, h_spacing=8, v_spacing=6)
+        self.open_blocked_button = QPushButton("Open blocked in browser")
+        self.open_blocked_button.setToolTip("Open blocked open-access PDF links in your browser")
+        self.check_folder_button = QPushButton("Check folder")
+        self.check_folder_button.setToolTip("Verify and link matching PDFs from your manual downloads folder")
+        manual.addWidget(self.open_blocked_button)
+        manual.addWidget(self.check_folder_button)
+        self.open_blocked_button.clicked.connect(lambda: self.controller.open_blocked(self.document_id))
+        self.check_folder_button.clicked.connect(self._check_folder)
+        column.addWidget(self.manual_bar)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
@@ -262,9 +287,15 @@ class AcquisitionDialog(QDialog):
 
     def update_count(self):
         values = self.selected()
+        has_missing = any(box.isEnabled() for box in self.boxes)
+        blocked = blocked_urls(self.refs)
         self.count.setText(f"{len(values)} selected")
         self.selected_button.setEnabled(bool(values))
-        self.all_button.setEnabled(any(box.isEnabled() for box in self.boxes))
+        self.all_button.setEnabled(has_missing)
+        self.check_folder_button.setEnabled(has_missing)
+        self.open_blocked_button.setText(f"Open {len(blocked)} blocked in browser" if blocked else "Open blocked in browser")
+        self.open_blocked_button.setVisible(bool(blocked))
+        self.manual_bar.setVisible(has_missing or bool(blocked))
         return values
 
     def selection_changed(self):
@@ -282,6 +313,7 @@ class AcquisitionDialog(QDialog):
         self.selection_changed()
 
     def update_references(self, refs):
+        self.refs = list(refs)
         selected = set(self.selected())
         while self.entries.count():
             if widget := self.entries.takeAt(0).widget():
@@ -290,6 +322,10 @@ class AcquisitionDialog(QDialog):
         self.boxes, self.rows = [], {}
         self._populate(refs, selected)
         self.selection_changed()
+
+    def _check_folder(self):
+        if self.controller.check_folder_batch(self.document_id):
+            self.close()
 
     def start(self, all_missing):
         ids = [box.property("reference_id") for box in self.boxes if box.isEnabled()] if all_missing else self.selected()
@@ -446,6 +482,38 @@ class AcquisitionController(QObject):
             self._watch(document_id, start(), lambda value: finished(value.get("result") or {}))
         except Exception as error:
             self._say(document_id, str(error))
+
+    def open_blocked(self, document_id):
+        """Open blocked open-access PDF links in the user's browser strictly on explicit click."""
+        urls = blocked_urls(self.data.get(document_id, []))
+        if not urls:
+            self._say(document_id, "No blocked PDF links to open.")
+            return 0
+        batch = urls[:MAX_BROWSER_TABS]
+        for url in batch:
+            QDesktopServices.openUrl(QUrl(url))
+        shown = f"{len(batch)} of {len(urls)}" if len(urls) > len(batch) else str(len(batch))
+        plural = "" if len(batch) == 1 and len(urls) == 1 else "s"
+        self._say(document_id, f"Opened {shown} PDF link{plural} in your browser. Save to your downloads folder, then click Check folder.")
+        return len(batch)
+
+    def check_folder_batch(self, document_id, ids=None):
+        if not self.workspace.get_settings().inbox:
+            self._say(document_id, "No downloads folder is configured. Set it in Preferences.")
+            self.preferences_requested.emit("inbox")
+            return False
+        if self.jobs:
+            self._say(document_id, "Wait for the current reference task to finish.")
+            return False
+        self._say(document_id, "Checking the downloads folder…")
+        self._task(document_id, lambda: self.workspace.check_folder_batch(document_id, ids),
+                   lambda result: self._batch_folder_result(document_id, result))
+        return bool(self.jobs)
+
+    def _batch_folder_result(self, document_id, result):
+        self._say(document_id, result.get("summary") or "Folder check finished.")
+        if result.get("status") == "not_configured":
+            self.preferences_requested.emit("inbox")
 
     def check_folder(self, document_id, ref):
         if not self.workspace.get_settings().inbox:

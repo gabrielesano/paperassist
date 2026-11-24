@@ -7,6 +7,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 import threading
 import unicodedata
@@ -14,7 +15,7 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from .citation import first_surname, normalize_doi, pdf_name
+from .citation import ARXIV_ID, first_surname, normalize_doi, pdf_name, reference_key, strip_arxiv_version
 from .metadata import PARSER_VERSION, extract_metadata, useful
 
 MAX_LABEL = 80
@@ -39,6 +40,40 @@ def safe_filename(name: str) -> str:
 
 
 FIELDS = ("title", "authors", "year", "doi")
+
+
+def sync_manual_links(db, source_id: str, refs: list[dict]) -> None:
+    """Keep the indexed manual-link projection in lockstep with reference_analyses."""
+    source = str(source_id)
+    db.execute("DELETE FROM reference_manual_links WHERE source_id = ?", (source,))
+    rows = []
+    for ref in refs:
+        target = ref.get("manual_target_id") or ref.get("local_document_id")
+        if (ref.get("manual_link") and not ref.get("legacy") and not ref.get("local_invalid")
+                and target and str(target) != source):
+            rows.append((source, reference_key(ref.get("raw", "")), str(target)))
+    if rows:
+        db.executemany("INSERT OR IGNORE INTO reference_manual_links VALUES (?, ?, ?)", rows)
+
+
+def _work_identifiers(doi: str | None, metadata: dict) -> list[tuple[str, str]]:
+    found = []
+    if doi:
+        doi_lower = doi.lower()
+        found.append(("doi", doi_lower))
+        if doi_lower.startswith("10.48550/arxiv."):
+            aid = strip_arxiv_version(doi_lower.removeprefix("10.48550/arxiv."))
+            if ARXIV_ID.fullmatch(aid):
+                found.append(("arxiv", aid))
+    verified = metadata.get("verified") or {}
+    if not ("doi" in metadata.get("manual", []) and not doi):
+        aid = strip_arxiv_version(verified.get("arxiv_id") or "")
+        if aid and ARXIV_ID.fullmatch(aid) and ("arxiv", aid) not in found:
+            found.append(("arxiv", aid))
+        bib = str(verified.get("bibcode") or "").strip().lower()
+        if bib and ("bibcode", bib) not in found:
+            found.append(("bibcode", bib))
+    return found
 
 
 def manual_fields(document) -> list[str]:
@@ -144,6 +179,9 @@ class Library:
         self._conn_lock = threading.Lock()
         self._connections: list[sqlite3.Connection] = []
         with self._connect() as db:
+            had_manual_links = bool(db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reference_manual_links'"
+            ).fetchone())
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS documents (
                     id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE,
@@ -170,6 +208,13 @@ class Library:
                     content TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS reference_analyses (source_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS reference_manual_links (
+                    source_id TEXT NOT NULL,
+                    raw_key TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    PRIMARY KEY (source_id, raw_key, target_id)
+                );
+                CREATE INDEX IF NOT EXISTS reference_manual_links_raw ON reference_manual_links(raw_key);
                 CREATE TABLE IF NOT EXISTS publication_evidence_v4 (sha TEXT PRIMARY KEY, payload TEXT NOT NULL);
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(documents)")}
@@ -180,6 +225,38 @@ class Library:
             if "revision_sha256" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN revision_sha256 TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS documents_stored_name ON documents(stored_name)")
+            if not had_manual_links:
+                for source_id, payload in db.execute("SELECT source_id, payload FROM reference_analyses").fetchall():
+                    try:
+                        refs = json.loads(payload).get("references", [])
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    if isinstance(refs, list):
+                        sync_manual_links(db, source_id, refs)
+                for row in db.execute(
+                        "SELECT id, doi, work_id, extracted FROM documents WHERE metadata_status IN ('verified', 'corrected')"
+                ).fetchall():
+                    try:
+                        metadata = json.loads(row["extracted"])
+                    except (ValueError, TypeError):
+                        metadata = {}
+                    identifiers = _work_identifiers(row["doi"], metadata)
+                    if not identifiers:
+                        continue
+                    work_id = row["work_id"]
+                    if work_id is None:
+                        for scheme, val in identifiers:
+                            found = db.execute("SELECT work_id FROM work_identifiers WHERE scheme = ? AND value = ?",
+                                               (scheme, val)).fetchone()
+                            if found:
+                                work_id = found[0]
+                                break
+                    if work_id is None:
+                        work_id = db.execute("INSERT INTO works (preferred_file_id) VALUES (?)", (row["id"],)).lastrowid
+                    if row["work_id"] != work_id:
+                        db.execute("UPDATE documents SET work_id = ? WHERE id = ?", (work_id, row["id"]))
+                    for scheme, val in identifiers:
+                        db.execute("INSERT OR IGNORE INTO work_identifiers VALUES (?, ?, ?)", (work_id, scheme, val))
         self._reconcile()
         # Release the init connection so constructing Library() alone leaves no WAL sidecars or locks.
         self.close()
@@ -331,13 +408,60 @@ class Library:
         documents = []
         for row in rows:
             doc = self._document(row)
+            verified = doc["metadata"].get("verified") or {}
             fields = [str(doc.get(key) or "") for key in
                       ("title", "label", "authors", "year", "doi", "filename", "metadata_status")]
+            fields.extend(str(verified.get(key) or "") for key in ("arxiv_id", "bibcode"))
+            fields.extend(doc["metadata"].get("candidates", {}).get("arxiv", []))
             if doc["metadata_status"] in ("needs_review", "incomplete"):
                 fields.append("Metadata needs review")
             if not needle or needle in " ".join(fields).casefold():
                 documents.append(doc)
         return documents
+
+    def remove_documents(self, document_ids: list[int]) -> int:
+        """Delete library copies, annotations, notes, and cached analyses for these document IDs."""
+        if not isinstance(document_ids, (list, tuple, set)) or any(type(v) is not int or v <= 0 for v in document_ids):
+            raise ValueError("document_ids must contain positive integers")
+        ids = list(dict.fromkeys(document_ids))
+        if not ids:
+            return 0
+        with self._lock:
+            docs = [self.get_document(doc_id) for doc_id in ids]
+            files = [self._pdf_path(doc, 0) for doc in docs]
+            pattern = re.compile(rf"(?:{'|'.join(map(str, ids))})-\d+\.pdf")
+            with os.scandir(self.working) as entries:
+                files.extend(Path(entry.path) for entry in entries if entry.is_file() and pattern.fullmatch(entry.name))
+            placeholders = ",".join("?" * len(ids))
+            str_ids = [str(doc_id) for doc_id in ids]
+            shas = [doc["sha256"] for doc in docs if doc.get("sha256")]
+            work_ids = list({doc["work_id"] for doc in docs if doc.get("work_id") is not None})
+            with self._connect() as db:
+                for work_id in work_ids:
+                    db.execute(
+                        f"""UPDATE works SET preferred_file_id = (
+                                SELECT id FROM documents WHERE work_id = ? AND id NOT IN ({placeholders}) ORDER BY id LIMIT 1
+                            )
+                            WHERE id = ? AND preferred_file_id IN ({placeholders})""",
+                        (work_id, *ids, work_id, *ids),
+                    )
+                for table, column in (("notes", "document_id"), ("document_views", "document_id")):
+                    db.execute(f"DELETE FROM {table} WHERE {column} IN ({placeholders})", ids)
+                db.execute(f"DELETE FROM reference_analyses WHERE source_id IN ({placeholders})", str_ids)
+                db.execute(
+                    f"DELETE FROM reference_manual_links WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                    (*str_ids, *str_ids),
+                )
+                if shas:
+                    sha_placeholders = ",".join("?" * len(shas))
+                    db.execute(f"DELETE FROM publication_evidence_v4 WHERE sha IN ({sha_placeholders})", shas)
+                db.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", ids)
+            for path in files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return len(docs)
 
     def get_document(self, document_id: int) -> dict:
         with self._connect() as db:
@@ -542,15 +666,28 @@ class Library:
         """Write fields, their DOI-to-work link, the status and the metadata JSON in one transaction."""
         values = dict(values)
         with self._connect() as db:
-            if "doi" in values:
-                doi, work_id = values["doi"], None
-                if doi:
-                    row = db.execute("SELECT work_id FROM work_identifiers WHERE scheme = 'doi' AND value = ?", (doi,)).fetchone()
-                    if row:
-                        work_id = row[0]
-                    else:
+            if "doi" in values or metadata.get("verified") != doc["metadata"].get("verified"):
+                effective_doi = values["doi"] if "doi" in values else doc["doi"]
+                identifiers = _work_identifiers(effective_doi, metadata)
+                work_id = None
+                if identifiers:
+                    for scheme, val in identifiers:
+                        row = db.execute("SELECT work_id FROM work_identifiers WHERE scheme = ? AND value = ?",
+                                         (scheme, val)).fetchone()
+                        if row:
+                            work_id = row[0]
+                            break
+                    if work_id is None:
                         work_id = db.execute("INSERT INTO works (preferred_file_id) VALUES (?)", (doc["id"],)).lastrowid
-                        db.execute("INSERT INTO work_identifiers VALUES (?, 'doi', ?)", (work_id, doi))
+                    for scheme, val in identifiers:
+                        db.execute("INSERT OR IGNORE INTO work_identifiers VALUES (?, ?, ?)", (work_id, scheme, val))
+                    if (doc["doi"] and doc["doi"] != effective_doi and work_id == doc["work_id"]
+                            and not doc["doi"].startswith("10.48550/arxiv.")):
+                        other = db.execute("SELECT 1 FROM documents WHERE work_id = ? AND id != ? AND doi = ?",
+                                           (work_id, doc["id"], doc["doi"])).fetchone()
+                        if not other:
+                            db.execute("DELETE FROM work_identifiers WHERE work_id = ? AND scheme = 'doi' AND value = ?",
+                                       (work_id, doc["doi"]))
                 values["work_id"] = work_id
             values.update(metadata_status=status, extracted=json.dumps(metadata))
             if filename:
@@ -673,20 +810,28 @@ class Library:
             values = {key: record[key] for key in FIELDS if record.get(key) and key not in manual
                       and (refresh or not (key in ("year", "doi") and doc[key]))}
             metadata = {**metadata, "sources": {**metadata.get("sources", {}), **dict.fromkeys(values, record["provider"])},
-                        "verified": {key: record.get(key) for key in ("provider", "doi", "arxiv_id", "publication", "first_author", "evidence")}}
+                        "verified": {key: record.get(key) for key in ("provider", "doi", "arxiv_id", "bibcode", "journal", "publication", "first_author", "evidence")}}
             rename = Path(filename).name if filename and doc["filename"] == "download.pdf" else None
             self._save_fields(doc, values, "verified", metadata, rename)
             self._rename(document_id)
             return self.get_document(document_id)
 
-    def find_by_doi(self, doi: str) -> list[dict]:
-        doi = normalize_doi(doi)
+    def find_by_identifier(self, scheme: str, value: str | None) -> list[dict]:
+        if not value:
+            return []
         with self._connect() as db:
             rows = db.execute("""SELECT documents.* FROM documents JOIN work_identifiers
                 ON documents.work_id = work_identifiers.work_id
-                WHERE work_identifiers.scheme = 'doi' AND work_identifiers.value = ?
-                ORDER BY documents.id""", (doi,)).fetchall()
+                WHERE work_identifiers.scheme = ? AND work_identifiers.value = ?
+                ORDER BY documents.id""", (scheme, value)).fetchall()
         return [self._document(row) for row in rows]
+
+    def find_by_arxiv(self, arxiv: str) -> list[dict]:
+        value = strip_arxiv_version(arxiv)
+        return self.find_by_identifier("arxiv", value) if ARXIV_ID.fullmatch(value) else []
+
+    def find_by_doi(self, doi: str) -> list[dict]:
+        return self.find_by_identifier("doi", normalize_doi(doi))
 
     def get_notes(self, document_id: int) -> list:
         self.get_document(document_id)
@@ -702,8 +847,12 @@ class Library:
 
     def save_view(self, document_id: int, view: dict) -> dict:
         doc = self.get_document(document_id)
-        if not isinstance(view, dict) or set(view) != {'page', 'scale'}:
+        if not isinstance(view, dict) or set(view) not in ({'page', 'scale'}, {'page', 'scale', 'offset'}):
             raise ValueError('View must contain page and scale')
+        if 'offset' in view:
+            offset = view['offset']
+            if type(offset) not in (int, float) or not -sys.float_info.max <= offset <= 1:
+                raise ValueError('Invalid page offset')
         page, scale = view['page'], view['scale']
         if type(page) is not int or not 1 <= page <= doc['pages']:
             raise ValueError('Page must be a page number in this PDF')

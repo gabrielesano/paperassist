@@ -673,3 +673,99 @@ class ManualFieldTests(unittest.TestCase):
         self.library.update_metadata(self.doc['id'], {'authors': 'Typed Surname'})
         done = self.library.apply_verified(self.doc['id'], self.record, refresh=True)
         self.assertTrue(done['stored_name'].startswith('Surname_2013'), done['stored_name'])
+
+
+class RemovalAndWorkIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.library = Library(Path(self.tmp.name) / 'library')
+        self.addCleanup(self.library.close)
+
+    def variant(self, width):
+        writer = PdfWriter()
+        writer.add_blank_page(width=width, height=72)
+        stream = io.BytesIO()
+        writer.write(stream)
+        return stream.getvalue()
+
+    def test_remove_documents_cleans_catalog_files_and_work_preference(self):
+        external = Path(self.tmp.name) / 'external.pdf'
+        external.write_bytes(self.variant(80))
+        first = self.library.open_file(external)
+        second = self.library.import_stream(io.BytesIO(self.variant(90)), 'second.pdf')
+        self.library.update_metadata(first['id'], {'doi': '10.1234/shared'})
+        self.library.update_metadata(second['id'], {'doi': '10.1234/shared'})
+        work_id = self.library.get_document(first['id'])['work_id']
+        self.library.save_pdf(first['id'], self.variant(80), 0)
+        self.library.save_pdf(first['id'], self.variant(80), 1)
+        self.library.save_notes(first['id'], [{'page': 1, 'text': 'note'}])
+        self.library.save_view(first['id'], {'page': 1, 'scale': '1.0'})
+        with self.library._connect() as db:
+            db.execute("INSERT INTO reference_analyses VALUES (?, ?)", (str(first['id']), '{"references": []}'))
+            db.execute("INSERT INTO reference_manual_links VALUES (?, ?, ?)", (str(first['id']), 'ref', str(second['id'])))
+            db.execute("INSERT INTO reference_manual_links VALUES (?, ?, ?)", (str(second['id']), 'ref', str(first['id'])))
+            db.execute("INSERT INTO publication_evidence_v4 VALUES (?, ?)", (first['sha256'], '{}'))
+
+        original_path = self.library.get_path(first['id'], annotated=False)
+        rev1_path = self.library.working / f"{first['id']}-1.pdf"
+        rev2_path = self.library.working / f"{first['id']}-2.pdf"
+        self.assertTrue(original_path.is_file() and rev1_path.is_file() and rev2_path.is_file())
+
+        with self.assertRaises(ValueError):
+            self.library.remove_documents([0])
+        with self.assertRaises(KeyError):
+            self.library.remove_documents([9999])
+        self.assertEqual(self.library.remove_documents([]), 0)
+
+        self.assertEqual(self.library.remove_documents([first['id']]), 1)
+        self.assertFalse(original_path.exists())
+        self.assertFalse(rev1_path.exists())
+        self.assertFalse(rev2_path.exists())
+        self.assertEqual(external.read_bytes(), self.variant(80))
+        self.assertEqual([doc['id'] for doc in self.library.list_documents()], [second['id']])
+        with self.library._connect() as db:
+            self.assertEqual(db.execute("SELECT preferred_file_id FROM works WHERE id = ?", (work_id,)).fetchone()[0], second['id'])
+            for table, col, key in (
+                ("notes", "document_id", first['id']),
+                ("document_views", "document_id", first['id']),
+                ("reference_analyses", "source_id", str(first['id'])),
+                ("reference_manual_links", "source_id", str(first['id'])),
+                ("reference_manual_links", "target_id", str(first['id'])),
+                ("publication_evidence_v4", "sha", first['sha256']),
+            ):
+                self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} = ?", (key,)).fetchone()[0], 0)
+
+    def test_arxiv_and_bibcode_work_identity_and_search(self):
+        preprint = self.library.import_stream(io.BytesIO(self.variant(80)), 'preprint.pdf')
+        published = self.library.import_stream(io.BytesIO(self.variant(90)), 'published.pdf')
+        ads_doc = self.library.import_stream(io.BytesIO(self.variant(100)), 'scan.pdf')
+        self.library.apply_verified(preprint['id'], {
+            'provider': 'arxiv', 'arxiv_id': '2401.12345v1', 'doi': None,
+            'title': 'Coronal Loops', 'authors': 'Ada Lovelace', 'year': 2024, 'first_author': 'Lovelace',
+        })
+        self.library.apply_verified(published['id'], {
+            'provider': 'crossref', 'doi': '10.48550/arXiv.2401.12345',
+            'title': 'Coronal Loops', 'authors': 'Ada Lovelace', 'year': 2024, 'first_author': 'Lovelace',
+        })
+        self.library.apply_verified(ads_doc['id'], {
+            'provider': 'ads', 'doi': None, 'bibcode': '1984ApJ...279..857R',
+            'title': 'Solar Loops', 'authors': 'Grace Hopper', 'year': 1984, 'first_author': 'Hopper',
+        })
+        self.assertEqual([d['id'] for d in self.library.find_by_arxiv('2401.12345v2')], [preprint['id'], published['id']])
+        self.assertEqual([d['id'] for d in self.library.find_by_identifier('bibcode', '1984apj...279..857r')], [ads_doc['id']])
+        self.assertEqual([d['id'] for d in self.library.list_documents('2401.12345')], [preprint['id'], published['id']])
+        self.assertEqual([d['id'] for d in self.library.list_documents('1984ApJ...279..857R')], [ads_doc['id']])
+
+    def test_legacy_manual_links_backfill_on_open(self):
+        source = self.library.import_stream(io.BytesIO(self.variant(80)), 'source.pdf')
+        target = self.library.import_stream(io.BytesIO(self.variant(90)), 'target.pdf')
+        payload = {'references': [{'id': '0', 'raw': 'Smith, A. 2020, ApJ, 1, 2', 'manual_link': True, 'local_document_id': target['id']}]}
+        with self.library._connect() as db:
+            db.execute("DROP TABLE reference_manual_links")
+            db.execute("INSERT INTO reference_analyses VALUES (?, ?)", (str(source['id']), json.dumps(payload)))
+        reopened = Library(self.library.data_dir)
+        self.addCleanup(reopened.close)
+        with reopened._connect() as db:
+            rows = db.execute("SELECT source_id, raw_key, target_id FROM reference_manual_links").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(str(source['id']), 'smitha2020apj12', str(target['id']))])

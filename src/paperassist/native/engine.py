@@ -264,12 +264,14 @@ class Pdf:
         self._destination_name(raw.FPDF_DEST())
         return dict(self._named_pages)
 
-    @pdf_locked
     def search(self, text):
+        return [hit for page in range(len(self.sizes)) for hit in self.search_page(page, text)]
+
+    @pdf_locked
+    def search_page(self, number, text):
         hits = []
-        for number in range(len(self.sizes)):
-            frame, page = self.frame(number), self._doc[number]
-            text_page = page.get_textpage()
+        frame = self.frame(number)
+        with closing(self._doc[number]) as page, closing(page.get_textpage()) as text_page:
             for match in _search_ranges(text_page, text):
                 line = None
                 angle = raw.FPDFText_GetCharAngle(text_page, match[0])
@@ -285,8 +287,6 @@ class Pdf:
                         line and hits.append((number, line))
                         line = rect
                 line and hits.append((number, line))
-            text_page.close()
-            page.close()
         return hits
 
     def render_data(self, highlights=True):

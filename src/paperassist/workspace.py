@@ -260,6 +260,24 @@ class Workspace:
             return inbox.check_folder(self.library, document_id, reference_id, cfg.inbox, cfg)
         return self.submit(check)
 
+    def check_folder_batch(self, document_id, reference_ids=None):
+        self.library.get_document(document_id)
+        if reference_ids is not None and (
+                not isinstance(reference_ids, list) or not reference_ids
+                or any(not isinstance(v, (str, int)) or isinstance(v, bool) or not str(v) for v in reference_ids)):
+            raise ValueError('reference_ids must be a non-empty list of reference IDs')
+        def check(job, cancel):
+            cfg = self.get_settings()
+            return inbox.check_folder_batch(
+                self.library, document_id, cfg.inbox,
+                reference_ids=reference_ids,
+                progress=lambda done, total, ref_id: job.update(
+                    progress={'completed': done, 'total': total, 'reference_id': ref_id, 'provider': 'folder'}),
+                cancel=cancel,
+                lock=self.download_lock,
+            )
+        return self.submit(check)
+
     def link_file(self, document_id, reference_id, name):
         self.library.get_document(document_id)
         with self.download_lock:

@@ -102,8 +102,14 @@ class Blocked(Exception):
         self.url = url
 
 
-def download_pdf(url):
+def download_pdf(url, *, email=''):
     """Fetch a PDF over public HTTPS only, pinning the verified IP to prevent DNS rebinding."""
+    # Repositories often serve an HTML landing page unless PDF is requested explicitly.
+    clean_email = (email or '').strip()
+    if '\r' in clean_email or '\n' in clean_email:
+        clean_email = ''
+    agent = f'PaperAssist/{__version__}' + (f' (mailto:{clean_email})' if clean_email else '')
+    headers = {'User-Agent': agent, 'Accept': 'application/pdf, */*;q=0.8'}
     # Connect to the address already checked, so DNS rebinding cannot reach a local host.
     for _ in range(6):
         parts = urlsplit(url)
@@ -120,7 +126,7 @@ def download_pdf(url):
             path = parts.path or '/'
             if parts.query:
                 path += '?' + parts.query
-            connection.request('GET', path, headers={'User-Agent': f'PaperAssist/{__version__}'})
+            connection.request('GET', path, headers=headers)
             response = connection.getresponse()
             if response.status in (301, 302, 303, 307, 308):
                 location = response.getheader('Location')

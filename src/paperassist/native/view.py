@@ -1,7 +1,10 @@
 """Continuous vertical PDF view: lazy rendering, selection, links, highlights, search hits."""
+from bisect import bisect_left
 from collections import deque
+from operator import itemgetter
 import gc
 import math
+import sqlite3
 import time
 from urllib.parse import urlparse
 
@@ -23,6 +26,7 @@ BACKGROUND = QColor("#dce2dc")
 PAGE_SHADOW = QColor(39, 59, 57, 28)
 PAGE_BORDER = QColor("#c4cec4")
 SELECTION, HIT, CURRENT_HIT = QColor(40, 110, 255, 80), QColor(255, 150, 0, 90), QColor(255, 90, 0, 160)
+_MODIFIER_KEYS = {Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta, Qt.Key_AltGr}
 
 
 class PdfView(QAbstractScrollArea):
@@ -30,6 +34,8 @@ class PdfView(QAbstractScrollArea):
     edited = Signal()     # content or save state changed
     activated = Signal()  # the user clicked or focused this view
     moved = Signal()      # scrolled or zoomed, for reading-position persistence
+    message = Signal(str)
+    search_updated = Signal(str)
     selection_changed = Signal()
     comment_selection_changed = Signal(object)
     comment_requested = Signal(object)  # 1-based page number at cursor when opened without a text selection
@@ -57,7 +63,12 @@ class PdfView(QAbstractScrollArea):
         self._comment_focus_pen = QPen(QColor("#aa700f"), 1)
         self._stroke, self._stroke_freehand = [], False
         self.selection, self.selection_lines = None, []  # ((page, word), (page, word))
+        self.all_selected = False
+        self._visible_selection = {}
         self.hits, self.hit = [], -1
+        self.search_pending = False
+        self._query, self._direction = "", 1
+        self.reading_mark = None
         self.history = []
         self.internal_link_handler = None  # return True when a citation consumes an internal link
         self._outlines = []
@@ -201,6 +212,31 @@ class PdfView(QAbstractScrollArea):
         self._outlines.clear()
         self.viewport().update()
 
+    def set_reading_mark(self):
+        page, offset = self.reading_position()
+        horizontal = self.horizontalScrollBar()
+        self.reading_mark = page, offset, horizontal.value() / max(1, horizontal.maximum())
+        self.message.emit(f"Reading mark set on page {page + 1}.")
+
+    def return_to_mark(self):
+        if self.reading_mark is not None:
+            page, offset, left = self.reading_mark
+            self.restore_position(page, offset)
+            bar = self.horizontalScrollBar()
+            bar.setValue(round(left * bar.maximum()))
+        else:
+            self.message.emit("Set a reading mark in this pane first.")
+
+    def reading_position(self):
+        page = current_page(self)
+        _, y, _, height = self.pages.rect(page)
+        # A page can be the most visible one while its top is below the viewport.
+        return page, (self._scroll_top() - y) / height
+
+    def restore_position(self, page, offset):
+        bar = self.verticalScrollBar()
+        bar.setValue(round(max(0, min(bar.maximum(), self.pages.top_of(page, offset)))))
+
     def go_back(self):
         if self.history:
             self.verticalScrollBar().setValue(self.history.pop())
@@ -268,6 +304,8 @@ class PdfView(QAbstractScrollArea):
                     self.cache.entries[page] = ((scale, self.doc_id, pixmap), size)
         self.client.close(old)
         self._want()
+        if self.search_pending or (self._query and not preserve_citations):
+            self.find(self._query, self._direction)
 
     def set_highlights_visible(self, visible):
         if visible != self.highlights_visible:
@@ -281,11 +319,13 @@ class PdfView(QAbstractScrollArea):
             self.viewport().update()
 
     def reload(self):
+        self._visible_selection.clear()
         self.doc.reload()
         self.refresh_render(preserve_citations=False)
         self.viewport().update()
 
     def release(self):
+        self.search_pending = False
         self.cache.clear()
         self.client.close(self.doc_id)
         gc.collect()
@@ -299,6 +339,7 @@ class PdfView(QAbstractScrollArea):
         super().hideEvent(event)
         self._space_pan, self._space_panned, self._pan = False, False, None
         self._update_cursor()
+        self._visible_selection.clear()
         self.cache.clear()  # a hidden tab must not keep ~100 MB of pages
         self.doc.hibernate()
         self.client.want(self.doc_id, [])
@@ -431,11 +472,15 @@ class PdfView(QAbstractScrollArea):
             for a, b in zip(self._stroke, self._stroke[1:]):
                 painter.drawLine(self._band(page, Rect(*a, *a)).topLeft(), self._band(page, Rect(*b, *b)).topLeft())
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-        for page, rect, _ in self.selection_lines:
+        for page, rect, _ in self._paint_selection(visible):
             if page in visible_set:
                 painter.fillRect(self._band(page, rect), SELECTION)
-        for i, (page, rect) in enumerate(self.hits):
-            if page in visible_set:
+        if self.hits and visible:
+            first = bisect_left(self.hits, visible[0], key=itemgetter(0))
+            for i in range(first, len(self.hits)):
+                page, rect = self.hits[i]
+                if page > visible[-1]:
+                    break
                 painter.fillRect(self._band(page, rect), CURRENT_HIT if i == self.hit else HIT)
         painter.setBrush(Qt.NoBrush)
         self._comment_pen.setWidthF(1.5 / self.zoom)
@@ -517,7 +562,7 @@ class PdfView(QAbstractScrollArea):
         freehand = self.highlighting and not self.doc.words(page)
         if (self.drawing or freehand) and not self.read_only:
             self.select_annotation(None)
-            self.selection, self.selection_lines = None, []
+            self._clear_selection()
             self._stroke_page, self._stroke, self._stroke_freehand = page, [(x, y)], freehand
             return
         picked = self.doc.annotation_at(page, x, y, 4 / self.zoom, self.highlights_visible) if not self.highlighting else None
@@ -528,7 +573,7 @@ class PdfView(QAbstractScrollArea):
             self._press["moved"] = True  # Shift+click grows the selection like a drag would
             self._extend_selection(event.position())
             return
-        self.selection, self.selection_lines = None, []
+        self._clear_selection()
         self._anchor_word = None if word is None else (page, word)
         self.viewport().update()
 
@@ -536,6 +581,7 @@ class PdfView(QAbstractScrollArea):
         page, x, y = self._locate(pos)
         word = self.doc.word_at(page, x, y)
         if self._anchor_word and word is not None:
+            self._clear_selection()
             self.selection = (self._anchor_word, (page, word))
             self.selection_lines = self.doc.selection_lines(*self.selection)
             self.viewport().update()
@@ -628,7 +674,7 @@ class PdfView(QAbstractScrollArea):
         page = None
         if event.reason() == QContextMenuEvent.Mouse and len(self.doc):
             page, x, y = self._locate(event.pos())
-            if not self.selection_lines:
+            if not (self.all_selected or self.selection_lines):
                 comment = self.comment_at(page, x, y) if not self.highlighting and not self.drawing else None
                 picked = self.doc.annotation_at(page, x, y, 4 / self.zoom, self.highlights_visible) if not self.highlighting else None
                 if comment is not None:
@@ -646,11 +692,15 @@ class PdfView(QAbstractScrollArea):
     def _build_context_menu(self, page=None):
         menu = self._context_menu
         menu.clear()
-        has_selection = bool(self.selection_lines)
+        has_selection = self.all_selected or bool(self.selection_lines)
 
         copy_action = menu.addAction("Copy")
         copy_action.setEnabled(has_selection)
         copy_action.triggered.connect(self.copy)
+
+        copy_source = menu.addAction("Copy with source")
+        copy_source.setEnabled(has_selection)
+        copy_source.triggered.connect(self.copy_with_source)
 
         highlight_action = menu.addAction("Highlight")
         highlight_action.setEnabled(has_selection and not self.read_only)
@@ -669,6 +719,13 @@ class PdfView(QAbstractScrollArea):
         select_all_action = menu.addAction("Select all")
         select_all_action.setEnabled(len(self.doc) > 0)
         select_all_action.triggered.connect(self.select_all)
+
+        menu.addSeparator()
+        menu.addAction("Set reading mark", self.set_reading_mark)
+        jump = menu.addAction("Return to reading mark", self.return_to_mark)
+        jump.setEnabled(self.reading_mark is not None)
+        if self.reading_mark is not None:
+            jump.setText(f"Return to reading mark (page {self.reading_mark[0] + 1})")
 
         if self.selected_comment is not None:
             menu.addSeparator()
@@ -703,40 +760,85 @@ class PdfView(QAbstractScrollArea):
 
     def event(self, event):
         # A shortcut such as Save or Close must see the stroke under the mouse as part of the document.
-        if event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress) and event.key() == Qt.Key_Escape and self._transform:
-            self._transform = None
-            self.viewport().update()
-            return True
-        if event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress) and self._transform:
-            self._finish_transform()
-        if event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress) and self._stroke:
-            self._finish_stroke()
+        if event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
+            if event.key() == Qt.Key_Escape and (self._transform or self._stroke):
+                self._transform, self._stroke = None, []
+                self.viewport().update()
+                return True
+            if event.key() not in _MODIFIER_KEYS:
+                if self._transform:
+                    self._finish_transform()
+                if self._stroke:
+                    self._finish_stroke()
         return super().event(event)
 
+    def _clear_selection(self):
+        self.all_selected = False
+        self.selection, self.selection_lines = None, []
+        self._visible_selection.clear()
+
     def select_all(self):
-        pages = [page for page in range(len(self.doc)) if self.doc.words(page)]
-        if pages:
-            self._anchor_word = (pages[0], 0)
-            self.selection = (self._anchor_word, (pages[-1], len(self.doc.words(pages[-1])) - 1))
-            self.selection_lines = self.doc.selection_lines(*self.selection)
-            self.viewport().update()
-            self.selection_changed.emit()
+        self._clear_selection()
+        self.all_selected = True
+        self._anchor_word = (0, 0)
+        self.viewport().update()
+        self.selection_changed.emit()
+
+    def _paint_selection(self, visible):
+        if not self.all_selected:
+            return self.selection_lines
+        for page in self._visible_selection.keys() - set(visible):
+            del self._visible_selection[page]
+        for page in visible:
+            if page not in self._visible_selection:
+                self._visible_selection[page] = self.doc.page_selection(page, transient=True)
+        return (line for page in visible for line in self._visible_selection[page])
+
+    def all_text_lines(self):
+        for page in range(len(self.doc)):
+            if page in self._visible_selection:
+                yield from self._visible_selection[page]
+            else:
+                yield from self.doc.page_selection(page, transient=True)
+
+    def selected_lines(self):
+        return self.all_text_lines() if self.all_selected else self.selection_lines
 
     def selected_text(self):
-        return "\n".join(text for _, _, text in self.selection_lines)
+        return "\n".join(text for _, _, text in self.selected_lines())
 
     def copy(self):
-        if self.selection_lines:
-            QGuiApplication.clipboard().setText(self.selected_text())
+        if text := self.selected_text():
+            QGuiApplication.clipboard().setText(text)
+
+    def copy_with_source(self):
+        lines = []
+        first = last = None
+        for page, _, text in self.selected_lines():
+            if first is None:
+                first = page + 1
+            last = page + 1
+            lines.append(text)
+        if lines:
+            pages = f"PDF p. {first}" if first == last else f"PDF pp. {first}–{last}"
+            try:
+                source = self.doc.source.citation(pages)
+            except (OSError, KeyError, sqlite3.Error) as error:
+                self.message.emit(f"Could not copy the source: {error}")
+                return
+            QGuiApplication.clipboard().setText("\n".join(lines) + "\n\n" + source)
 
     def highlight_selection(self):
+        if self.read_only:
+            return
         pages = {}
-        for page, rect, _ in self.selection_lines:
+        for page, rect, _ in self.selected_lines():
             pages.setdefault(page, []).append(rect)
-        if self.read_only or not pages:
+        if not pages:
             return
         self.doc.add_highlights(pages, self.highlight_color)
-        self.selection, self.selection_lines, self._anchor_word = None, [], None
+        self._clear_selection()
+        self._anchor_word = None
         self._annotation_changed(list(pages), reveal=True)
 
     def set_tool(self, tool):
@@ -901,22 +1003,44 @@ class PdfView(QAbstractScrollArea):
         self.viewport().update()
 
     def find(self, text, direction=1):
-        self.hits = self.doc.search(text) if text else []
-        if not self.hits:
-            self.hit = -1
+        if self.search_pending:
+            self.client.cancel_search(self.doc_id)
+        self.hits, self.hit = [], -1
+        self._query, self._direction = text, direction
+        self.search_pending = bool(text)
+        self.viewport().update()
+        self._search_status()
+        if text:
+            self.client.search(self.doc_id, text, current_page(self), direction, self._matches)
+
+    def _matches(self, hits, done, error):
+        self.search_pending = not done
+        if hits:
+            # Pages arrive in search order. Keep navigation in document order even after wrapping.
+            index = bisect_left(self.hits, hits[0][0], key=itemgetter(0))
+            self.hits[index:index] = hits
+            if self.hit < 0:
+                self.hit = index if self._direction > 0 else index + len(hits) - 1
+                self._show_hit()
+            elif index <= self.hit:
+                self.hit += len(hits)
             self.viewport().update()
-            return 0
-        page = current_page(self)
-        if direction >= 0:
-            self.hit = next((i for i, (p, _) in enumerate(self.hits) if p >= page), 0)
-        else:
-            self.hit = next((i for i in range(len(self.hits) - 1, -1, -1) if self.hits[i][0] <= page), len(self.hits) - 1)
-        self._show_hit()
-        return len(self.hits)
+        self._search_status(error)
+
+    def _search_status(self, error=""):
+        status = ""
+        if error:
+            status = f"Search failed: {error}"
+        elif self.hits:
+            status = f"{self.hit + 1} / {len(self.hits)}" + (" (searching…)" if self.search_pending else "")
+        elif self.search_pending:
+            status = "Searching…"
+        elif self._query:
+            status = "No matches"
+        self.search_updated.emit(status)
 
     def step_hit(self, direction):
         if self.hits:
             self.hit = (self.hit + direction) % len(self.hits)
             self._show_hit()
-        else:
-            self.viewport().update()
+            self._search_status()

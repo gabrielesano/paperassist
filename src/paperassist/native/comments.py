@@ -4,7 +4,7 @@ import math
 import re
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
 
 from .theme import FlowLayout, set_props
@@ -19,6 +19,23 @@ def quote(note):
 def note_color(note):
     value = note.get("color", "")
     return value if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value) else DEFAULT_COLOR
+
+
+def format_notes_markdown(title: str, notes: list[dict], citation: str = "") -> str:
+    """Format a paper's saved comments as readable Markdown."""
+    sections = [f"# {title or 'Notes'}"]
+    if citation:
+        sections.append(f"*{citation}*")
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        lines = [f"## Page {note.get('page', '?')}"]
+        if quoted := quote(note).strip():
+            lines.append("\n".join(f"> {line}" for line in quoted.splitlines()))
+        if body := str(note.get("text", "")).strip():
+            lines.append(body)
+        sections.append("\n\n".join(lines))
+    return "\n\n".join(sections) + "\n"
 
 
 def line_bands(rects, vertical=False):
@@ -69,16 +86,20 @@ def note_rects(note, pdf):
     return result
 
 
-def capture_anchor(view):
+def capture_anchor(view, *, whole_document=False):
     pages = {}
-    for page, rect, _ in view.selection_lines:
+    lines = []
+    selection = view.all_text_lines() if whole_document else view.selected_lines()
+    for page, rect, text in selection:
+        lines.append(text)
         frame = view.doc.pdf.frame(page)
         a, b = frame.to_pdf(rect.x0, rect.y0), frame.to_pdf(rect.x1, rect.y1)
         pages.setdefault(page + 1, []).append([min(a[0], b[0]), min(a[1], b[1]),
                                                max(a[0], b[0]), max(a[1], b[1])])
-    if not pages or not view.selected_text().strip():
+    quote = "\n".join(lines).strip()
+    if not quote:
         return None
-    return {"page": min(pages), "quote": view.selected_text().strip(),
+    return {"page": min(pages), "quote": quote,
             "anchor": {"version": 1, "pages": [{"page": page, "rects": rects} for page, rects in pages.items()]}}
 
 
@@ -170,7 +191,12 @@ class CommentsPanel(QWidget):
         self.add = QPushButton("Add comment")
         self.add.setProperty("link", True)
         self.add.clicked.connect(lambda _=False: controller.compose())
+        self.copy_notes = QPushButton("Copy notes")
+        self.copy_notes.setProperty("link", True)
+        self.copy_notes.setToolTip("Copy all saved comments on this paper as Markdown")
+        self.copy_notes.clicked.connect(self._copy_notes)
         add_flow.addWidget(self.add)
+        add_flow.addWidget(self.copy_notes)
         self.column.addWidget(self.add_box)
 
         self.composer = QWidget()
@@ -237,7 +263,7 @@ class CommentsPanel(QWidget):
         self.add.setVisible(draft is None)
         if draft is not None:
             self.head.setText(f"Comment · Page {draft['page']}")
-            snippet = quote(draft)
+            snippet = "All selectable text" if draft.get("all_text") else quote(draft)
             self.quote_preview.setText(snippet or "Page comment. Select PDF text to anchor it to a phrase.")
             if self.text.toPlainText() != draft.get("text", ""):
                 self.text.blockSignals(True)
@@ -245,12 +271,28 @@ class CommentsPanel(QWidget):
                 self.text.blockSignals(False)
             self.save_button.setEnabled(bool(draft.get("text", "").strip()))
         notes = [note for note in (model.notes if model else []) if isinstance(note, dict)]
+        self.copy_notes.setVisible(draft is None and bool(notes))
+        self.copy_notes.setEnabled(bool(notes))
         if (view, model) != self._built or notes != [note for note, _ in self._rows]:
             self._build_rows(view, model, notes)
         selected = view.selected_comment if view else None
         for note, row in self._rows:
             set_props(row, selected=(selected == note))
         self.undo.setVisible(bool(model and model.deleted is not None))
+
+    def _copy_notes(self):
+        if not self.view or not self.view.notes_model:
+            return
+        notes = [note for note in self.view.notes_model.notes if isinstance(note, dict)]
+        if not notes:
+            return
+        source = self.view.doc.source
+        pages = len(self.view.doc)
+        citation = source.citation(f"{pages} page{'s' if pages != 1 else ''}") if hasattr(source, "citation") else ""
+        QGuiApplication.clipboard().setText(format_notes_markdown(source.title, notes, citation))
+        window = self.controller.window
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage(f"Copied {len(notes)} comment{'s' if len(notes) != 1 else ''} as Markdown.", 4500)
 
     def _build_rows(self, view, model, notes):
         self._built, self._rows = (view, model), []
@@ -365,6 +407,7 @@ class CommentsController(QObject):
                 page = top_page + 1
             view.comment_draft = {"page": page, "text": ""}
         if anchor:
+            view.comment_draft.pop("all_text", None)
             view.comment_draft.update(anchor)
         view.set_tool("comment")
         view.select_comment(None)
@@ -375,10 +418,20 @@ class CommentsController(QObject):
         self.draft_changed.emit()
 
     def _selection(self, view):
-        if view.commenting and view.comment_draft is not None and (anchor := capture_anchor(view)):
-            view.comment_draft.update(anchor)
-            view.focus_comment(view.comment_draft, scroll=False)
-            self.refresh()
+        if not view.commenting or view.comment_draft is None:
+            return
+        draft = view.comment_draft
+        if view.all_selected:
+            draft.pop("quote", None)
+            draft.pop("anchor", None)
+            draft["all_text"] = True
+        elif anchor := capture_anchor(view):
+            draft.pop("all_text", None)
+            draft.update(anchor)
+        else:
+            return
+        view.focus_comment(draft, scroll=False)
+        self.refresh()
 
     def has_draft(self, pane):
         return bool(pane.view.comment_draft and pane.view.comment_draft.get("text", "").strip())
@@ -388,6 +441,8 @@ class CommentsController(QObject):
         if not self.has_draft(pane):
             return True
         note = deepcopy(view.comment_draft)
+        if note.pop("all_text", False):
+            note.update(capture_anchor(view, whole_document=True) or {})
         note["text"] = note["text"].strip()
         if not view.notes_model.append(note):
             self.refresh()

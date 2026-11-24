@@ -8,10 +8,12 @@ It is started with multiprocessing's explicit "spawn" context and pipes. Unlike
 the app itself and `freeze_support()` routes the child to `serve`.
 
 Protocol, parent to child: ("open", id, path_or_bytes[, inherit_from]), ("close", id),
-("want", id, jobs), ("locate", req_id, id, ref) and ("quit",). A want list replaces the
+("want", id, jobs), ("search", id, request, term, first, direction), ("cancel_search", id),
+("locate", req_id, id, ref) and ("quit",). A want list replaces the
 previous one for that document, most urgent first, so a fast scroll overtakes pages nobody
 looks at any more. Child to parent: ("page", id, page, scale, width, height, seconds)
-followed by raw RGB bytes, or ("citations", req_id, result, error).
+followed by raw RGB bytes, ("matches", id, request, page_hits, done, error), or
+("citations", req_id, result, error).
 """
 import gc
 import itertools
@@ -72,13 +74,21 @@ def listen(inbox, queue):
             return
 
 
+def search_pages(pdf, term, first, direction):
+    count = len(pdf.sizes)
+    for step in range(count):
+        page = (first + step * direction) % count
+        yield pdf.search_page(page, term), step + 1 == count
+
+
 def serve(inbox, outbox):
     queue, docs, indices, trimmed = WantQueue(), {}, {}, True
+    searches = {}  # Each pane has at most one active search.
     threading.Thread(target=listen, args=(inbox, queue), daemon=True).start()
     while True:
         with queue.cond:
             # Return freed pixels after a quiet moment instead of churning the allocator per page.
-            woke = queue.cond.wait_for(lambda: queue.has_work(docs), timeout=None if trimmed else IDLE_TRIM_SECONDS)
+            woke = queue.cond.wait_for(lambda: bool(searches) or queue.has_work(docs), timeout=None if trimmed else IDLE_TRIM_SECONDS)
             if not woke:
                 gc.collect()
                 trim_heap()
@@ -97,7 +107,16 @@ def serve(inbox, outbox):
                         indices[doc_id] = index
                 except Exception:  # a vanished or broken file leaves blank pages, not a dead process
                     docs.pop(doc_id, None)
+            elif kind == "search":
+                doc_id, request, term, first, direction = args
+                if doc_id in docs:
+                    searches[doc_id] = request, search_pages(docs[doc_id], term, first, direction)
+                else:
+                    outbox.send(("matches", doc_id, request, [], True, "Document unavailable"))
+            elif kind == "cancel_search":
+                searches.pop(args[0], None)
             elif kind == "close":
+                searches.pop(args[0], None)
                 if document := docs.pop(args[0], None):
                     document.close()
                 if index := indices.pop(args[0], None):
@@ -123,6 +142,20 @@ def serve(inbox, outbox):
         with queue.cond:
             job = queue.next_job(docs)
         if job is None:
+            if searches:
+                # Yield after each page so new renders and cancellations take priority.
+                doc_id = next(iter(searches))
+                request, pages = searches.pop(doc_id)
+                try:
+                    hits, done = next(pages)
+                except Exception as error:
+                    outbox.send(("matches", doc_id, request, [], True, str(error) or "Search failed"))
+                else:
+                    if hits or done:
+                        outbox.send(("matches", doc_id, request, hits, done, ""))
+                    if not done:
+                        searches[doc_id] = request, pages
+                trimmed = False
             continue
         doc_id, (page, scale) = job
         start = time.perf_counter()
@@ -165,6 +198,7 @@ def _make_render_client():
             self.process, self._commands, self._results = start()
             self._ids = itertools.count(1)
             self._pending = {}
+            self._searches = {}
             self._arrived.connect(self._deliver)
             threading.Thread(target=self._listen, daemon=True).start()
 
@@ -176,14 +210,26 @@ def _make_render_client():
                     if message[0] == "page":
                         _, doc_id, page, scale, width, height, seconds = message
                         self._arrived.emit(("page", doc_id, page, scale, width, height, self._results.recv_bytes(), seconds))
-                    elif message[0] == "citations":
+                    elif message[0] in ("citations", "matches"):
                         self._arrived.emit(message)
                 except (EOFError, OSError):
+                    self._arrived.emit(("disconnected",))
                     return
 
         def _deliver(self, message):
             if message[0] == "page":
                 self.page_ready.emit(*message[1:])
+            elif message[0] == "matches":
+                _, doc_id, request, hits, done, error = message
+                pending = self._searches.get(doc_id)
+                if pending and request == pending[0]:
+                    if done:
+                        del self._searches[doc_id]
+                    pending[1](hits, done, error)
+            elif message[0] == "disconnected":
+                pending, self._searches = self._searches, {}
+                for _, callback in pending.values():
+                    callback([], True, "Render process unavailable")
             elif callback := self._pending.pop(message[1], None):
                 callback(message[2], message[3])
 
@@ -204,11 +250,23 @@ def _make_render_client():
             return doc_id
 
         def close(self, doc_id):
+            self._searches.pop(doc_id, None)
             self._send("close", doc_id)
 
         def want(self, doc_id, jobs):
             """Replace the queue of (page, scale) jobs for one document, most urgent first."""
             self._send("want", doc_id, jobs)
+
+        def search(self, doc_id, term, page, direction, callback):
+            request = next(self._ids)
+            self._searches[doc_id] = request, callback
+            if not self._send("search", doc_id, request, term, page, direction):
+                self._searches.pop(doc_id, None)
+                callback([], True, "Render process unavailable")
+
+        def cancel_search(self, doc_id):
+            if self._searches.pop(doc_id, None):
+                self._send("cancel_search", doc_id)
 
         def locate(self, doc_id, ref, callback):
             req_id = next(self._ids)

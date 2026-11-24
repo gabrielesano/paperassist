@@ -4,7 +4,7 @@ Reading a research paper is rarely linear. Half the time you are scrolling to th
 
 **PaperAssist** is a calm, local reading desk and shared library for scientific PDFs. It runs as a self-contained native desktop application built with Qt Widgets and PDFium, with no PaperAssist account, cloud sync, background web server, telemetry, or large language models. Reading and local import work offline; optional online reference actions use external services only when requested. A library can reuse the same PDF across multiple source papers; it is not a cloud collaboration service.
 
-> **Project status:** `0.3.1` (alpha). Reading, panning, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
+> **Project status:** `0.3.2` (alpha). Reading, panning, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
 
 The screenshots below show the application on Linux with synthetic papers and a disposable library. System fonts and window appearance vary by platform.
 
@@ -16,37 +16,37 @@ The screenshots below show the application on Linux with synthetic papers and a 
 
 PaperAssist can be installed as a standalone desktop application (with Python, Qt, PDFium, and offline OCR bundled inside—no Python setup required) or run directly from a source checkout.
 
-Download installers and their matching `.sha256` files from the [0.3.1 release](https://github.com/gabrielesano/paperassist/releases/tag/v0.3.1). Platform provenance, third-party notices, and a combined checksum manifest (`SHA256SUMS`) are attached alongside the packages.
+Download installers and their matching `.sha256` files from the [0.3.2 release](https://github.com/gabrielesano/paperassist/releases/tag/v0.3.2). Platform provenance, third-party notices, and a combined checksum manifest (`SHA256SUMS`) are attached alongside the packages.
 
 ### Linux (`x86_64`) — Standalone Installer
 
-For 64-bit Linux, PaperAssist provides a self-extracting per-user installer script (`PaperAssist-0.3.1-linux-x86_64.sh`) that requires **no `sudo` or root permissions**:
+For 64-bit Linux, PaperAssist provides a self-extracting per-user installer script (`PaperAssist-0.3.2-linux-x86_64.sh`) that requires **no `sudo` or root permissions**:
 
 ```bash
 # 1. Verify package integrity (optional but recommended)
-sha256sum -c PaperAssist-0.3.1-linux-x86_64.sh.sha256
-sh ./PaperAssist-0.3.1-linux-x86_64.sh --verify
+sha256sum -c PaperAssist-0.3.2-linux-x86_64.sh.sha256
+sh ./PaperAssist-0.3.2-linux-x86_64.sh --verify
 
 # 2. Install for your user account
-sh ./PaperAssist-0.3.1-linux-x86_64.sh
+sh ./PaperAssist-0.3.2-linux-x86_64.sh
 ```
 
 - **Launch:** Open **PaperAssist** from your desktop application menu, or run `paperassist` from a terminal (`~/.local/bin/paperassist`). You can also pass PDF files directly (`paperassist paper.pdf`) to import a managed copy and open it, reusing identical PDFs already in the active library.
 - **What gets installed where:** By default, application files live in `~/.local/share/paperassist-app`, the launcher in `~/.local/bin/paperassist`, and the desktop entry and icons under `~/.local/share/applications` and `~/.local/share/icons`. The installer respects XDG data directories. Your research library (`~/.local/share/paperassist`) and preferences (`~/.config/paperassist/config.json`) are kept separate and are not changed by the installer.
 - **Upgrade:** Close PaperAssist and run the newer installer script (`sh ./PaperAssist-<new-version>-linux-x86_64.sh`). Upgrades verify a staged bundle before swapping application directories. Detected failures roll back; a process interruption may require `--repair`.
-- **Repair:** After an interrupted upgrade, run `sh ./PaperAssist-0.3.1-linux-x86_64.sh --repair` to recover the previous committed installation. After an interrupted first install, repair clears incomplete owned state; rerun the installer to install the app.
-- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` (or `sh ./PaperAssist-0.3.1-linux-x86_64.sh --uninstall`). Only application-owned files are removed; your library, PDFs, annotations, and settings remain untouched.
+- **Repair:** After an interrupted upgrade, run `sh ./PaperAssist-0.3.2-linux-x86_64.sh --repair` to recover the previous committed installation. After an interrupted first install, repair clears incomplete owned state; rerun the installer to install the app.
+- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` (or `sh ./PaperAssist-0.3.2-linux-x86_64.sh --uninstall`). Only application-owned files are removed; your library, PDFs, annotations, and settings remain untouched.
 - **System requirements:** Linux `x86_64`, `glibc >= 2.35`, `flock` (`util-linux`), X11 or Wayland, and Qt's system OpenGL/EGL and display libraries. The published installer was built on Ubuntu 22.04 and passed its ELF compatibility gate and install/self-test/uninstall checks. A clean Ubuntu/Debian desktop trial remains outstanding; see [packaging details](packaging/README.md).
 
 ### Windows (`x86_64`)
 
-Download `PaperAssist-0.3.1-windows-x86_64-setup.exe` from the release and run the setup wizard. It installs for the current user in `%LOCALAPPDATA%\Programs\PaperAssist`, without administrator privileges, and creates a Start menu shortcut; a desktop shortcut is optional. Launch the installed app without a console window. The optional **Add PaperAssist to Open with for PDF files** task registers PDF support for your account and preserves your current default reader.
+Download `PaperAssist-0.3.2-windows-x86_64-setup.exe` from the release and run the setup wizard. It installs for the current user in `%LOCALAPPDATA%\Programs\PaperAssist`, without administrator privileges, and creates a Start menu shortcut; a desktop shortcut is optional. Launch the installed app without a console window. The optional **Add PaperAssist to Open with for PDF files** task registers PDF support for your account and preserves your current default reader.
 
 Close PaperAssist before upgrading or uninstalling. Run the newer setup EXE to update, or remove PaperAssist through Windows Settings. The library and preferences remain separate from the application and are preserved. The alpha installer is not Authenticode-signed, so Windows may show an unknown-publisher or SmartScreen prompt. Windows CI tests installation, the native window, the render worker, upgrade, and uninstall; see [Windows packaging](packaging/windows/README.md).
 
 ### macOS (Apple Silicon)
 
-Download `PaperAssist-0.3.1-macos-arm64.dmg` from the release. This package supports Apple Silicon only:
+Download `PaperAssist-0.3.2-macos-arm64.dmg` from the release. This package supports Apple Silicon only:
 
 1. Open the `.dmg` disk image and drag **PaperAssist.app** into **Applications**.
 2. Eject the disk image and launch **PaperAssist** from Applications (no Python or Terminal required).
@@ -107,7 +107,7 @@ Opening an imported paper in a new main tab offers the **Acquire references** di
 
 - **Open-access lookup:** Tick entries in **Acquire references**—or click **Find open access** on a reference card—to check the enabled, configured bibliographic and open-access providers (Crossref, arXiv, OpenAlex, Semantic Scholar, Unpaywall, NASA ADS, and CORE). Results distinguish provider failures and missing copies; a timeout is not proof of a paywall.
 - **Web search & library proxy links:** Unresolved references offer prefilled web and PDF searches, plus one-click links through your institution's **Library proxy** if you configure one.
-- **Manual downloads without filename chaos:** Set **Folder for manual downloads** in **Preferences**. **Check folder** may identify the reference online, then checks PDFs in that folder and copies a verified match into the library without changing the downloaded file. Uncertain candidates require review. Identified papers can receive names such as `Author_Year_Journal_Volume_Page.pdf`; **Change PDF** lets you correct a link.
+- **Manual downloads without filename chaos:** Set **Folder for manual downloads** in **Preferences**. When a site asks for a browser check, use **Open blocked** to open those open-access PDF links in your browser on click, then click **Check folder** in the References toolbar or Acquire dialog to verify and link all matching downloads in one pass (or use **Check folder** on a card for single-paper matching). Uncertain candidates require review. Identified papers can receive names such as `Author_Year_Journal_Volume_Page.pdf`; **Change PDF** lets you correct a link.
 
 ### Highlight, draw, and attach notes to exact phrases
 
@@ -118,11 +118,15 @@ Annotation controls live in a calm contextual strip inside the top toolbar—nev
 - **Clean PDF annotations:** Use **Highlight** (`H`) for text-aligned bands, **Draw** (`D`) for freehand ink, and **Select** (`V`) to select, recolor, or delete supported marks. Ink and freehand highlights can also move and resize proportionally using corner handles; text-aligned highlights keep their text geometry. On pages without a text layer, Highlight draws a freehand stroke.
 - **Phrase-linked comments:** Select a passage and click **Comment** (or press `C`) to attach a note directly to those words. Saved phrase comments leave a subtle red dashed outline on the page even when the sidebars are hidden; clicking the outlined text jumps straight to its note in the **Comments** panel, and clicking a note brings you back to that exact phrase. Creating a comment without selecting text attaches a general note to the current page.
 - **Explicit saving—never behind your back:** PDF annotations are written **only when you click Save** (or press `Ctrl+S` / `Cmd+S`). PaperAssist never autosaves on timers, tab switches, or previews. Switching tabs keeps unsaved edits in memory, and closing a modified tab or quitting the app always asks whether to **Save**, **Discard**, or **Cancel**. Your imported original PDFs are never modified; annotated revisions are stored separately, and annotations stay tied to the exact PDF file you marked up.
-- **Comments are separate from PDF annotations:** **Save comment** writes a note to the library catalog, without creating a PDF revision. Deleting or recoloring a saved comment updates the catalog immediately. Sidecar comments are not embedded in saved PDF revisions. Unsaved comment drafts remain in memory across tab switches and participate in close confirmation.
+- **Comments are separate from PDF annotations:** **Save comment** writes a note to the library catalog, without creating a PDF revision. Deleting or recoloring a saved comment updates the catalog immediately. Sidecar comments are not embedded in saved PDF revisions. Unsaved comment drafts remain in memory across tab switches and participate in close confirmation. Use **Copy notes** in the **Comments** panel to copy all saved comments on the active paper as Markdown.
+
+Right-click selected text and choose **Copy with source** to include its PDF page or page range, title, and available authors, year and DOI. **Copy** keeps just the selected text.
+
+Library papers reopen at the saved vertical position and zoom. To keep a second place while reading, right-click and choose **Set reading mark**, then **Return to reading mark**. Each main or quick-view pane keeps one mark until it closes.
 
 ### Build a clean, private local library
 
-Open **Library** (`L` key) to browse and search your collection by title, tab name, author, year, DOI, filename, or metadata status. The catalog displays five columns: **Title**, **Tab name** (showing persistent catalog nicknames that you can edit via **Edit details…** through the library catalog), **Authors**, **Year**, and **Metadata**. Click any column header to sort in either direction (unknown years sort last); select multiple papers using `Ctrl`-click or `Shift`-click; and open a paper in a main tab (**Open**) or below in **Quick view**. Add papers via **Import PDFs…** or **Import folder…**—when importing a single PDF, choose **Import & open** to import the file and immediately view it in a reader tab. **Open** (`Ctrl+O` in the reader) imports/reuses a managed copy and opens it in a tab; its explicit Save creates a library revision.
+Open **Library** (`L` key) to browse and search your collection by title, tab name, author, year, DOI, arXiv ID, bibcode, filename, or metadata status. The catalog displays five columns: **Title**, **Tab name** (showing persistent catalog nicknames that you can edit via **Edit details…** through the library catalog), **Authors**, **Year**, and **Metadata**. Click any column header to sort in either direction (unknown years sort last); select multiple papers using `Ctrl`-click or `Shift`-click; open a paper in a main tab (**Open**) or below in **Quick view**; or remove selected papers from the library with **Remove…** (`Delete`). Add papers via **Import PDFs…** or **Import folder…**—when importing a single PDF, choose **Import & open** to import the file and immediately view it in a reader tab. **Open** (`Ctrl+O` in the reader) imports/reuses a managed copy and opens it in a tab; its explicit Save creates a library revision.
 
 ![Library catalog dialog showing imported papers with confirmed authors and years alongside a working draft flagged for metadata review](docs/screenshots/library-catalog.png)
 
@@ -146,9 +150,10 @@ Press `?` while the reader has focus, or choose **Keyboard shortcuts** from the 
 | --- | --- |
 | `N` / `J`, `P` / `K` | Next page, previous page |
 | `Home`, `End`, `G` | First page, last page, or jump to a specific page number |
+| `Ctrl+Shift+J`, `Ctrl+J` | Set a temporary reading mark, or return to it in the active pane |
 | `Alt+Left` | Return to previous reading position after jumping |
 | `Esc` | Close an open dialog, or return focus from a toolbar field back to the PDF so arrows, `Space`, and `Page Up`/`Down` scroll naturally |
-| `Ctrl+F` | Find text in the paper pane you clicked last |
+| `Ctrl+F` | Find in the active pane. Enter searches from the current page, Shift+Enter searches backwards, and Esc cancels |
 | `Ctrl++`, `Ctrl+-`, `Ctrl+0` | Zoom in, zoom out, or fit page width |
 | `M`, hold `Space` and drag, or middle-button drag | Pan the PDF |
 | `V`, `D`, `H`, `C` | Switch to **Select**, **Draw**, or **Highlight**; start a **Comment** on the selection or current page |

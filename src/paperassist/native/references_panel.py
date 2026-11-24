@@ -12,7 +12,7 @@ from paperassist import references
 from paperassist.citation import fold
 from paperassist.citations import bibliography_destination, citation_matches, next_citation_index
 
-from .acquisition import reference_status, status_tone
+from .acquisition import blocked_urls, reference_status, status_tone
 from .citations import citation_position, reading_position, reveal_citation
 from .jobs import JobWatcher
 from .theme import FlowLayout, INK, LINE, TEAL, TONE_NEUTRAL, reference_palette, reference_tone, set_props
@@ -175,15 +175,23 @@ class ReferencesPanel(QWidget):
         self.retry.setProperty("link", True)
         self.acquire = QPushButton("Acquire references")
         self.acquire.setProperty("link", True)
+        self.open_blocked = QPushButton("Open blocked")
+        self.open_blocked.setProperty("link", True)
+        self.open_blocked.setToolTip("Open blocked open-access PDF links in your browser")
+        self.check_folder = QPushButton("Check folder")
+        self.check_folder.setProperty("link", True)
+        self.check_folder.setToolTip("Check your manual downloads folder for missing references")
         self.repair = QPushButton("Repair downloads")
         self.repair.setProperty("link", True)
         self.acquire.clicked.connect(lambda: self.acquisition and self.acquisition.offer(self.document_id, self.refs))
+        self.open_blocked.clicked.connect(lambda: self.acquisition and self.acquisition.open_blocked(self.document_id))
+        self.check_folder.clicked.connect(lambda: self.acquisition and self.acquisition.check_folder_batch(self.document_id))
         self.repair.clicked.connect(lambda: self.acquisition and self.acquisition.repair(self.document_id))
 
         self.actions_bar = QWidget()
         actions_flow = FlowLayout(self.actions_bar, margin=0, h_spacing=14, v_spacing=4)
-        actions_flow.addWidget(self.acquire)
-        actions_flow.addWidget(self.repair)
+        for button in (self.acquire, self.open_blocked, self.check_folder, self.repair):
+            actions_flow.addWidget(button)
 
         self.choices = QWidget()
         self.choice_layout = QVBoxLayout(self.choices)
@@ -232,7 +240,10 @@ class ReferencesPanel(QWidget):
         self._refs_by_id = {ref["id"]: ref for ref in value}
 
     def _set_actions_visible(self, visible):
+        blocked = blocked_urls(self.refs) if visible else []
         self.acquire.setVisible(visible)
+        self.open_blocked.setVisible(bool(blocked))
+        self.check_folder.setVisible(visible)
         self.repair.setVisible(visible)
 
     def eventFilter(self, watched, event):
@@ -315,6 +326,8 @@ class ReferencesPanel(QWidget):
         available = document_id is not None and self.workspace is not None
         self._set_actions_visible(available)
         self.acquire.setEnabled(available)
+        self.open_blocked.setEnabled(available)
+        self.check_folder.setEnabled(available)
         self.repair.setEnabled(available)
         self.choices.hide()
         self.filter.blockSignals(True)
@@ -388,8 +401,15 @@ class ReferencesPanel(QWidget):
             self._message(f"{len(shown)} of {len(self.refs)} references" if len(shown) != len(self.refs) else f"{len(shown)} references")
             if self.payload_status == "partial":
                 self.status.setToolTip("Detected citations only; bibliography and counts may be incomplete.")
-        self.acquire.setEnabled(self.document_id is not None and bool(self.refs))
-        self.repair.setEnabled(self.document_id is not None)
+        available = self.document_id is not None and self.workspace is not None
+        blocked = blocked_urls(self.refs) if available else []
+        self._set_actions_visible(available)
+        self.open_blocked.setText(f"Open blocked ({len(blocked)})" if blocked else "Open blocked")
+        self.acquire.setEnabled(available and bool(self.refs))
+        self.open_blocked.setEnabled(available and bool(blocked))
+        self.check_folder.setEnabled(available and any(not r.get("local_document_id") and not r.get("legacy") for r in self.refs))
+        self.repair.setEnabled(available)
+        self.actions_bar.updateGeometry()
 
     def _item(self, ref_id):
         return next((self.list.item(i) for i in range(self.list.count())

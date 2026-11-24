@@ -469,7 +469,9 @@ def _unpaywall_pdf(ref, cfg):
         if error.code == 404:
             return 'not_found', 'Unpaywall does not know this DOI.', None
         raise
-    places = [info.get('best_oa_location') or {}, *(info.get('oa_locations') or [])]
+    # Prefer green repository mirrors before publisher pages that often challenge automated clients.
+    places = sorted([info.get('best_oa_location') or {}, *(info.get('oa_locations') or [])],
+                    key=lambda place: place.get('host_type') != 'repository')
     urls = _https(dict.fromkeys(place['url_for_pdf'] for place in places if place.get('url_for_pdf')))[:4]
     return ('found', 'Open-access PDF found.', urls) if urls else ('not_found', 'No PDF found by Unpaywall.', None)
 
@@ -520,12 +522,12 @@ def _names_author(data, surname):
     return compact(surname) in text if len(text) >= 40 else None
 
 
-def _fetch_pdf(urls, surname=None):
+def _fetch_pdf(urls, surname=None, email=''):
     """The first link that really is a PDF by `surname`: (bytes, True) or (bytes, None) when unreadable."""
     errors = []
     for url in urls:
         try:
-            data = http_client.download_pdf(url)
+            data = http_client.download_pdf(url, email=email) if email else http_client.download_pdf(url)
             if len(data) > MAX_PDF:
                 raise ValueError('Download exceeds the size limit')
             if data.startswith(b'%PDF-'):
@@ -683,6 +685,24 @@ def download(library, ref, progress=None, settings=None):
             except (FileNotFoundError, KeyError):
                 continue
             return _result('local', lead, attempts, identity, document_id=document['id'])
+    local_arxiv = arxiv_id(ref) or (identity or {}).get('arxiv_id') or ''
+    if local_arxiv and library and hasattr(library, 'find_by_arxiv'):
+        found = library.find_by_arxiv(local_arxiv)
+        for document in (found if isinstance(found, (list, tuple)) else ()):
+            try:
+                library.get_path(document['id'])
+            except (FileNotFoundError, KeyError):
+                continue
+            return _result('local', lead, attempts, identity, document_id=document['id'])
+    local_bib = str((identity or {}).get('bibcode') or '').strip().lower()
+    if local_bib and library and hasattr(library, 'find_by_identifier'):
+        found = library.find_by_identifier('bibcode', local_bib)
+        for document in (found if isinstance(found, (list, tuple)) else ()):
+            try:
+                library.get_path(document['id'])
+            except (FileNotFoundError, KeyError):
+                continue
+            return _result('local', lead, attempts, identity, document_id=document['id'])
     for name, lookup in PROVIDERS:
         if progress:
             progress(name)
@@ -699,7 +719,7 @@ def download(library, ref, progress=None, settings=None):
             status, message, urls = lookup(ref, cfg)
             if urls:
                 surname = ref.get('authors') or (identity or {}).get('first_author')
-                data, checked = _fetch_pdf(urls, surname)
+                data, checked = _fetch_pdf(urls, surname, email=cfg.email)
                 filename = pdf_name(surname, (identity or {}).get('year') or str(ref.get('year') or '')[:4],
                                     (identity or {}).get('publication')) if identity and surname else 'download.pdf'
                 document = library.import_stream(BytesIO(data), filename)

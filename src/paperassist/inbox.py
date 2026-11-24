@@ -8,6 +8,7 @@ never the browser's download name. Nothing in the folder is written, moved or de
 import hashlib
 import os
 import re
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -136,14 +137,32 @@ def _candidate(entry):
             'modified': datetime.fromtimestamp(entry['mtime'], timezone.utc).isoformat()}
 
 
+def _scan_and_read(folder):
+    return [{**entry, **_read(entry['path'])} for entry in _scan(Path(folder))]
+
+
+def _verified_entries(ref, scanned, digests=None):
+    verdicts = [(entry, _verdict(ref, entry)) for entry in scanned]
+    verified = [entry for entry, verdict in verdicts if verdict == 'verified']
+    if len(verified) <= 1:
+        return verdicts, verified
+    # The same paper downloaded twice is one candidate, not an ambiguity.
+    seen = digests if digests is not None else {}
+    unique = {}
+    for entry in verified:
+        digest = seen.get(entry['path'])
+        if digest is None:
+            digest = seen[entry['path']] = _sha256(entry['path'])
+        unique.setdefault(digest, entry)
+    return verdicts, list(unique.values())
+
+
 def check_folder(library, document_id, reference_id, folder, cfg=None):
     if not folder:
         return NO_FOLDER
     ref, note = _identify(library, document_id, _find_reference(library, document_id, reference_id), cfg or Settings())
-    verdicts = [(entry, _verdict(ref, {**entry, **_read(entry['path'])})) for entry in _scan(Path(folder))]
-    verified = [entry for entry, verdict in verdicts if verdict == 'verified']
-    # The same paper downloaded twice is one candidate, not an ambiguity.
-    unique = list({_sha256(entry['path']): entry for entry in verified}.values()) if len(verified) > 1 else verified
+    scanned = _scan_and_read(folder)
+    verdicts, unique = _verified_entries(ref, scanned)
     if len(unique) > 1:
         return {'status': 'ambiguous', 'candidates': [_candidate(e) for e in unique[:MAX_CANDIDATES]],
                 'summary': 'Several PDFs in your folder match this reference; choose one.' + note}
@@ -156,6 +175,56 @@ def check_folder(library, document_id, reference_id, folder, cfg=None):
         return {'status': 'unverified', 'candidates': [_candidate(e) for e in open_ones[:MAX_CANDIDATES]],
                 'summary': 'No PDF could be verified automatically; choose one if it is the right paper.' + note}
     return {'status': 'none', 'summary': f'No PDF in {folder} matches this reference.' + note}
+
+
+def check_folder_batch(library, document_id, folder, *, reference_ids=None, progress=None, cancel=None, lock=None):
+    """Scan `folder` once and import unambiguous verified PDFs for eligible missing references."""
+    if not folder:
+        return NO_FOLDER
+    guard = lock if lock is not None else nullcontext()
+    with guard:
+        current = references.get(library, document_id)['references']
+    wanted = {str(v) for v in reference_ids} if reference_ids is not None else None
+    targets = [r for r in current if not r.get('local_document_id') and not r.get('legacy')
+               and (wanted is None or str(r['id']) in wanted)]
+    if not targets:
+        return {'status': 'none', 'linked': [], 'ambiguous': [],
+                'summary': 'All eligible references are already in the library.'}
+    scanned = _scan_and_read(folder)
+    if not scanned:
+        return {'status': 'none', 'linked': [], 'ambiguous': [],
+                'summary': f'No verified PDF match found in {folder}.'}
+    linked, ambiguous, digests = [], [], {}
+    for index, ref in enumerate(targets):
+        if cancel is not None and cancel.is_set():
+            break
+        if progress is not None:
+            progress(index, len(targets), ref['id'])
+        _, unique = _verified_entries(ref, scanned, digests)
+        if len(unique) > 1:
+            ambiguous.append(ref['id'])
+        elif len(unique) == 1:
+            with guard:
+                latest = next((r for r in references.get(library, document_id, resolve=False)['references']
+                               if r['id'] == ref['id']), None)
+                if latest is not None and not latest.get('local_document_id'):
+                    document, _ = _import(library, document_id, latest, unique[0]['path'], True)
+                    linked.append({'reference_id': latest['id'], 'document_id': document['id'],
+                                   'filename': document['filename']})
+        if progress is not None:
+            progress(index + 1, len(targets), ref['id'])
+    n, m = len(linked), len(ambiguous)
+    status = 'linked' if n else 'ambiguous' if m else 'none'
+    if n and m:
+        summary = (f"Linked {n} PDF{'s' if n != 1 else ''} from your folder "
+                   f"({m} reference{'s have' if m != 1 else ' has'} multiple matches — use Check folder on the card).")
+    elif n:
+        summary = f"Linked {n} PDF{'s' if n != 1 else ''} from your folder."
+    elif m:
+        summary = f"{m} reference{'s have' if m != 1 else ' has'} multiple matching PDFs in your folder; use Check folder on the card to choose."
+    else:
+        summary = f'No verified PDF match found in {folder}.'
+    return {'status': status, 'linked': linked, 'ambiguous': ambiguous, 'summary': summary}
 
 
 def link_file(library, document_id, reference_id, folder, name):

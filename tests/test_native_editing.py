@@ -339,6 +339,23 @@ class WindowEditingTests(QtTestCase):
         self.drag(view, [self.word_point(view, 0, first), self.word_point(view, 0, last, True)])
 
     # ---- selection and copy ---------------------------------------------------------------
+    def test_select_all_only_builds_visible_bands_and_streams_copy_without_caching_words(self):
+        view = self.open("lazy-select", lambda path: make_pdf(path, pages=24))
+        cached_before = set(view.doc._words)
+        with patch.object(view.doc, "page_selection", wraps=view.doc.page_selection) as lines:
+            view.select_all()
+            lines.assert_not_called()
+            self.pump()
+            self.assertEqual({call.args[0] for call in lines.call_args_list}, set(view.visible_pages()))
+            view.goto(12)
+            self.pump()
+            self.assertEqual(set(view._visible_selection), set(view.visible_pages()))
+            view.copy_with_source()
+        text = QGuiApplication.clipboard().text()
+        self.assertIn("Page 24.", text)
+        self.assertTrue(text.endswith(f"{view.doc.source.path.name}, PDF pp. 1–24"))
+        self.assertEqual(set(view.doc._words), cached_before)
+
     def test_ctrl_a_selects_all_text_and_shift_click_extends_a_selection(self):
         view = self.open("select")
         self.select_words(view, 3, 10)
@@ -348,7 +365,7 @@ class WindowEditingTests(QtTestCase):
         self.assertGreater(view.selection_lines[-1][1].y0, before[1].y0)
         self.assertEqual(view.selection_lines[0][1].x0, view.doc.words(0)[3][0])  # the anchor stays
         QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
-        self.assertEqual({page for page, _, _ in view.selection_lines}, set(range(len(view.doc))))
+        self.assertEqual({page for page, _, _ in view.selected_lines()}, set(range(len(view.doc))))
         QTest.keyClick(view, Qt.Key_C, Qt.ControlModifier)
         self.assertEqual(QGuiApplication.clipboard().text(), view.selected_text())
         self.assertFalse(view.doc.modified)
@@ -402,6 +419,30 @@ class WindowEditingTests(QtTestCase):
         self.assertEqual(len(PdfReader(view.doc.source.path).pages[0]['/Annots']) - 1, 1)  # plus the link
         QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, self.point(view, 0, 200, 300))
         self.assertEqual(len(view.doc.annotations(0)), 1)  # the release adds nothing
+
+    def test_escape_cancels_active_stroke_and_bare_modifiers_do_not_split_it(self):
+        view = self.open("stroke-modifiers")
+        self.bar.draw.trigger()
+        QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, self.point(view, 0, 50, 300))
+        QTest.mouseMove(view.viewport(), self.point(view, 0, 120, 340))
+        QTest.keyPress(view, Qt.Key_Shift)
+        QTest.keyPress(view, Qt.Key_Control)
+        self.assertEqual(len(view._stroke), 2)
+        self.assertFalse(view.doc.modified)
+        QTest.mouseMove(view.viewport(), self.point(view, 0, 200, 300))
+        QTest.keyClick(view, Qt.Key_Escape)
+        QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, self.point(view, 0, 200, 300))
+        self.assertEqual(view.doc.annotations(0), [])
+        self.assertIs(view.doc.state, SaveState.SAVED)
+
+        # Pressing Shift mid-stroke then releasing normally keeps one continuous stroke.
+        QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, self.point(view, 0, 50, 300))
+        QTest.mouseMove(view.viewport(), self.point(view, 0, 120, 340))
+        QTest.keyPress(view, Qt.Key_Shift)
+        QTest.mouseMove(view.viewport(), self.point(view, 0, 200, 300))
+        QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, self.point(view, 0, 200, 300))
+        self.assertEqual(len(view.doc.annotations(0)), 1)
+        self.assertEqual(len(view.doc.annotations(0)[0]['strokes'][0]), 3)
 
     def test_selected_ink_moves_resizes_and_respects_read_only(self):
         view = self.open('transform')

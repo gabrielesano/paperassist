@@ -1177,3 +1177,67 @@ class LineNumberAndHeadingTests(unittest.TestCase):
                 with patch.object(library, 'get_path', side_effect=AssertionError('get_path should not be called')):
                     resolved = _resolve(library, source['id'], payload, docs)
                 self.assertEqual(resolved['references'][0]['local_document_id'], cited['id'])
+
+    def test_resolve_uses_indexed_manual_links_without_parsing_other_analyses(self):
+        import json
+        from io import BytesIO
+        from pypdf import PdfWriter
+        from paperassist.references import _resolve
+
+        buf = BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        writer.write(buf)
+        pdf_bytes = buf.getvalue()
+
+        with TemporaryDirectory() as directory, Catalog(Path(directory)) as library:
+            docs = [library.import_stream(BytesIO(pdf_bytes + f'\n% {i}\n'.encode()), f'p{i}.pdf') for i in range(6)]
+            target = docs[5]
+            ref = {'id': '0', 'raw': 'Smith, A., & Jones, B. 2020, ApJ, 1, 2', 'authors': 'Smith', 'year': '2020'}
+            for other in docs[1:5]:
+                _save(library, other['id'], {'references': [{**ref, 'manual_link': True, 'local_document_id': target['id']}],
+                                             'status': 'partial', 'destination_version': DESTINATION_VERSION,
+                                             'extraction_version': EXTRACTION_VERSION})
+            _save(library, docs[0]['id'], {'references': [{**dict(ref), 'id': '0'}], 'status': 'partial',
+                                           'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
+            with patch('paperassist.references.json.loads', wraps=json.loads) as loads:
+                resolved = get(library, docs[0]['id'])
+            self.assertEqual((resolved['references'][0]['local_document_id'], resolved['references'][0]['local_match']),
+                             (target['id'], 'shared_manual'))
+            # Only docs[0]'s analysis payload is decoded; docs[1..4]'s manual links come from the SQL index.
+            self.assertFalse(any('manual_link' in call.args[0] for call in loads.call_args_list))
+            self.assertEqual(sum('destination_version' in call.args[0] for call in loads.call_args_list), 1)
+            link(library, docs[1]['id'], '0', None)
+            _resolve(library, docs[0]['id'], {'references': [dict(ref)]}, docs)
+
+    def test_arxiv_and_bibcode_local_reference_matching(self):
+        from paperassist.references import _resolve
+
+        class StubLibrary(ReferenceTestLibrary):
+            def __init__(self, path, docs):
+                super().__init__(path)
+                self.docs = docs
+            def list_documents(self):
+                return self.docs
+            def get_path(self, document_id, annotated=False):
+                return 'paper.pdf'
+
+        docs = [
+            {'id': 1, 'sha256': 's1', 'authors': 'Smith A.', 'year': 2024, 'metadata': {'verified': {'arxiv_id': '2401.12345v2'}}},
+            {'id': 2, 'sha256': 's2', 'authors': 'Brown B.', 'year': 2023, 'metadata': {'candidates': {'arxiv': ['2305.54321']}}},
+            {'id': 3, 'sha256': 's3', 'authors': 'Hopper G.', 'year': 1984, 'metadata': {'verified': {'bibcode': '1984ApJ...279..857R'}}},
+            {'id': 9, 'sha256': 's9', 'authors': 'Source'},
+        ]
+        with TemporaryDirectory() as directory, StubLibrary(Path(directory) / 'lib.sqlite', docs) as library:
+            payload = {'references': [
+                {'id': '0', 'raw': 'Smith, A. 2024, arXiv:2401.12345', 'authors': 'Smith', 'year': '2024'},
+                {'id': '1', 'raw': 'Brown, B. 2023, arXiv:2305.54321', 'authors': 'Brown', 'year': '2023'},
+                {'id': '2', 'raw': 'Wrong, Z. 2023, arXiv:2305.54321', 'authors': 'Wrong', 'year': '2023'},
+                {'id': '3', 'raw': 'Hopper, G. 1984, ApJ, 279, 857', 'authors': 'Hopper', 'year': '1984',
+                 'identity': {'bibcode': '1984apj...279..857r'}},
+            ]}
+            resolved = _resolve(library, 9, payload, docs)['references']
+            self.assertEqual((resolved[0]['local_document_id'], resolved[0]['local_match']), (1, 'arxiv'))
+            self.assertEqual((resolved[1]['local_document_id'], resolved[1]['local_match']), (2, 'first_page_arxiv'))
+            self.assertIsNone(resolved[2]['local_document_id'])
+            self.assertEqual((resolved[3]['local_document_id'], resolved[3]['local_match']), (3, 'bibcode'))

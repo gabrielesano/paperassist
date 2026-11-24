@@ -852,3 +852,60 @@ class LinuxSslCaFallbackTests(Base):
         with patch('paperassist.http_client.get', return_value=payload):
             record = retrieval.crossref_metadata('10.1088/0004-637x/771/2/76', Settings())
         self.assertEqual(record['provider'], 'crossref')
+
+    def test_download_reuses_local_arxiv_and_bibcode_documents(self):
+        library = self.library()
+        library.find_by_arxiv.return_value = [{'id': 11}]
+        library.find_by_identifier.return_value = []
+        with patch('paperassist.http_client.urlopen') as net, patch('paperassist.http_client.download_pdf') as fetch:
+            result = download(library, {'title': 'Preprint arXiv:2401.12345', 'authors': 'Smith', 'year': '2024',
+                                        'raw': 'Smith 2024 arXiv:2401.12345'})
+        self.assertEqual((result['status'], result['document_id']), ('local', 11))
+        library.find_by_arxiv.assert_called_once_with('2401.12345')
+        net.assert_not_called()
+        fetch.assert_not_called()
+
+        library2 = self.library()
+        library2.find_by_arxiv.return_value = []
+        library2.find_by_identifier.return_value = [{'id': 12}]
+        with patch('paperassist.http_client.urlopen') as net, patch('paperassist.http_client.download_pdf') as fetch:
+            result = download(library2, {'raw': 'Hopper 1984', 'identity': {'provider': 'ads', 'doi': '', 'bibcode': '1984ApJ...279..857R'}})
+        self.assertEqual((result['status'], result['document_id']), ('local', 12))
+        library2.find_by_identifier.assert_called_once_with('bibcode', '1984apj...279..857r')
+        net.assert_not_called()
+        fetch.assert_not_called()
+
+    def test_unpaywall_ranks_repository_copies_ahead_of_publisher_hosts(self):
+        payload = json.dumps({
+            'best_oa_location': {'host_type': 'publisher', 'url_for_pdf': 'https://pub0.example/p0.pdf'},
+            'oa_locations': [
+                {'host_type': 'publisher', 'url_for_pdf': 'https://pub1.example/p1.pdf'},
+                {'host_type': 'publisher', 'url_for_pdf': 'https://pub2.example/p2.pdf'},
+                {'host_type': 'publisher', 'url_for_pdf': 'https://pub3.example/p3.pdf'},
+                {'host_type': 'publisher', 'url_for_pdf': 'https://pub4.example/p4.pdf'},
+                {'host_type': 'repository', 'url_for_pdf': 'https://repo.example/accepted.pdf'},
+            ],
+        }).encode()
+        with patch('paperassist.http_client.get', return_value=payload):
+            status, _, urls = retrieval._unpaywall_pdf({'doi': '10.1/x'}, configured(email='reader@example.org'))
+        self.assertEqual(status, 'found')
+        self.assertEqual(urls[0], 'https://repo.example/accepted.pdf')
+        self.assertEqual(len(urls), 4)
+
+    def test_download_pdf_negotiates_pdf_and_includes_optional_mailto_honestly(self):
+        import paperassist
+        response = Mock(status=200)
+        response.read.return_value = PDF
+        with patch('paperassist.http_client.socket.getaddrinfo', return_value=[(0, 0, 0, '', ('93.184.216.34', 443))]), \
+             patch('paperassist.http_client.socket.create_connection'), patch('paperassist.http_client.ssl'), \
+             patch('paperassist.http_client.http.client.HTTPSConnection') as connection:
+            connection.return_value.getresponse.return_value = response
+            download_pdf('https://repo.example/paper.pdf')
+            no_mail_headers = connection.return_value.request.call_args.kwargs['headers']
+            download_pdf('https://repo.example/paper.pdf', email='reader@example.org')
+            mail_headers = connection.return_value.request.call_args.kwargs['headers']
+        self.assertEqual(no_mail_headers['Accept'], 'application/pdf, */*;q=0.8')
+        self.assertEqual(no_mail_headers['User-Agent'], f'PaperAssist/{paperassist.__version__}')
+        self.assertEqual(mail_headers['Accept'], 'application/pdf, */*;q=0.8')
+        self.assertEqual(mail_headers['User-Agent'], f'PaperAssist/{paperassist.__version__} (mailto:reader@example.org)')
+        self.assertNotIn('Mozilla', mail_headers['User-Agent'])
