@@ -190,7 +190,7 @@ class NativeProcessTests(unittest.TestCase):
         self.process.stdout.close()
 
     def event(self, kind):
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
             if self.selector.select(timeout=0.1):
                 line = self.process.stdout.readline()

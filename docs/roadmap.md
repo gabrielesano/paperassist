@@ -29,7 +29,7 @@ throttling, and consolidates the native UI and packaging stack. See
 
 ## Completed transitions and automated acceptance
 
-- Released `0.4.0` ([release notes](releases/0.4.0.md)) with:
+- Released `0.4.1` ([release notes](releases/0.4.1.md)) with:
   - Zero-copy `SharedMemory` PDF IPC (parent-owned pool with Python 3.11+
     `resource_tracker` handling) and worker-side PDFium highlight visibility
     filtering (`FPDF_ANNOT_FLAG_HIDDEN`), removing synchronous `pypdf`

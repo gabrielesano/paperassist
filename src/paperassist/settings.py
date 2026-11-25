@@ -38,7 +38,7 @@ class _DATA_BLOB(ctypes.Structure):
 
 
 def _dpapi_libs():
-    return ctypes.windll.crypt32, ctypes.windll.kernel32
+    return ctypes.WinDLL('crypt32', use_last_error=True), ctypes.WinDLL('kernel32', use_last_error=True)
 
 
 def _use_dpapi() -> bool:
@@ -52,7 +52,8 @@ def _dpapi_protect(data: bytes) -> bytes:
     in_blob = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte)))
     out_blob = _DATA_BLOB()
     if not crypt32.CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0x1, ctypes.byref(out_blob)):
-        raise (ctypes.WinError() if hasattr(ctypes, 'WinError') else OSError('CryptProtectData failed'))
+        err = ctypes.get_last_error()
+        raise (ctypes.WinError(err) if err and hasattr(ctypes, 'WinError') else OSError('CryptProtectData failed'))
     try:
         return ctypes.string_at(out_blob.pbData, out_blob.cbData)
     finally:
@@ -66,7 +67,8 @@ def _dpapi_unprotect(data: bytes) -> bytes:
     in_blob = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte)))
     out_blob = _DATA_BLOB()
     if not crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0x1, ctypes.byref(out_blob)):
-        raise (ctypes.WinError() if hasattr(ctypes, 'WinError') else OSError('CryptUnprotectData failed'))
+        err = ctypes.get_last_error()
+        raise (ctypes.WinError(err) if err and hasattr(ctypes, 'WinError') else OSError('CryptUnprotectData failed'))
     try:
         return ctypes.string_at(out_blob.pbData, out_blob.cbData)
     finally:

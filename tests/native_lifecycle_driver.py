@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QThread, QTimer
+from PySide6.QtCore import QThread, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from paperassist import paths
@@ -29,6 +29,8 @@ def run(mode, root):
     document = workspace.library.import_stream(io.BytesIO(source.read_bytes()), source.name)
     workspace.close()
     paths.save_library(directory)
+    # Exercise the real buttons that the driver clicks, including on Cocoa.
+    QApplication.setAttribute(Qt.AA_DontUseNativeDialogs)
     app = QApplication([])
     state = {"started": False, "prompts": 0, "answered": 0}
 
@@ -52,17 +54,22 @@ def run(mode, root):
         if boxes:
             box = boxes[0]
             if state.get("box") is box:
+                if state.get("respond_at") and time.monotonic() >= state["respond_at"]:
+                    if state.get("answered_box") is not box:
+                        state["answered_box"] = box
+                        state["answered"] += 1
+                    answer = state["answer"]
+                    if button := box.button(answer):
+                        button.click()
+                    if box.isVisible():
+                        box.done(int(answer))
                 return
             state["box"] = box
             state["prompts"] += 1
             emit("prompt", count=state["prompts"], text=box.text())
-            answer = (QMessageBox.Ok if mode == "fallback" else QMessageBox.Save if mode == "save"
-                      else QMessageBox.Cancel if state["prompts"] == 1 else QMessageBox.Discard)
-
-            def respond():
-                state["answered"] += 1
-                box.button(answer).click()
-            QTimer.singleShot(150, respond)
+            state["answer"] = (QMessageBox.Ok if mode == "fallback" else QMessageBox.Save if mode == "save"
+                               else QMessageBox.Cancel if state["prompts"] == 1 else QMessageBox.Discard)
+            state["respond_at"] = time.monotonic() + (0.35 if mode == "cancel" and state["prompts"] == 1 else 0.15)
             return
         # Cocoa dispatches events during window creation, before the Qt event loop starts.
         if not QThread.currentThread().loopLevel():
@@ -110,7 +117,7 @@ def run(mode, root):
 
     timer = QTimer(app, interval=20, timeout=tick)
     timer.start()
-    QTimer.singleShot(15000, lambda: app.exit(9))
+    QTimer.singleShot(25000, lambda: app.exit(9))
     previous = signal.getsignal(signal.SIGTERM)
     code = native_app.run([])
     timer.stop()

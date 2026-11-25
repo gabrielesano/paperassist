@@ -44,7 +44,13 @@ class SettingsTests(unittest.TestCase):
         file = self.data / 'settings.json'
         if os.name != 'nt':  # Windows has no POSIX permission bits
             self.assertEqual(file.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(json.loads(file.read_text())['keys']['ads'], SECRET)
+        stored_key = json.loads(file.read_text(encoding='utf-8'))['keys']['ads']
+        if os.name == 'nt':
+            self.assertTrue(stored_key.startswith('dpapi:'))
+            self.assertNotIn(SECRET, stored_key)
+        else:
+            self.assertEqual(stored_key, SECRET)
+        self.assertEqual(settings.load(self.data).key('ads'), SECRET)
         self.assertNotIn(SECRET, json.dumps(self.workspace.get_settings().providers()))
 
     def test_omitted_fields_stay_and_null_or_empty_clears(self):

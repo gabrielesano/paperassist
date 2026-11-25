@@ -1,5 +1,6 @@
 """The native Sources dialog on a disposable library; every network call is mocked."""
 import json
+import os
 import threading
 import unittest
 from unittest.mock import patch
@@ -62,7 +63,14 @@ class SourcesDialogTests(QtTestCase):
         self.row("arxiv").toggle.setChecked(False)
         self.dialog.save()
         self.assertEqual(self.dialog.message.text(), "Saved.")
-        self.assertEqual(self.stored(), {"email": "reader@example.org", "enabled": {"arxiv": False}, "keys": {"ads": FAKE_KEY}})
+        stored = self.stored()
+        if os.name == "nt":
+            self.assertTrue(stored["keys"]["ads"].startswith("dpapi:"))
+            self.assertNotIn(FAKE_KEY, stored["keys"]["ads"])
+            self.assertEqual(stored, {"email": "reader@example.org", "enabled": {"arxiv": False}, "keys": {"ads": stored["keys"]["ads"]}})
+        else:
+            self.assertEqual(stored, {"email": "reader@example.org", "enabled": {"arxiv": False}, "keys": {"ads": FAKE_KEY}})
+        self.assertEqual(self.workspace.get_settings().key("ads"), FAKE_KEY)
         ads = self.row("ads")
         self.assertEqual(ads.key_field.text(), "")  # a key is never shown again
         self.assertEqual(ads.status.text(), "Ready · token set …1234")

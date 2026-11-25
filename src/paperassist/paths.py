@@ -62,7 +62,7 @@ def _is_windows() -> bool:
 
 
 def _win32_libs():
-    return ctypes.windll.kernel32, ctypes.windll.advapi32
+    return ctypes.WinDLL('kernel32', use_last_error=True), ctypes.WinDLL('advapi32', use_last_error=True)
 
 
 def _restrict_windows_acl(path: Path) -> None:
@@ -73,7 +73,6 @@ def _restrict_windows_acl(path: Path) -> None:
     SDDL_REVISION_1 = 1
     DACL_SECURITY_INFORMATION = 0x00000004
     PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
-    ERROR_INSUFFICIENT_BUFFER = 122
 
     class _SID_AND_ATTRIBUTES(ctypes.Structure):
         _fields_ = [('Sid', ctypes.c_void_p), ('Attributes', wintypes.DWORD)]
@@ -82,7 +81,8 @@ def _restrict_windows_acl(path: Path) -> None:
         _fields_ = [('User', _SID_AND_ATTRIBUTES)]
 
     def _fail():
-        raise (ctypes.WinError() if hasattr(ctypes, 'WinError') else OSError('Windows ACL update failed'))
+        err = ctypes.get_last_error()
+        raise (ctypes.WinError(err) if err and hasattr(ctypes, 'WinError') else OSError('Windows ACL update failed'))
 
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -104,10 +104,7 @@ def _restrict_windows_acl(path: Path) -> None:
     sd = ctypes.c_void_p()
     try:
         needed = wintypes.DWORD(0)
-        if advapi32.GetTokenInformation(token, TokenUser, None, 0, ctypes.byref(needed)):
-            _fail()
-        last_error = ctypes.GetLastError() if hasattr(ctypes, 'GetLastError') else ERROR_INSUFFICIENT_BUFFER
-        if last_error != ERROR_INSUFFICIENT_BUFFER or not needed.value:
+        if advapi32.GetTokenInformation(token, TokenUser, None, 0, ctypes.byref(needed)) or not needed.value:
             _fail()
         buf = ctypes.create_string_buffer(needed.value)
         if not advapi32.GetTokenInformation(token, TokenUser, buf, needed.value, ctypes.byref(needed)):

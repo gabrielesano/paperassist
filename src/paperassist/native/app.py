@@ -116,8 +116,7 @@ def termination_requests(app):
     """Deliver SIGTERM through the normal close guard, outside the signal handler."""
     closing = False
 
-    def wakeup(*_args):
-        nonlocal closing
+    def drain_signals():
         received = bytearray()
         while True:
             try:
@@ -127,6 +126,11 @@ def termination_requests(app):
                 received.extend(data)
             except (BlockingIOError, InterruptedError):
                 break
+        return received
+
+    def wakeup(*_args):
+        nonlocal closing
+        received = drain_signals()
         if closing or signal.SIGTERM not in received:
             return
         closing = True
@@ -138,6 +142,8 @@ def termination_requests(app):
             if not windows:
                 app.quit()
         finally:
+            # Some event loops defer socket notifications until the modal prompt returns.
+            drain_signals()
             closing = False
 
     reader, writer = socket.socketpair()
