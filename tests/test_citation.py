@@ -1,6 +1,7 @@
 import unittest
 
-from paperassist.citation import (describe, first_surname, generic_publication, journal_code, pdf_name, printed_references,
+from paperassist.citation import (SUPERSCRIPT_MARKER, citation_numbers, clean_text, describe, first_surname,
+                                  generic_publication, journal_code, pdf_name, printed_references,
                                   publication, same_surname, surnames)
 
 
@@ -106,3 +107,17 @@ class CitationTests(unittest.TestCase):
         self.assertTrue(has_surname('By A. Török and B. Smith', 'Torok'))
         self.assertFalse(has_surname('Smithson et al.', 'Smith'))
         self.assertIn('van', PARTICLES)
+
+    def test_surnames_supports_hyphenated_initials_no_comma_initials_and_given_names(self):
+        self.assertEqual(surnames('Lions, J.-L., Temam, R., & Wang, S. 1992, Nonlinearity'), ['Lions', 'Temam', 'Wang'])
+        self.assertEqual(surnames('Hood A. W., Browning P. K., & Van der Linden R. A. M. 2009, A&A'),
+                         ['Hood', 'Browning', 'Van der Linden'])
+        self.assertEqual(surnames('Smith, Alice, Jones, Bob, & Brown, Carol 2020, ApJ'),
+                         ['Smith', 'Jones', 'Brown'])
+        self.assertEqual(surnames('Smith, Alice, Jones, Bob, and Brown, Carol. A study of waves, 2020'),
+                         ['Smith', 'Jones', 'Brown'])
+
+    def test_superscript_markers_and_clean_text_preservation(self):
+        self.assertEqual(clean_text('ﬁrst shown.¹˒²⁻⁴'), 'first shown.¹˒²⁻⁴')
+        self.assertEqual(citation_numbers('¹˒²⁻⁴'), [1, 2, 3, 4])
+        self.assertEqual([m.group() for m in SUPERSCRIPT_MARKER.finditer('shown.¹˒²⁻⁴ and 10⁶ and cm⁻³')], ['¹˒²⁻⁴'])

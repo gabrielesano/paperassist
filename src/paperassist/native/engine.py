@@ -7,6 +7,7 @@ import ctypes
 import math
 from contextlib import closing
 from functools import wraps
+from pathlib import Path
 from threading import RLock
 import unicodedata
 from typing import NamedTuple
@@ -113,6 +114,59 @@ def _search_ranges(text_page, query):
         start = found + len(needle)
 
 
+def _same_visual_line(band_line, band_rect, word_line, rect):
+    if word_line == band_line:
+        return True
+    across_y = min(band_rect.y1, rect.y1) - max(band_rect.y0, rect.y0)
+    if across_y <= 0.5 * min(band_rect.height, rect.height):
+        return False
+    gap_x = max(rect.x0 - band_rect.x1, band_rect.x0 - rect.x1)
+    return gap_x <= 2 * max(band_rect.height, rect.height)
+
+
+def _search_sidecar_words(number, words, query):
+    needle = fold(query)
+    if not needle or not words:
+        return []
+    parts, owners = [], []
+    for word_index, word in enumerate(words):
+        folded = fold(word[4])
+        if not folded:
+            continue
+        if parts:
+            parts.append(" ")
+            owners.append(None)
+        parts.append(folded)
+        word_len = len(folded)
+        owners.extend((word_index, offset, word_len) for offset in range(word_len))
+    text, hits, start = "".join(parts), [], 0
+    while (found := text.find(needle, start)) >= 0:
+        spans = {}
+        for owner in owners[found:found + len(needle)]:
+            if owner is None:
+                continue
+            word_index, offset, word_len = owner
+            if word_index in spans:
+                spans[word_index][1] = offset
+            else:
+                spans[word_index] = [offset, offset, word_len]
+        band_line = band_rect = None
+        for word_index, (first_char, last_char, word_len) in spans.items():
+            x0, y0, x1, y1, _, word_line = words[word_index]
+            width = x1 - x0
+            rect = Rect(x0 + width * (first_char / word_len), y0, x0 + width * ((last_char + 1) / word_len), y1)
+            if band_rect is not None and _same_visual_line(band_line, band_rect, word_line, rect):
+                band_rect = band_rect.union(rect)
+            else:
+                if band_rect is not None:
+                    hits.append((number, band_rect))
+                band_line, band_rect = word_line, rect
+        if band_rect is not None:
+            hits.append((number, band_rect))
+        start = found + len(needle)
+    return hits
+
+
 class RenderedPage:
     def __init__(self, bitmap):
         self._bitmap = bitmap
@@ -123,27 +177,86 @@ class RenderedPage:
         return memoryview(self._bitmap.buffer)
 
 
+def _annot_string(annot, key):
+    length = raw.FPDFAnnot_GetStringValue(annot, key, None, 0)
+    if length <= 2:
+        return ""
+    buffer = (ctypes.c_ushort * ((length + 1) // 2))()
+    raw.FPDFAnnot_GetStringValue(annot, key, buffer, length)
+    return bytes(buffer)[:length].decode("utf-16-le", errors="replace").rstrip("\0")
+
+
 class Pdf:
     @pdf_locked
-    def __init__(self, data):
-        self.data = bytes(data)
-        self._doc = pdfium.PdfDocument(self.data)
-        self.sizes = [self._doc.get_page_size(i) for i in range(len(self._doc))]
-        if not self.sizes or any(not math.isfinite(size) or size <= 0 for pair in self.sizes for size in pair):
-            self._doc.close()
-            raise ValueError('PDF must contain pages with positive width and height')
+    def __init__(self, data, *, owner=None, sha256=None, ocr_cache_dir=None):
+        self.sha256 = sha256
+        self.ocr_cache_dir = Path(ocr_cache_dir) if ocr_cache_dir else None
+        if isinstance(data, ctypes.Array):
+            self._buffer = data
+            self._owner = owner
+            self._data = None
+            source = self._buffer
+        else:
+            self._buffer = None
+            self._owner = owner
+            self._data = bytes(data)
+            source = self._data
+        self._doc = None
+        try:
+            self._doc = pdfium.PdfDocument(source)
+            self.sizes = [self._doc.get_page_size(i) for i in range(len(self._doc))]
+            if not self.sizes or any(not math.isfinite(size) or size <= 0 for pair in self.sizes for size in pair):
+                raise ValueError('PDF must contain pages with positive width and height')
+        except Exception:
+            if self._doc is not None:
+                self._doc.close()
+                self._doc = None
+            self._buffer = None
+            self._owner = None
+            raise
         self._frames = {}
         self._named_destinations = None
         self._named_pages = {}
 
     @property
+    def data(self):
+        if self._data is not None:
+            return self._data
+        return bytes(self._buffer) if self._buffer is not None else b""
+
+    @data.setter
+    def data(self, value):
+        self._data = value
+        self._buffer = None
+
+    @property
     def is_closed(self):
-        return self._doc.raw is None
+        return self._doc is None or self._doc.raw is None
 
     @pdf_locked
-    def render(self, page, scale):
+    def render(self, page, scale, *, highlights=True):
         with closing(self._doc[page]) as target:
-            return RenderedPage(target.render(scale=scale, rev_byteorder=True, prefer_bgrx=False))
+            hidden = []
+            if not highlights:
+                for index in range(raw.FPDFPage_GetAnnotCount(target)):
+                    annot = raw.FPDFPage_GetAnnot(target, index)
+                    if not annot:
+                        continue
+                    subtype = raw.FPDFAnnot_GetSubtype(annot)
+                    if subtype == raw.FPDF_ANNOT_HIGHLIGHT or (
+                        subtype == raw.FPDF_ANNOT_INK and _annot_string(annot, b"IT").lstrip("/") == "InkHighlight"
+                    ):
+                        flags = raw.FPDFAnnot_GetFlags(annot)
+                        hidden.append((annot, flags))
+                        raw.FPDFAnnot_SetFlags(annot, flags | raw.FPDF_ANNOT_FLAG_HIDDEN)
+                    else:
+                        raw.FPDFPage_CloseAnnot(annot)
+            try:
+                return RenderedPage(target.render(scale=scale, rev_byteorder=True, prefer_bgrx=False))
+            finally:
+                for annot, flags in hidden:
+                    raw.FPDFAnnot_SetFlags(annot, flags)
+                    raw.FPDFPage_CloseAnnot(annot)
 
     @pdf_locked
     def frame(self, number):
@@ -173,6 +286,9 @@ class Pdf:
                 start = i
         text_page.close()
         page.close()
+        if not words and self.ocr_cache_dir and self.sha256:
+            from paperassist import ocr
+            return ocr.sidecar_words(self.ocr_cache_dir, self.sha256, number, self.sizes[number])
         return words
 
     def _dest_target(self, dest, *, clamp_top=False):
@@ -272,6 +388,7 @@ class Pdf:
         hits = []
         frame = self.frame(number)
         with closing(self._doc[number]) as page, closing(page.get_textpage()) as text_page:
+            has_chars = text_page.count_chars() > 0
             for match in _search_ranges(text_page, text):
                 line = None
                 angle = raw.FPDFText_GetCharAngle(text_page, match[0])
@@ -287,6 +404,10 @@ class Pdf:
                         line and hits.append((number, line))
                         line = rect
                 line and hits.append((number, line))
+        if not hits and not has_chars and self.ocr_cache_dir and self.sha256:
+            from paperassist import ocr
+            words = ocr.sidecar_words(self.ocr_cache_dir, self.sha256, number, self.sizes[number])
+            return _search_sidecar_words(number, words, text)
         return hits
 
     def render_data(self, highlights=True):
@@ -302,8 +423,13 @@ class Pdf:
     @pdf_locked
     def _replace(self, data):
         document = pdfium.PdfDocument(data)
-        self._doc.close()
-        self.data, self._doc = data, document
+        if self._doc is not None:
+            self._doc.close()
+        self._buffer = None
+        if self._owner is not None:
+            self._owner.close()
+            self._owner = None
+        self._data, self._doc = data, document
         self._named_destinations = None
         self._named_pages.clear()
 
@@ -360,4 +486,10 @@ class Pdf:
 
     @pdf_locked
     def close(self):
-        self._doc.close()
+        if self._doc is not None:
+            self._doc.close()
+            self._doc = None
+        self._buffer = None
+        if self._owner is not None:
+            self._owner.close()
+            self._owner = None

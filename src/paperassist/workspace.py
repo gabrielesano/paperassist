@@ -15,7 +15,7 @@ from pathlib import Path
 
 from paperassist.library import Library
 from paperassist.native.platform import trim_heap
-from paperassist import inbox, location, metadata_refresh, paths, references, retrieval, settings
+from paperassist import inbox, location, metadata_refresh, ocr, paths, references, retrieval, settings
 
 
 class WorkspaceConflict(ValueError):
@@ -77,6 +77,12 @@ class Workspace:
 
     def save_view(self, document_id, view):
         return self.library.save_view(document_id, view)
+
+    def get_session(self):
+        return self.library.get_session()
+
+    def save_session(self, payload):
+        return self.library.save_session(payload)
 
     def submit(self, task):
         with self.job_lock:
@@ -188,7 +194,7 @@ class Workspace:
         if ocr not in metadata_refresh.OCR_MODES:
             raise ValueError("ocr must be one of: " + ", ".join(metadata_refresh.OCR_MODES))
         if document_ids is None:
-            document_ids = [document['id'] for document in self.library.list_documents()]
+            document_ids = self.library.document_ids()
         elif (not isinstance(document_ids, list) or not document_ids
               or any(type(value) is not int or value <= 0 for value in document_ids)):
             raise ValueError('document_ids must be a non-empty list of positive integers')
@@ -286,6 +292,20 @@ class Workspace:
     def repair_downloads(self, document_id):
         self.library.get_document(document_id)
         return self.submit(lambda job, cancel: {'documents': references.repair_downloads(self.library, document_id)})
+
+    def ocr_document(self, document_id: int, pages: list[int] | None = None):
+        doc = self.library.get_document(document_id)
+        source_path = self.library.get_path(document_id, annotated=False)
+        cache_dir = self.data_dir / 'cache' / 'ocr'
+        sha256 = doc['sha256']
+        return self.submit(lambda job, cancel: ocr.recognize_pages(
+            source_path,
+            cache_dir,
+            sha256,
+            pages=pages,
+            cancel=cancel,
+            progress=lambda step: job.update(progress=step),
+        ))
 
 
 class LibraryInUse(RuntimeError):

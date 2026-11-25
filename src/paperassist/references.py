@@ -1,5 +1,6 @@
 """Conservative, per-file bibliography extraction and citation counts."""
 
+import ctypes
 import json
 import math
 import re
@@ -7,19 +8,27 @@ import statistics
 import threading
 import unicodedata
 from bisect import bisect_right
+from contextlib import closing
 from functools import wraps
-from io import BytesIO
 from pathlib import Path
 from weakref import WeakValueDictionary
 
-from pypdf import PdfReader
-
-from paperassist.citation import (ARXIV_ID, DOI, NUMERIC_MARKER, PARTICLES, SURNAME, arxiv_id, citation_numbers,
-                                  clean_text as _clean, describe, fold, has_surname, pdf_name,
-                                  publication as _publication, reference_key as _normalize,
-                                  strip_arxiv_version, surnames)
+from paperassist.citation import (ARXIV_ID, DOI, NUMERIC_MARKER, PAREN_NUMERIC_MARKER, PARTICLES, SCIENTIFIC_UNITS,
+                                  SUPERSCRIPT_MARKER, SURNAME, arxiv_id, citation_numbers, clean_text as _clean,
+                                  describe, fold, has_surname, pdf_name, publication as _publication,
+                                  reference_key as _normalize, strip_arxiv_version, superscript_to_ascii, surnames)
 from paperassist.library import Library, manual_fields, sync_manual_links
 from paperassist.retrieval import identify
+
+try:
+    import pypdfium2.raw as raw
+    from paperassist.native.engine import Pdf, pdf_locked
+except ModuleNotFoundError:  # CLI import must stay usable when reader packages are absent
+    raw = None
+    Pdf = None
+
+    def pdf_locked(method):
+        return method
 
 HEADING = re.compile(r'^\s*(?:\d+\.?\s+)?(?:references|bibliography|literature\s+cited)\s*[.:]?\s*$', re.I | re.M)
 FALLBACK_HEADING = re.compile(
@@ -41,7 +50,7 @@ PARTICLE = '(?:' + '|'.join(sorted(PARTICLES, key=len, reverse=True)) + ')'
 # A few trailing letters after a space are a kerning gap ("Spi cer"), not another word.
 SECOND_AUTHOR = rf"(?:[^\W\d_]+\s+(?={PARTICLE}\s))?(?:{PARTICLE}\s+)*[^\W\d_]+(?:[-'’][^\W\d_]+)*(?:\s[a-z]{{2,4}}(?![a-z]))?"
 # "B" in "A & B 2001" is a second author, not a citation of B.
-AFTER_NAME = re.compile(r'[^\W\d_]{2}\s*(?:&|\band)\s+$', re.I)
+AFTER_NAME = re.compile(r'[^\W\d_]{2},?\s*(?:&|\band)\s+$', re.I)
 DESTINATION_VERSION = 6
 # Sections printed after the references. Bare words must fill the line, so a wrapped title such as
 # "Table of integrals" stays in its entry.
@@ -77,7 +86,21 @@ CONTINUATION = re.compile(r'(?:[-–−]\s?\d+[.,;)]?$|\d+\s?[-–−]\s?\d+[.,;
 SHORT_LINE, MIN_LINES = 16, 8
 # An entry this many times longer than the median entry is suspect, however long real author lists are.
 OUTLIER = 6
-EXTRACTION_VERSION = 7
+EXTRACTION_VERSION = 8
+_BLANK = {' ', '\r', '\n', '\t', '\ufffe'}
+_SUP_DIGITS_MAP = str.maketrans('0123456789,;–—−-', '⁰¹²³⁴⁵⁶⁷⁸⁹˒˒⁻⁻⁻⁻')
+_SUP_ASCII_GROUP = re.compile(r'\d+(?:[,;–—−-]\d+)*')
+_PAREN_PREFIX_IGNORE = re.compile(
+    r'(?:\b(?:eqs?|equations?|figs?|figures?|tables?|tabs?|secs?|sections?|models?|cases?|steps?)\.?\s*$'
+    r'|(?:=|\+|-|–|—|−|/|\*|×|<|>|≤|≥|≈|∼|∝|\^|_)\s*$)',
+    re.I,
+)
+_PAREN_CONT_IGNORE = re.compile(
+    r'\b(?:eqs?|equations?|figs?|figures?|tables?|tabs?|secs?|sections?|models?|cases?|steps?)'
+    r'\.?\s*\(\s*\d+(?:\s*[,;–—−-]\s*\d+)*\s*\)\s*(?:,\s*|and\s+|or\s+|to\s+|[–—−-]\s*)$',
+    re.I,
+)
+_MATH_TRAILING = re.compile(r'^\s*(?:=|\+|\*|/|×|\^|_)')
 
 _locks = WeakValueDictionary()
 _locks_guard = threading.Lock()
@@ -321,29 +344,41 @@ def _chain_line_numbers(ordered, step, n_pages, pagewise=False):
     return []
 
 
-def _detect_line_numbers(pages_chunks, page_widths, prose_xs):
-    """Identify margin line-number spans by outer-margin alignment and step progression."""
+def _detect_line_numbers(pages_chunks, page_widths, prose_xs, *, prose_right_xs=None, top_down=False):
+    """Identify outer-margin and gutter line-number spans by alignment and step progression."""
     if not prose_xs or not any(pages_chunks):
         return set()
     sorted_xs = sorted(prose_xs)
     body_left = sorted_xs[int(len(sorted_xs) * 0.02)]
-    body_right = sorted_xs[min(len(sorted_xs) - 1, int(len(sorted_xs) * 0.99))]
-    by_side = {'left': [], 'right': []}
+    sorted_rxs = sorted(prose_right_xs or prose_xs)
+    body_right = sorted_rxs[min(len(sorted_rxs) - 1, int(len(sorted_rxs) * 0.99))]
+    by_side = {'left': [], 'gutter': [], 'right': []}
     for page_idx, chunks in enumerate(pages_chunks):
         if not chunks:
             continue
         width = page_widths[page_idx]
-        for chunk_idx, (text, x, y, _) in enumerate(chunks):
+        for chunk_idx, chunk in enumerate(chunks):
+            text, x, y, _ = chunk[:4]
+            x1 = chunk[4] if len(chunk) > 4 else x
+            band_idx = chunk[5] if len(chunk) > 5 else None
             stripped = text.strip()
             if not _ASCII_DIGITS.match(stripped):
                 continue
             val = int(stripped)
             if val < 1:
                 continue
+            y_val = -y if top_down else y
             if x < body_left - 2:
-                by_side['left'].append((page_idx, 'left', chunk_idx, val, x, y, 0))
+                by_side['left'].append((page_idx, 'left', chunk_idx, val, x, y_val, 0))
             elif x > body_right + 2 and x > width * 0.80:
-                by_side['right'].append((page_idx, 'right', chunk_idx, val, x, y, 0))
+                by_side['right'].append((page_idx, 'right', chunk_idx, val, x, y_val, 0))
+            elif (band_idx is not None and width * 0.38 <= x and x1 <= width * 0.62
+                  and not any(other_idx != chunk_idx and other[5] == band_idx
+                              and min(other[4], x1 + 3) > max(other[1], x - 3)
+                              for other_idx, other in enumerate(chunks))
+                  and sum(other[4] <= x - 2 for other in chunks) >= 3
+                  and sum(other[1] >= x1 + 2 for other in chunks) >= 3):
+                by_side['gutter'].append((page_idx, 'gutter', chunk_idx, val, x, y_val, 0))
 
     candidates = []
     for items in by_side.values():
@@ -354,7 +389,8 @@ def _detect_line_numbers(pages_chunks, page_widths, prose_xs):
     if len(candidates) < 4:
         return set()
 
-    ordered = sorted(candidates, key=lambda item: (item[0], 0 if item[1] == 'left' else 1, -item[5], item[2]))
+    side_rank = {'left': 0, 'gutter': 1, 'right': 2}
+    ordered = sorted(candidates, key=lambda item: (item[0], side_rank[item[1]], -item[5], item[2]))
     n_pages = len(pages_chunks)
     for step in (10, 5, 1):
         chain = _chain_line_numbers(ordered, step, n_pages)
@@ -375,8 +411,279 @@ def _detect_line_numbers(pages_chunks, page_widths, prose_xs):
     return pagewise if len(pagewise_pages) >= (1 if n_pages == 1 else 2) else set()
 
 
+def _is_pdfium(source):
+    return hasattr(source, '_doc') and hasattr(source, 'frame')
+
+
+def _weighted_median(pairs):
+    """Median of values weighted by positive integer counts."""
+    ordered = sorted((val, w) for val, w in pairs if val > 0 and w > 0)
+    if not ordered:
+        return 0.0
+    half = sum(w for _, w in ordered) / 2
+    seen = 0
+    for val, w in ordered:
+        seen += w
+        if seen >= half:
+            return val
+    return ordered[-1][0]
+
+
+def _valid_sup_prev(prev_text):
+    text = prev_text.strip()
+    if not text or text[-1] in '-+=^/*×<>~':
+        return False
+    if text[-1] in '.,;:)"\'”’]':
+        stem = text.rstrip('.,;:)"\'”’]').lstrip('("\'“‘[')
+        return bool(stem) and stem.lower() not in SCIENTIFIC_UNITS and not (stem.isdigit() and int(stem) < 1000)
+    stem = text.lstrip('("\'“‘[')
+    return (len(stem) >= 3 and any(c.isalpha() for c in stem) and not any(c.isdigit() for c in stem)
+            and stem.lower() not in SCIENTIFIC_UNITS)
+
+
+def _format_segment_tokens(tokens):
+    """Join horizontal tokens into text, promoting geometric superscript citation runs."""
+    if not tokens:
+        return ''
+    alpha_sizes = [(t['fs'], len(t['text'])) for t in tokens if any(c.isalpha() for c in t['text'])]
+    body_size = _weighted_median(alpha_sizes or [(t['fs'], len(t['text'])) for t in tokens])
+    out = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if out and body_size > 0 and tok['fs'] <= 0.83 * body_size:
+            prev = tokens[i - 1]
+            prev_h = max(prev['y1'] - prev['y0'], 1.0)
+            if (tok['x0'] - prev['x1'] <= max(body_size, 8.0) * 0.8
+                    and tok['y1'] < prev['y1'] - 0.15 * prev_h
+                    and _valid_sup_prev(prev['text'])
+                    and tok['text'][0] not in '-+=^'):
+                run = []
+                k = i
+                while k < len(tokens):
+                    cand = tokens[k]
+                    if (cand['fs'] > 0.83 * body_size
+                            or cand['y1'] >= prev['y1'] - 0.15 * prev_h
+                            or not re.fullmatch(r'[0-9,;–—−-]+', cand['text'])
+                            or (k > i and cand['x0'] - tokens[k - 1]['x1'] > max(body_size, 8.0) * 0.6)):
+                        break
+                    run.append(cand['text'])
+                    k += 1
+                if run:
+                    joined = ''.join(run)
+                    trimmed = joined.rstrip(',;')
+                    if trimmed and _SUP_ASCII_GROUP.fullmatch(trimmed):
+                        out[-1] = out[-1] + trimmed.translate(_SUP_DIGITS_MAP)
+                        if len(trimmed) < len(joined):
+                            out.append(joined[len(trimmed):])
+                        i = k
+                        continue
+        if out and (tok['space'] or tok['x0'] - tokens[i - 1]['x1'] > max(tok['fs'], tokens[i - 1]['fs'], 6.0) * 0.15):
+            out.append(' ')
+        out.append(tok['text'])
+        i += 1
+    return ''.join(out)
+
+
+@pdf_locked
+def _extract_pdfium_page_segments(pdf, page_idx):
+    """Extract visual horizontal segments in displayed top-left coordinates for one page."""
+    frame = pdf.frame(page_idx)
+    page_w = float(pdf.sizes[page_idx][0])
+    tokens = []
+    with closing(pdf._doc[page_idx]) as page, closing(page.get_textpage()) as text_page:
+        cur = None
+        space_pending = False
+        for i in range(text_page.count_chars()):
+            code = raw.FPDFText_GetUnicode(text_page, i)
+            ch = chr(code) if code else ' '
+            hyphen = ch in ('\ufffe', '\x02', '-') and bool(raw.FPDFText_IsHyphen(text_page, i))
+            if hyphen:
+                ch = '-'
+            elif ch in _BLANK:
+                space_pending = True
+                continue
+            rect = frame.rect(*text_page.get_charbox(i, loose=True))
+            fs = float(raw.FPDFText_GetFontSize(text_page, i))
+            if rect.height <= 0 and rect.width <= 0:
+                if hyphen and cur is not None:
+                    cur['text'] += '-'
+                continue
+            same_tok = False
+            if cur is not None and not space_pending:
+                cur_h = max(cur['y1'] - cur['y0'], 1.0)
+                ch_h = max(rect.y1 - rect.y0, 1.0)
+                y_overlap = min(cur['y1'], rect.y1) - max(cur['y0'], rect.y0) > 0.25 * min(cur_h, ch_h)
+                x_close = -2.0 <= rect.x0 - cur['x1'] <= max(cur['fs'], fs, 6.0) * 0.35
+                sup_edge = ((fs <= 0.83 * cur['fs'] and rect.y1 < cur['y1'] - 0.15 * cur_h)
+                            or (cur['fs'] <= 0.83 * fs and cur['y1'] < rect.y1 - 0.15 * ch_h))
+                same_tok = y_overlap and x_close and not sup_edge
+            if same_tok:
+                cur['text'] += ch
+                cur['x0'] = min(cur['x0'], rect.x0)
+                cur['y0'] = min(cur['y0'], rect.y0)
+                cur['x1'] = max(cur['x1'], rect.x1)
+                cur['y1'] = max(cur['y1'], rect.y1)
+                if fs > 0:
+                    cur['fs'] = fs
+            else:
+                cur = {'text': ch, 'x0': rect.x0, 'y0': rect.y0, 'x1': rect.x1, 'y1': rect.y1,
+                       'fs': fs, 'space': space_pending}
+                tokens.append(cur)
+            space_pending = False
+
+    if not tokens:
+        return page_w, [], [], []
+
+    # Group tokens into visual horizontal y-bands sorted top-to-bottom.
+    tokens.sort(key=lambda t: ((t['y0'] + t['y1']) / 2, t['x0']))
+    y_bands = []
+    for tok in tokens:
+        placed = False
+        for band in reversed(y_bands):
+            by0, by1, btoks = band
+            overlap = min(by1, tok['y1']) - max(by0, tok['y0'])
+            if overlap > 0.25 * min(max(by1 - by0, 1.0), max(tok['y1'] - tok['y0'], 1.0)):
+                btoks.append(tok)
+                # Keep main baseline bounds anchored by non-tiny tokens.
+                if tok['y1'] - tok['y0'] >= 0.75 * (by1 - by0):
+                    band[0] = min(by0, tok['y0'])
+                    band[1] = max(by1, tok['y1'])
+                placed = True
+                break
+            if tok['y0'] > by1 + 2.0:
+                break
+        if not placed:
+            y_bands.append([tok['y0'], tok['y1'], [tok]])
+
+    segments, prose_left_xs, prose_right_xs = [], [], []
+    for band_idx, (_, _, btoks) in enumerate(y_bands):
+        btoks.sort(key=lambda t: t['x0'])
+        groups = [[btoks[0]]]
+        for tok in btoks[1:]:
+            prev = groups[-1][-1]
+            gap = tok['x0'] - prev['x1']
+            ref_fs = max(prev['fs'], tok['fs'], 6.0)
+            isolated_num = gap >= 5.0 and (_ASCII_DIGITS.match(tok['text']) or _ASCII_DIGITS.match(prev['text']))
+            if gap > max(1.3 * ref_fs, 11.0) or isolated_num:
+                groups.append([tok])
+            else:
+                groups[-1].append(tok)
+        for grp in groups:
+            text = _format_segment_tokens(grp)
+            x0 = min(t['x0'] for t in grp)
+            y0 = min(t['y0'] for t in grp)
+            x1 = max(t['x1'] for t in grp)
+            y1 = max(t['y1'] for t in grp)
+            segments.append((text, x0, y0, max(y1 - y0, 0.5), x1, band_idx))
+            stripped = text.strip()
+            if len(stripped) >= 4 and any(c.isalpha() for c in stripped):
+                prose_left_xs.append(x0)
+                prose_right_xs.append(x1)
+    return page_w, segments, prose_left_xs, prose_right_xs
+
+
+def _join_band_lines(segs):
+    """Join segments within the same column ordered by (y0, x0), merging same y-band segments."""
+    by_band = {}
+    for seg in segs:
+        by_band.setdefault(seg[5], []).append(seg)
+    rows = sorted(by_band.values(), key=lambda items: (min(s[2] for s in items), min(s[1] for s in items)))
+    return [' '.join(s[0] for s in sorted(row, key=lambda item: item[1])) for row in rows]
+
+
+def _order_pdfium_page_lines(segments, page_w):
+    """Order page segments with spanning-line band splitting and two-column detection."""
+    if not segments:
+        return ''
+    by_band = {}
+    for seg in segments:
+        by_band.setdefault(seg[5], []).append(seg)
+    ordered_bands = sorted(by_band.values(), key=lambda items: (min(s[2] for s in items), min(s[1] for s in items)))
+
+    def is_spanning(band_segs):
+        return any(
+            (s[4] - s[1]) > 0.52 * page_w
+            or (s[1] < 0.44 * page_w and s[4] > 0.56 * page_w)
+            or (len(band_segs) == 1 and s[1] < 0.48 * page_w and s[4] > 0.52 * page_w)
+            for s in band_segs
+        )
+
+    lines_out = []
+    pending = []
+
+    def flush_band(band_items):
+        if not band_items:
+            return
+        start_x = int(0.40 * page_w)
+        end_x = int(0.60 * page_w)
+        candidates = list(range(start_x, end_x + 1, 2))
+        mid = 0.50 * page_w
+        if mid not in candidates:
+            candidates.append(mid)
+        best = None
+        max_cross = 0 if len(band_items) < 20 else len(band_items) // 20
+        for sx in candidates:
+            left = [s for s in band_items if s[4] <= sx + 1.0]
+            right = [s for s in band_items if s[1] >= sx - 1.0]
+            cross = [s for s in band_items if not (s[4] <= sx + 1.0 or s[1] >= sx - 1.0)]
+            if len(cross) > max_cross:
+                continue
+            if len({s[5] for s in left}) < 3 or len({s[5] for s in right}) < 3:
+                continue
+            clearance = min(sx - max(s[4] for s in left), min(s[1] for s in right) - sx)
+            score = (len(cross), -clearance, abs(sx - mid))
+            if best is None or score < best[0]:
+                best = (score, sx, left, right, cross)
+        if best is not None:
+            _, sx, left, right, cross = best
+            for s in cross:
+                (left if (s[1] + s[4]) / 2 < sx else right).append(s)
+            lines_out.extend(_join_band_lines(left))
+            lines_out.extend(_join_band_lines(right))
+        else:
+            lines_out.extend(_join_band_lines(band_items))
+
+    for band_segs in ordered_bands:
+        if is_spanning(band_segs):
+            flush_band(pending)
+            pending = []
+            lines_out.append(' '.join(s[0] for s in sorted(band_segs, key=lambda item: item[1])))
+        else:
+            pending.extend(band_segs)
+    flush_band(pending)
+    return '\n'.join(lines_out)
+
+
+def _extract_pdfium_pages_with_chunks(pdf):
+    pages_segments, page_widths, prose_left_xs, prose_right_xs = [], [], [], []
+    for page_idx in range(len(pdf.sizes)):
+        width, segments, left_xs, right_xs = _extract_pdfium_page_segments(pdf, page_idx)
+        page_widths.append(width)
+        pages_segments.append(segments)
+        prose_left_xs.extend(left_xs)
+        prose_right_xs.extend(right_xs)
+
+    stripped_ids = _detect_line_numbers(
+        pages_segments, page_widths, prose_left_xs, prose_right_xs=prose_right_xs, top_down=True
+    )
+    pages, ignored, page_chunks = [], {}, []
+    for page_idx, segments in enumerate(pages_segments):
+        kept = []
+        for seg_idx, seg in enumerate(segments):
+            if (page_idx, seg_idx) in stripped_ids:
+                ignored.setdefault(page_idx, set()).add((round(seg[1], 1), round(seg[2], 1)))
+            else:
+                kept.append(seg)
+        pages.append(_order_pdfium_page_lines(kept, page_widths[page_idx]))
+        page_chunks.append([(s[0], s[1], s[2], s[3]) for s in kept])
+    return pages, ignored, page_chunks
+
+
 def _extract_pages_with_chunks(reader):
     """Extract per-page text while stripping verified margin line numbers, returning geometry chunks too."""
+    if _is_pdfium(reader):
+        return _extract_pdfium_pages_with_chunks(reader)
     pages_raw, pages_chunks, page_widths, prose_xs = [], [], [], []
     for page in reader.pages:
         box = getattr(page, 'mediabox', None)
@@ -440,6 +747,47 @@ def extract(pages):
     return _extract_references(pages, heading)
 
 
+def _valid_superscript_context(text, start):
+    before = text[:start].rstrip(' ')
+    if not before:
+        return False
+    if before[-1] in '-+=^/*×<>~⁻0123456789':
+        return False
+    if before[-1] in '.,;:)"\'”’]':
+        stem = re.split(r'\s+', before.rstrip('.,;:)"\'”’]'))[-1].lstrip('("\'“‘[')
+        if not stem or stem.lower() in SCIENTIFIC_UNITS or (stem.isdigit() and int(stem) < 1000):
+            return False
+        return True
+    word = re.split(r'\s+', before)[-1].lstrip('("\'“‘[')
+    return (len(word) >= 3 and any(c.isalpha() for c in word)
+            and not any(c.isdigit() for c in word) and word.lower() not in SCIENTIFIC_UNITS)
+
+
+def _valid_paren_context(text, match):
+    start, end = match.start(), match.end()
+    line_start = text.rfind('\n', 0, start) + 1
+    line_end = text.find('\n', end)
+    if line_end < 0:
+        line_end = len(text)
+    before_on_line = text[line_start:start]
+    if _PAREN_PREFIX_IGNORE.search(before_on_line) or _PAREN_CONT_IGNORE.search(before_on_line):
+        return False
+    if _MATH_TRAILING.match(text[end:line_end]):
+        return False
+    # Reject standalone or line-end/margin equation numbers like "(1)" or "x = y   (1)".
+    line_after = text[end:line_end].strip()
+    if not line_after:
+        if not before_on_line.strip():
+            return False
+        if not (',' in match[1] or ';' in match[1] or any(d in match[1] for d in '–—−-')):
+            prose_words = [w for w in re.findall(r'[A-Za-z]+', before_on_line) if len(w) >= 2]
+            if (len(before_on_line) - len(before_on_line.rstrip(' ')) >= 2
+                    or re.search(r'[=+×÷∑∫]|(?:^|\s)/(?:\s|$)', before_on_line)
+                    or len(prose_words) < 3):
+                return False
+    return True
+
+
 def _extract_references(pages, heading):
     if not heading:
         return []
@@ -472,10 +820,38 @@ def _extract_references(pages, heading):
     for text in body:
         page_starts.append(offset)
         offset += len(text) + 1
+    numeric_labels = {int(entry['label']) for entry in entries if entry['label'].isdigit()}
     numeric_markers = {}
+    seen_spans = {}
     for match in NUMERIC_MARKER.finditer(body_text):
         for number in citation_numbers(match[1]):
-            numeric_markers.setdefault(number, []).append(match)
+            span = (number, match.start(), match.end())
+            if span not in seen_spans:
+                seen_spans[span] = True
+                numeric_markers.setdefault(number, []).append((match, False))
+    if numeric_labels:
+        max_entry = max(numeric_labels)
+        for match in SUPERSCRIPT_MARKER.finditer(body_text):
+            if not _valid_superscript_context(body_text, match.start()):
+                continue
+            nums = citation_numbers(match[1])
+            if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                for number in nums:
+                    span = (number, match.start(), match.end())
+                    if span not in seen_spans:
+                        seen_spans[span] = True
+                        numeric_markers.setdefault(number, []).append((match, True))
+        if 1 in numeric_labels:
+            for match in PAREN_NUMERIC_MARKER.finditer(body_text):
+                if not _valid_paren_context(body_text, match):
+                    continue
+                nums = citation_numbers(match[1])
+                if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                    for number in nums:
+                        span = (number, match.start(), match.end())
+                        if span not in seen_spans:
+                            seen_spans[span] = True
+                            numeric_markers.setdefault(number, []).append((match, False))
     found = []
     for index, entry in enumerate(entries):
         raw = entry['raw']
@@ -491,10 +867,11 @@ def _extract_references(pages, heading):
             matches = numeric_markers.get(int(entry['label']), [])
         elif author and year:
             pattern = _citation(surname, year_text, surnames(raw))
-            matches = [m for m in pattern.finditer(body_text) if not AFTER_NAME.search(body_text[max(0, m.start() - 30):m.start()])]
+            matches = [(m, False) for m in pattern.finditer(body_text)
+                       if not AFTER_NAME.search(body_text[max(0, m.start() - 30):m.start()])]
         else:
             matches = []
-        found.append([(bisect_right(page_starts, m.start()), m) for m in matches
+        found.append([(bisect_right(page_starts, m.start()), m, is_sup) for m, is_sup in matches
                       if bisect_right(page_starts, m.end() - 1) - bisect_right(page_starts, m.start()) <= 1])
         entry.update(id=str(index), title=raw, authors=surname,
                      year=year_text, doi=doi.group().rstrip('.,;') if doi else '',
@@ -506,14 +883,16 @@ def _extract_references(pages, heading):
     ambiguous = set()
     for members in homonyms.values():
         if len(members) > 1:
-            owned, unclear = _share([entries[i] for i in members], [found[i] for i in members])
+            owned, unclear = _share([entries[i] for i in members],
+                                    [[(page, m) for page, m, _ in found[i]] for i in members])
             for i, hits in zip(members, owned):
-                found[i] = hits
+                found[i] = [(page, m, False) for page, m in hits]
             ambiguous.update(members[j] for j in unclear)
     for i, entry in enumerate(entries):
         entry['occurrences'] = []
-        for page, m in found[i]:
-            occurrence = {'page': page, 'context': body_text[max(0, m.start()-60):m.end()+60], 'marker': m.group()}
+        for page, m, is_sup in found[i]:
+            marker_text = superscript_to_ascii(m.group()) if is_sup else m.group()
+            occurrence = {'page': page, 'context': body_text[max(0, m.start()-60):m.end()+60], 'marker': marker_text}
             last = bisect_right(page_starts, m.end() - 1)
             if last > page:
                 parts = []
@@ -537,14 +916,17 @@ def analyze(library, document_id, *, resolve=True):
 
 def _analyze_pdf(library, document_id, refs=None):
     data, _ = library.read_pdf(document_id, annotated=False)
-    reader = PdfReader(BytesIO(data))
-    pages, ignored, page_chunks = _extract_pages_with_chunks(reader)
-    pages, heading = _prepare_bibliography(pages)
-    if refs is None:
-        refs = _extract_references(pages, heading)
-    _map_destinations(reader, heading, refs, ignored, page_chunks=page_chunks)
-    _crosscheck_links(data, heading, refs)
-    return refs
+    pdf = Pdf(data)
+    try:
+        pages, ignored, page_chunks = _extract_pages_with_chunks(pdf)
+        pages, heading = _prepare_bibliography(pages)
+        if refs is None:
+            refs = _extract_references(pages, heading)
+        _map_destinations(pdf, heading, refs, ignored, page_chunks=page_chunks)
+        _crosscheck_links(pdf, heading, refs)
+        return refs
+    finally:
+        pdf.close()
 
 
 @_synchronized
@@ -655,6 +1037,43 @@ def _destination_coordinates(destination):
     return float(left) if left is not None else None, float(top) if top is not None else None
 
 
+@pdf_locked
+def _pdfium_named_destinations(pdf, heading_page):
+    destinations = {}
+    page_count = len(pdf.sizes)
+    for index in range(raw.FPDF_CountNamedDests(pdf._doc)):
+        length = ctypes.c_long()
+        raw.FPDF_GetNamedDest(pdf._doc, index, None, length)
+        if length.value <= 0:
+            continue
+        name_buf = ctypes.create_string_buffer(length.value)
+        dest = raw.FPDF_GetNamedDest(pdf._doc, index, name_buf, length)
+        if not dest:
+            continue
+        name = name_buf.raw.decode('utf-16-le', errors='replace').rstrip('\0')
+        if STRUCTURAL_DESTINATION.match(name):
+            continue
+        page, top = pdf._dest_target(dest)
+        if page is None or not (heading_page <= page < page_count):
+            continue
+        has_x, has_y, has_zoom = (ctypes.c_int() for _ in range(3))
+        x, y, zoom = (ctypes.c_float() for _ in range(3))
+        raw.FPDFDest_GetLocationInPage(dest, has_x, has_y, has_zoom, x, y, zoom)
+        frame = pdf.frame(page)
+        left = None
+        if has_x.value:
+            left = frame.point(x.value, y.value if has_y.value else frame.top)[0]
+        else:
+            count, params = ctypes.c_ulong(4), (ctypes.c_float * 4)()
+            view = raw.FPDFDest_GetView(dest, count, params)
+            if view == raw.PDFDEST_VIEW_FITR:
+                left = frame.rect(params[0], params[1], params[2], params[3]).x0
+            elif view in (raw.PDFDEST_VIEW_FITV, raw.PDFDEST_VIEW_FITBV):
+                left = frame.point(params[0], frame.top)[0]
+        destinations.setdefault(page, []).append((name, left, top))
+    return destinations
+
+
 def map_destinations(reader, pages, refs, _ignored=None):
     """Match the nearest bibliography row; unrecognized or ambiguous rows stay unmapped."""
     _, heading = _prepare_bibliography(pages)
@@ -667,29 +1086,46 @@ def _map_destinations(reader, heading, refs, ignored, page_chunks=None):
     if heading is None:
         return
     heading_page, _ = heading
-    destinations = {}
-    for name, dest in reader.named_destinations.items():
-        if STRUCTURAL_DESTINATION.match(str(name)):
-            continue
-        try:
-            page = reader.get_destination_page_number(dest)
-            left, top = _destination_coordinates(dest)
-            if page is not None and heading_page <= page < len(reader.pages) and top is not None:
-                destinations.setdefault(page, []).append((name, left, top))
-        except (TypeError, ValueError, AttributeError):
-            continue
+    top_down = _is_pdfium(reader)
+    if top_down:
+        destinations = _pdfium_named_destinations(reader, heading_page)
+        page_count = len(reader.sizes)
+    else:
+        destinations = {}
+        page_count = len(reader.pages)
+        for name, dest in reader.named_destinations.items():
+            if STRUCTURAL_DESTINATION.match(str(name)):
+                continue
+            try:
+                page = reader.get_destination_page_number(dest)
+                left, top = _destination_coordinates(dest)
+                if page is not None and heading_page <= page < page_count and top is not None:
+                    destinations.setdefault(page, []).append((name, left, top))
+            except (TypeError, ValueError, AttributeError):
+                continue
     entries = [(_normalize(ref['raw']), ref) for ref in refs]
     for page_number, targets in destinations.items():
         lines = []
         skip_coords = (ignored or {}).get(page_number, set())
-        page = reader.pages[page_number]
         chunks = page_chunks[page_number] if page_chunks and page_number < len(page_chunks) else None
         if chunks is not None:
             for text, x, y, height in chunks:
                 if not text.strip() or (round(x, 1), round(y, 1)) in skip_coords or not height:
                     continue
                 lines.append((x, y, y + height, text.splitlines()[0]))
+            page_right = (float(reader.sizes[page_number][0]) if top_down
+                          else float(reader.pages[page_number].mediabox.right)
+                          if hasattr(reader.pages[page_number], 'mediabox') else None)
+        elif top_down:
+            _, segments, _, _ = _extract_pdfium_page_segments(reader, page_number)
+            for text, x, y, height, _, _ in segments:
+                if not text.strip() or (round(x, 1), round(y, 1)) in skip_coords or not height:
+                    continue
+                lines.append((x, y, y + height, text.splitlines()[0]))
+            page_right = float(reader.sizes[page_number][0])
         else:
+            page = reader.pages[page_number]
+
             def visit(text, cm, tm, font, size):
                 if not text.strip():
                     return
@@ -703,11 +1139,19 @@ def _map_destinations(reader, heading, refs, ignored, page_chunks=None):
                     lines.append((x, y, y + height, text.splitlines()[0]))
 
             page.extract_text(visitor_text=visit)
+            page_right = float(page.mediabox.right) if hasattr(page, 'mediabox') else None
+
         for name, left, top in targets:
-            # An anchor inside the font band can be closer to the next row's estimated top.
-            nearby = [(top - baseline, baseline) for x, baseline, y, _ in lines
-                      if -5 <= top - y <= 14 and top >= baseline - 1
-                      and (left is None or -10 <= x - left <= 120)]
+            if top_down:
+                # In top-left display coordinates, font_top = y0 and font_bottom = y1.
+                nearby = [(font_bottom - top, font_bottom) for x, font_top, font_bottom, _ in lines
+                          if font_top - 14 <= top <= font_bottom + 1
+                          and (left is None or -10 <= x - left <= 120)]
+            else:
+                # An anchor inside the font band can be closer to the next row's estimated top.
+                nearby = [(top - baseline, baseline) for x, baseline, y, _ in lines
+                          if -5 <= top - y <= 14 and top >= baseline - 1
+                          and (left is None or -10 <= x - left <= 120)]
             if not nearby:
                 continue
             distance, baseline = min(nearby)
@@ -715,11 +1159,11 @@ def _map_destinations(reader, heading, refs, ignored, page_chunks=None):
             if any(abs(dy - distance) < .1 and abs(b - baseline) >= .8 for dy, b in nearby):
                 continue
             right = min((x - 10 for _, x, _ in targets if left is not None and x is not None and x > left + 150),
-                        default=float(page.mediabox.right) if hasattr(page, 'mediabox') else (left or 0) + 260)
-            row = sorted(((x, order, text) for order, (x, b, _, text) in enumerate(lines)
-                          if abs(b - baseline) < .8 and (left is None or left - 10 <= x < right)),
+                        default=page_right if page_right is not None else (left or 0) + 260)
+            row = sorted(((x, order, text) for order, (x, y0, y1, text) in enumerate(lines)
+                          if abs((y1 if top_down else y0) - baseline) < .8 and (left is None or left - 10 <= x < right)),
                          key=lambda span: (round(span[0], 1), span[1]))
-            line = ''.join(text for _, _, text in row)
+            line = (' ' if top_down else '').join(text for _, _, text in row)
             repeated = re.match(r'^\s*[—–-]{1,3}\.?\s*(.+)', line)
             numbered = ENTRY.match(line)
             label = (numbered[1] or numbered[2]) if numbered else None
@@ -833,6 +1277,13 @@ def _available(library, document):
         return False
 
 
+def _first_page_text(pdf):
+    if _is_pdfium(pdf):
+        width, segments, _, _ = _extract_pdfium_page_segments(pdf, 0)
+        return _order_pdfium_page_lines(segments, width)
+    return pdf.pages[0].extract_text() or ''
+
+
 def _publication_evidence(library, document):
     sha = document.get('sha256')
     if not sha:
@@ -843,7 +1294,11 @@ def _publication_evidence(library, document):
             return json.loads(row[0])
         try:
             data, _ = library.read_pdf(document['id'], annotated=False)
-            text = PdfReader(BytesIO(data)).pages[0].extract_text() or ''
+            pdf = Pdf(data)
+            try:
+                text = _first_page_text(pdf)
+            finally:
+                pdf.close()
             lines = text.splitlines()
             evidence = {'publication': _publication('\n'.join(lines[:6])), 'lines': lines[:15]}
         except Exception:

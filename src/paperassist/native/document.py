@@ -200,6 +200,16 @@ class PdfDocument:
             self._words[page] = self.pdf.words(page)
         return self._words[page]
 
+    def invalidate_text_cache(self, pages=None):
+        """Clear cached word and margin-line-number lookups after OCR sidecars are written."""
+        if pages is None:
+            self._words.clear()
+            self._line_numbers.clear()
+        else:
+            for page in pages:
+                self._words.pop(page, None)
+                self._line_numbers.pop(page, None)
+
     def links(self, page):
         if page not in self._links:
             self._links[page] = self.pdf.links(page)

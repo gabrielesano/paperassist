@@ -4,7 +4,7 @@ Reading a research paper is rarely linear. Half the time you are scrolling to th
 
 **PaperAssist** is a calm, local reading desk and shared library for scientific PDFs. It runs as a self-contained native desktop application built with Qt Widgets and PDFium, with no PaperAssist account, cloud sync, background web server, telemetry, or large language models. Reading and local import work offline; optional online reference actions use external services only when requested. A library can reuse the same PDF across multiple source papers; it is not a cloud collaboration service.
 
-> **Project status:** `0.3.2` (alpha). Reading, panning, split reference consultation, highlighting, ink drawing, phrase-linked comments, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
+> **Project status:** `0.4.0` (alpha). Reading, panning, split reference consultation, highlighting, ink drawing, phrase-linked comments, on-demand searchable OCR sidecars, and local library management are implemented and tested. Bibliography extraction and open-access retrieval remain partial. Start with a test library and keep backups; platform verification and distribution limits are listed below.
 
 The screenshots below show the application on Linux with synthetic papers and a disposable library. System fonts and window appearance vary by platform.
 
@@ -16,37 +16,37 @@ The screenshots below show the application on Linux with synthetic papers and a 
 
 PaperAssist can be installed as a standalone desktop application (with Python, Qt, PDFium, and offline OCR bundled inside—no Python setup required) or run directly from a source checkout.
 
-Download installers and their matching `.sha256` files from the [0.3.2 release](https://github.com/gabrielesano/paperassist/releases/tag/v0.3.2). Platform provenance, third-party notices, and a combined checksum manifest (`SHA256SUMS`) are attached alongside the packages.
+Download installers and their matching `.sha256` files from the [0.4.0 release](https://github.com/gabrielesano/paperassist/releases/tag/v0.4.0). Platform provenance, third-party notices, and a combined checksum manifest (`SHA256SUMS`) are attached alongside the packages.
 
 ### Linux (`x86_64`) — Standalone Installer
 
-For 64-bit Linux, PaperAssist provides a self-extracting per-user installer script (`PaperAssist-0.3.2-linux-x86_64.sh`) that requires **no `sudo` or root permissions**:
+For 64-bit Linux, PaperAssist provides a self-extracting per-user installer script (`PaperAssist-0.4.0-linux-x86_64.sh`) that requires **no `sudo` or root permissions**:
 
 ```bash
 # 1. Verify package integrity (optional but recommended)
-sha256sum -c PaperAssist-0.3.2-linux-x86_64.sh.sha256
-sh ./PaperAssist-0.3.2-linux-x86_64.sh --verify
+sha256sum -c PaperAssist-0.4.0-linux-x86_64.sh.sha256
+sh ./PaperAssist-0.4.0-linux-x86_64.sh --verify
 
 # 2. Install for your user account
-sh ./PaperAssist-0.3.2-linux-x86_64.sh
+sh ./PaperAssist-0.4.0-linux-x86_64.sh
 ```
 
 - **Launch:** Open **PaperAssist** from your desktop application menu, or run `paperassist` from a terminal (`~/.local/bin/paperassist`). You can also pass PDF files directly (`paperassist paper.pdf`) to import a managed copy and open it, reusing identical PDFs already in the active library.
 - **What gets installed where:** By default, application files live in `~/.local/share/paperassist-app`, the launcher in `~/.local/bin/paperassist`, and the desktop entry and icons under `~/.local/share/applications` and `~/.local/share/icons`. The installer respects XDG data directories. Your research library (`~/.local/share/paperassist`) and preferences (`~/.config/paperassist/config.json`) are kept separate and are not changed by the installer.
 - **Upgrade:** Close PaperAssist and run the newer installer script (`sh ./PaperAssist-<new-version>-linux-x86_64.sh`). Upgrades verify a staged bundle before swapping application directories. Detected failures roll back; a process interruption may require `--repair`.
-- **Repair:** After an interrupted upgrade, run `sh ./PaperAssist-0.3.2-linux-x86_64.sh --repair` to recover the previous committed installation. After an interrupted first install, repair clears incomplete owned state; rerun the installer to install the app.
-- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` (or `sh ./PaperAssist-0.3.2-linux-x86_64.sh --uninstall`). Only application-owned files are removed; your library, PDFs, annotations, and settings remain untouched.
+- **Repair:** After an interrupted upgrade, run `sh ./PaperAssist-0.4.0-linux-x86_64.sh --repair` to recover the previous committed installation. After an interrupted first install, repair clears incomplete owned state; rerun the installer to install the app.
+- **Uninstall:** Run `~/.local/share/paperassist-app/uninstall.sh` (or `sh ./PaperAssist-0.4.0-linux-x86_64.sh --uninstall`). Only application-owned files are removed; your library, PDFs, annotations, and settings remain untouched.
 - **System requirements:** Linux `x86_64`, `glibc >= 2.35`, `flock` (`util-linux`), X11 or Wayland, and Qt's system OpenGL/EGL and display libraries. The published installer was built on Ubuntu 22.04 and passed its ELF compatibility gate and install/self-test/uninstall checks. A clean Ubuntu/Debian desktop trial remains outstanding; see [packaging details](packaging/README.md).
 
 ### Windows (`x86_64`)
 
-Download `PaperAssist-0.3.2-windows-x86_64-setup.exe` from the release and run the setup wizard. It installs for the current user in `%LOCALAPPDATA%\Programs\PaperAssist`, without administrator privileges, and creates a Start menu shortcut; a desktop shortcut is optional. Launch the installed app without a console window. The optional **Add PaperAssist to Open with for PDF files** task registers PDF support for your account and preserves your current default reader.
+Download `PaperAssist-0.4.0-windows-x86_64-setup.exe` from the release and run the setup wizard. It installs for the current user in `%LOCALAPPDATA%\Programs\PaperAssist`, without administrator privileges, and creates a Start menu shortcut; a desktop shortcut is optional. Launch the installed app without a console window. The optional **Add PaperAssist to Open with for PDF files** task registers PDF support for your account and preserves your current default reader.
 
 Close PaperAssist before upgrading or uninstalling. Run the newer setup EXE to update, or remove PaperAssist through Windows Settings. The library and preferences remain separate from the application and are preserved. The alpha installer is not Authenticode-signed, so Windows may show an unknown-publisher or SmartScreen prompt. Windows CI tests installation, the native window, the render worker, upgrade, and uninstall; see [Windows packaging](packaging/windows/README.md).
 
 ### macOS (Apple Silicon)
 
-Download `PaperAssist-0.3.2-macos-arm64.dmg` from the release. This package supports Apple Silicon only:
+Download `PaperAssist-0.4.0-macos-arm64.dmg` from the release. This package supports Apple Silicon only:
 
 1. Open the `.dmg` disk image and drag **PaperAssist.app** into **Applications**.
 2. Eject the disk image and launch **PaperAssist** from Applications (no Python or Terminal required).
@@ -126,7 +126,7 @@ Library papers reopen at the saved vertical position and zoom. To keep a second 
 
 ### Build a clean, private local library
 
-Open **Library** (`L` key) to browse and search your collection by title, tab name, author, year, DOI, arXiv ID, bibcode, filename, or metadata status. The catalog displays five columns: **Title**, **Tab name** (showing persistent catalog nicknames that you can edit via **Edit details…** through the library catalog), **Authors**, **Year**, and **Metadata**. Click any column header to sort in either direction (unknown years sort last); select multiple papers using `Ctrl`-click or `Shift`-click; open a paper in a main tab (**Open**) or below in **Quick view**; or remove selected papers from the library with **Remove…** (`Delete`). Add papers via **Import PDFs…** or **Import folder…**—when importing a single PDF, choose **Import & open** to import the file and immediately view it in a reader tab. **Open** (`Ctrl+O` in the reader) imports/reuses a managed copy and opens it in a tab; its explicit Save creates a library revision.
+Open **Library** (`L` key) to browse and search your collection by title, tab name, author, year, DOI, arXiv ID, bibcode, filename, or metadata status. The catalog displays five columns: **Title**, **Tab name** (showing persistent catalog nicknames that you can edit via **Edit details…** through the library catalog), **Authors**, **Year**, and **Metadata**. Click any column header to sort in either direction (unknown years sort last); select multiple papers using `Ctrl`-click or `Shift`-click; open a paper in a main tab (**Open**) or below in **Quick view**; copy formatted citations for verified entries with **Copy BibTeX**; reclaim disk space from older annotation snapshots with **Compact revisions…**; or remove selected papers from the library with **Remove…** (`Delete`). Add papers via **Import PDFs…** or **Import folder…**—when importing a single PDF, choose **Import & open** to import the file and immediately view it in a reader tab. **Open** (`Ctrl+O` in the reader) imports/reuses a managed copy and opens it in a tab; its explicit Save creates a library revision.
 
 ![Library catalog dialog showing imported papers with confirmed authors and years alongside a working draft flagged for metadata review](docs/screenshots/library-catalog.png)
 
@@ -169,9 +169,9 @@ Press `?` while the reader has focus, or choose **Keyboard shortcuts** from the 
 
 When **Quick view** is open, page navigation, `G`, `Ctrl+F`, and zoom shortcuts act on whichever paper pane you clicked last.
 
-### Interface size
+### Interface size & session restore
 
-**Preferences → Interface size** scales the toolbar, tabs, side panels, dialogs, and menus from `80%` to `150%` and saves your preference in your user configuration across sessions. Papers keep their own independent zoom controls.
+**Preferences → Interface size** scales the toolbar, tabs, side panels, dialogs, and menus from `80%` to `150%` and saves your preference in your user configuration across sessions. Papers keep their own independent zoom controls. Enabling **Reopen open tabs and split views on startup** in **Preferences** restores your open library tabs, split views, and session tab names on next launch.
 
 ---
 
@@ -201,7 +201,7 @@ If your configured library folder is unavailable at startup—for instance, on a
 
 ### Backing up
 
-Close PaperAssist and copy the library directory. Back up the separate user config too if you want to preserve interface preferences and the selected library path. Keep backups private: `settings.json` contains configured contact details and API keys in plaintext. The writer requests `0600` permissions on POSIX systems; Windows access depends on filesystem permissions.
+Close PaperAssist and copy the library directory. Back up the separate user config too if you want to preserve interface preferences and the selected library path. Keep backups private: `settings.json` stores configured contact details and API keys (`0600` permissions on POSIX systems; owner-only protected DACL with per-user DPAPI key encryption on Windows).
 
 ---
 
@@ -233,8 +233,8 @@ Source availability, authentication rules, and quotas are controlled by each pro
 - **Local reading:** The native reader accesses PDFs and the catalog without a web server or listening network port. Requested online actions include open-access searches, **Refresh metadata** (when online lookup is enabled), source access checks, download repair, and reference identification during **Check folder**. They send reference or paper metadata and identifiers, plus any relevant configured credentials, to providers; external links open in your browser.
 - **Separate rendering process:** PDFium renders whole-page bitmaps in a worker process with a bounded page cache; it does not use tile rendering. Memory and latency vary with documents, zoom, open panes, and platform. See the scoped measurements in [native stack notes](docs/development/native-stack.md), rather than treating them as a fixed memory guarantee or a security sandbox.
 - **No AI guesswork:** Importing, metadata extraction, and citation matching are 100% deterministic.
-- **Citation detection is partial:** PaperAssist recognizes author-year and bracketed numeric citations, abstaining when entries cannot be disambiguated. A six-paper tuning benchmark reported about 96% recall at the reference/page level, not exact sentence-level accuracy or a guarantee on new papers. The private benchmark is not reproducible from this repository; see [accuracy notes](docs/development/citation-accuracy.md). OCR errors, superscripts, and unusual styles can cause missed citations.
-- **Scans & large files:** Image-only pages can be read and marked with ink or freehand highlighting. Text search, text-aligned highlighting, phrase comments, and bibliography extraction depend on an existing text layer (PaperAssist does not write an OCR text layer into PDFs). For scanned papers lacking extractable text, **Refresh metadata** can optionally invoke a local **Tesseract** (`eng`) worker in an isolated background process to recover provisional titles and authors (reading page 1, and falling back to page 2 only if no title is recognized on page 1). Standalone builds include a minimal Tesseract engine and English model; it requires no separate Tesseract installation. A missing or damaged bundled runtime is reported without affecting normal metadata extraction.
+- **Citation detection is partial:** PaperAssist recognizes author-year (including explicit 3+-author inline forms), bracketed `[n]`, guarded parenthesized `(n)`, and superscript numeric citations, abstaining when entries cannot be disambiguated. A six-paper tuning benchmark reported about 96% recall at the reference/page level, not exact sentence-level accuracy or a guarantee on new papers. The private benchmark is not reproducible from this repository; see [accuracy notes](docs/development/citation-accuracy.md). OCR errors and unusual styles can cause missed citations.
+- **Scans & large files:** Original PDFs are never modified. Image-only pages can be marked with ink or freehand highlighting immediately, and for library PDFs you can right-click (**Recognize scanned text (OCR)**) or click **OCR scan** in `Ctrl+F` to run the local **Tesseract** (`eng`) worker in an isolated background process and cache per-page word boxes in `cache/ocr/` (bounded to 256 MiB). That sidecar layer unlocks `Ctrl+F`, text copy, line-aligned highlights, and phrase comments on scanned PDFs; **Refresh metadata** can also invoke OCR on pages 1–2 for provisional titles and authors. Standalone builds include a minimal Tesseract engine and English model and report missing or damaged runtimes gracefully.
 - **Packaged OCR verification:** The bundled engine has been tested on Linux from a copied standalone app with an empty `PATH` and in an offline Fedora 43 container without system Tesseract or language data. Hosted builds have also passed OCR from the installed Linux launcher, Windows setup installation and macOS app copied from its DMG, plus the Ubuntu GLIBC_2.35 gate and platform installer/native-window checks. The full native Cocoa test suite also passes. Interactive desktop and hardware coverage remain follow-up work. See [host acceptance](docs/development/host-acceptance.md).
 
 ---
@@ -244,8 +244,9 @@ Source availability, authentication rules, and quotas are controlled by each pro
 Standalone builds include a minimal **Tesseract 5.5.4** engine, Leptonica and the
 English LSTM model. No separate OCR installation, model download or network
 connection is needed. The engine runs in PaperAssist's isolated background OCR
-worker and reads the grayscale pages rendered by PDFium. Only metadata recovery
-uses OCR; it does not add a searchable text layer to the PDF.
+worker and reads the grayscale pages rendered by PDFium. Original PDF files are
+never modified; metadata recovery and on-demand page OCR store cached TSV word
+boxes in a bounded `cache/ocr/` sidecar directory.
 
 For development from source, compile the bundled runtime once using CMake
 and a C/C++ compiler:

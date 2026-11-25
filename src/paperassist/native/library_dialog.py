@@ -2,7 +2,7 @@
 import re
 
 from PySide6.QtCore import QEvent, QItemSelectionModel, QSignalBlocker, Qt, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton,
                                QTreeWidget, QTreeWidgetItem)
@@ -129,6 +129,8 @@ class LibraryDialog(QDialog):
         self.quick_button = QPushButton("Quick view")
         self.edit_button = QPushButton("Edit details…")
         self.edit_button.setToolTip("Correct the title, authors, year or DOI (F2)")
+        self.copy_bibtex_button = QPushButton("Copy BibTeX")
+        self.copy_bibtex_button.setToolTip("Copy BibTeX citations for verified selected papers")
         self.remove_button = QPushButton("Remove…")
         self.remove_button.setToolTip("Remove selected papers from this library (Delete)")
         self.selection_hint = QLabel("Select papers with Ctrl-click or Shift-click.", objectName="muted-note")
@@ -157,6 +159,8 @@ class LibraryDialog(QDialog):
         self.refresh_button.setMenu(menu)
         self.import_button = QPushButton("Import PDFs…")
         self.folder_button = QPushButton("Import folder…")
+        self.compact_button = QPushButton("Compact revisions…")
+        self.compact_button.setToolTip("Remove superseded PDF revisions from working/")
         self.cancel_button = QPushButton("Cancel import")
         self.progress = QProgressBar()
         self.hint = QLabel("The library is empty.\nChoose Import PDFs or Import folder to add papers.",
@@ -178,7 +182,7 @@ class LibraryDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
-        for widget in (self.import_button, self.folder_button):
+        for widget in (self.import_button, self.folder_button, self.compact_button):
             buttons.addWidget(widget)
         buttons.addWidget(self.message, 1)
         for widget in (self.quick_button, self.open_button):
@@ -186,6 +190,7 @@ class LibraryDialog(QDialog):
 
         metadata_row = QHBoxLayout()
         metadata_row.addWidget(self.selection_hint, 1)
+        metadata_row.addWidget(self.copy_bibtex_button)
         metadata_row.addWidget(self.edit_button)
         metadata_row.addWidget(self.remove_button)
         metadata_row.addWidget(self.refresh_button)
@@ -206,6 +211,7 @@ class LibraryDialog(QDialog):
         self.pending = []
         self.library_count = 0
         self.review_ids = []
+        self._superseded = {"count": 0, "bytes": 0}
         self.single_import = False
         self.job_kind = "import"
         self.typing = QTimer(self, singleShot=True, interval=150, timeout=lambda: self.refresh(reload_counts=False))
@@ -214,10 +220,12 @@ class LibraryDialog(QDialog):
         self.table.itemSelectionChanged.connect(self._enable)
         self.open_button.clicked.connect(lambda: self._request(self.open_requested))
         self.quick_button.clicked.connect(lambda: self._request(self.quick_requested))
+        self.copy_bibtex_button.clicked.connect(self.copy_selected_bibtex)
         self.edit_button.clicked.connect(self.edit_metadata)
         self.remove_button.clicked.connect(self.remove_selected)
         self.import_button.clicked.connect(self.import_dialog)
         self.folder_button.clicked.connect(self.import_folder_dialog)
+        self.compact_button.clicked.connect(self.compact_revisions)
         self.start_button.clicked.connect(lambda: self._confirm_import())
         self.import_open_button.clicked.connect(lambda: self._confirm_import(open_after=True))
         self.refresh_selected.triggered.connect(lambda: self.start_metadata_refresh(self.selected_ids()))
@@ -262,11 +270,14 @@ class LibraryDialog(QDialog):
     def refresh(self, *, reload_counts=True):
         selected, current = set(self.selected_ids()), self.selected_id()
         query = self.search.text()
-        documents = self.workspace.library.list_documents(query)
+        documents = self.workspace.library.list_documents(query, lightweight=True)
+        if not query:
+            self.library_count = len(documents)
+            self.review_ids = [document["id"] for document in documents if document["metadata_status"] in NEEDS_REVIEW]
+        elif reload_counts:
+            self.library_count, self.review_ids = self.workspace.library.status_counts()
         if not query or reload_counts:
-            everyone = self.workspace.library.list_documents() if query else documents
-            self.library_count = len(everyone)
-            self.review_ids = [document["id"] for document in everyone if document["metadata_status"] in NEEDS_REVIEW]
+            self._superseded = self.workspace.library.superseded_snapshots()
         blocker = QSignalBlocker(self.table)
         self.table.setSortingEnabled(False)
         self.table.clear()
@@ -326,6 +337,15 @@ class LibraryDialog(QDialog):
         for button in (self.open_button, self.quick_button, self.edit_button):
             button.setEnabled(count == 1 and (button is not self.edit_button or not self.watcher))
         available = not self.watcher and not self.pending
+        self.copy_bibtex_button.setEnabled(count > 0 and not self.pending)
+        self.compact_button.setEnabled(available and self._superseded["count"] > 0)
+        if self._superseded["count"] > 0:
+            self.compact_button.setToolTip(
+                f"Remove {self._superseded['count']} superseded PDF revision"
+                f"{'s' if self._superseded['count'] != 1 else ''} ({format_size(self._superseded['bytes'])})"
+            )
+        else:
+            self.compact_button.setToolTip("No superseded PDF revisions to compact.")
         self.remove_button.setEnabled(count > 0 and available)
         self.refresh_selected.setEnabled(count > 0 and available)
         self.refresh_selected.setText(f"Refresh selected papers ({count})")
@@ -366,6 +386,60 @@ class LibraryDialog(QDialog):
         box.button(QMessageBox.Yes).setText("Remove")
         box.setDefaultButton(QMessageBox.Cancel)
         return box.exec() == QMessageBox.Yes
+
+    def copy_selected_bibtex(self):
+        ids = self.selected_ids()
+        if not ids or self.pending:
+            return
+        try:
+            bibtex_text, exported, skipped = self.workspace.library.export_bibtex(ids)
+        except KeyError:
+            self.refresh()
+            return
+        if not exported:
+            self.message.setText("Verify metadata first to copy BibTeX.")
+            return
+        QGuiApplication.clipboard().setText(bibtex_text)
+        entry_word = "entry" if exported == 1 else "entries"
+        if skipped:
+            skip_word = "paper" if skipped == 1 else "papers"
+            self.message.setText(f"Copied {exported} BibTeX {entry_word} ({skipped} unverified {skip_word} skipped).")
+        else:
+            self.message.setText(f"Copied {exported} BibTeX {entry_word}.")
+
+    def confirm_compact(self, info):
+        count, size = info["count"], format_size(info["bytes"])
+        box = QMessageBox(
+            QMessageBox.Question,
+            "Compact revisions",
+            f"Remove {count} superseded PDF revision{'s' if count != 1 else ''} ({size})?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            self,
+        )
+        box.setInformativeText(
+            "Only older intermediate snapshots in working/ will be deleted. "
+            "Current revisions and original PDFs stay untouched."
+        )
+        box.button(QMessageBox.Yes).setText("Compact")
+        box.setDefaultButton(QMessageBox.Cancel)
+        return box.exec() == QMessageBox.Yes
+
+    def compact_revisions(self):
+        if self.watcher or self.pending:
+            return
+        info = self.workspace.library.superseded_snapshots()
+        self._superseded = info
+        self._enable()
+        if info["count"] <= 0 or not self.confirm_compact(info):
+            return
+        result = self.workspace.library.compact_snapshots()
+        self._superseded = self.workspace.library.superseded_snapshots()
+        self._enable()
+        removed = result["removed"]
+        self.message.setText(
+            f"Removed {removed} superseded revision{'s' if removed != 1 else ''}, "
+            f"freed {format_size(result['bytes_freed'])}."
+        )
 
     def remove_selected(self):
         ids = self.selected_ids()

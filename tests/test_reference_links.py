@@ -319,6 +319,41 @@ class EventTests(unittest.TestCase):
                 for future in futures:
                     future.result(timeout=20)
 
+    def test_pdfium_two_column_superscript_and_parenthesized_analyze(self):
+        writer = PdfWriter()
+        font = writer._add_object(DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+            NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')}))
+        page = writer.add_blank_page(600, 800)
+        page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+        stream = DecodedStreamObject()
+        stream.set_data(b'\n'.join([
+            b'BT /F1 10 Tf 1 0 0 1 40 700 Tm (As shown earlier) Tj /F1 6 Tf 1 0 0 1 120 704 Tm (1) Tj ET',
+            b'BT /F1 10 Tf 320 700 Td (Also see \\(2\\).) Tj ET',
+            b'BT /F1 10 Tf 40 680 Td (Left line two.) Tj ET',
+            b'BT /F1 10 Tf 320 680 Td (Right line two.) Tj ET',
+            b'BT /F1 10 Tf 40 660 Td (Left line three.) Tj ET',
+            b'BT /F1 10 Tf 320 660 Td (Right line three.) Tj ET',
+            b'BT /F1 12 Tf 255 620 Td (References) Tj ET',
+            b'BT /F1 9 Tf 40 580 Td ([1] Alpha, A. 2020, Journal, 1, 1) Tj ET',
+            b'BT /F1 9 Tf 40 560 Td ([2] Beta, B. 2021, Journal, 2, 2) Tj ET',
+        ]))
+        page[NameObject('/Contents')] = writer._add_object(stream)
+        writer.add_named_destination_array(TextStringObject('cite.one'), ArrayObject([
+            writer.pages[0].indirect_reference, NameObject('/XYZ'), FloatObject(40), FloatObject(590), FloatObject(0)]))
+        writer.add_annotation(0, DictionaryObject({
+            NameObject('/Subtype'): NameObject('/Link'),
+            NameObject('/Rect'): ArrayObject(FloatObject(v) for v in (118, 698, 128, 712)),
+            NameObject('/Dest'): TextStringObject('cite.one'),
+        }))
+        with tempfile.TemporaryDirectory() as directory, Library(Path(directory) / 'library') as library:
+            path = Path(directory) / 'two_col.pdf'
+            writer.write(path)
+            doc_id = library.open_file(path)['id']
+            refs = {r['label']: r for r in references.analyze(library, doc_id)['references']}
+            self.assertEqual(refs['1']['destinations'], ['cite.one'])
+            self.assertEqual(refs['1']['citation_count'], 1)
+            self.assertEqual(refs['2']['citation_count'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

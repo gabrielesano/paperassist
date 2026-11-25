@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .document import PdfDocument
+from .positions import current_page
 from .theme import INK, icon, set_props
 from .toolbar import PageField, install_overflow, reserve_zoom_width, step_page
 from .view import PdfView
@@ -18,7 +19,15 @@ class FindBar(QWidget):
         self.field = QLineEdit(placeholderText="Find in document", clearButtonEnabled=True)
         self.field.setAccessibleName("Find in document")
         self.status = QLabel(objectName="muted-note")
-        view.search_updated.connect(self.status.setText)
+        self.ocr_button = QToolButton(
+            text="OCR scan",
+            objectName="find-ocr-button",
+            toolTip="Recognize scanned text (OCR)",
+            accessibleName="OCR scan",
+            visible=False,
+        )
+        self.ocr_button.clicked.connect(self._request_ocr)
+        view.search_updated.connect(self._on_search_updated)
         self.field.textChanged.connect(self._clear_search)
         previous = QToolButton(toolTip="Previous match (Shift+Enter)", accessibleName="Previous match")
         previous.setIcon(icon("up", INK, 15))
@@ -31,6 +40,7 @@ class FindBar(QWidget):
         row.setSpacing(4)
         row.addWidget(self.field, 1)
         row.addWidget(self.status)
+        row.addWidget(self.ocr_button)
         for widget in (previous, following, close):
             row.addWidget(widget)
         self.field.returnPressed.connect(self._enter)
@@ -38,6 +48,26 @@ class FindBar(QWidget):
         previous.clicked.connect(lambda: self._run(-1))
         close.clicked.connect(self.close_bar)
         self.hide()
+
+    def _on_search_updated(self, status):
+        self.status.setText(status)
+        self._sync_ocr_button()
+
+    def _sync_ocr_button(self):
+        view = self.view
+        show = (
+            view.doc.source.document_id is not None
+            and not view.search_pending
+            and not view.hits
+            and bool(view._query)
+            and len(view.doc) > 0
+            and not view.doc.words(current_page(view))
+        )
+        self.ocr_button.setVisible(show)
+
+    def _request_ocr(self):
+        if (doc_id := self.view.doc.source.document_id) is not None:
+            self.view.ocr_requested.emit(doc_id)
 
     def _enter(self):
         self._run(-1 if QGuiApplication.keyboardModifiers() & Qt.ShiftModifier else 1)
@@ -55,6 +85,7 @@ class FindBar(QWidget):
 
     def open(self):
         self.show()
+        self._sync_ocr_button()
         self.field.setFocus()
         self.field.selectAll()
 

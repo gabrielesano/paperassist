@@ -3,12 +3,13 @@ import weakref
 from html import escape
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QStyle, QStyledItemDelegate,
                                QStyleOptionButton, QStyleOptionViewItem, QVBoxLayout, QWidget, QSizePolicy)
 
 from paperassist import references
+from paperassist.bibtex import format_reference_bibtex
 from paperassist.citation import fold
 from paperassist.citations import bibliography_destination, citation_matches, next_citation_index
 
@@ -443,6 +444,22 @@ class ReferencesPanel(QWidget):
             card.count.clicked.connect(lambda _=False, target=ref: self.step(target))
             top_row.addWidget(card.count)
             top_row.addStretch(1)
+            linked_doc = None
+            if ref.get("local_document_id") and not ref.get("local_invalid") and self.workspace is not None:
+                try:
+                    candidate = self.workspace.library.get_document(ref["local_document_id"])
+                    if isinstance(candidate, dict):
+                        linked_doc = candidate
+                except (KeyError, AttributeError, TypeError):
+                    linked_doc = None
+            bibtex_entry = format_reference_bibtex(ref, linked_doc)
+            card.copy_bibtex = None
+            if bibtex_entry:
+                card.copy_bibtex = QPushButton("Copy BibTeX")
+                card.copy_bibtex.setProperty("link", True)
+                card.copy_bibtex.setToolTip("Copy BibTeX entry to clipboard")
+                card.copy_bibtex.clicked.connect(lambda _=False, entry=bibtex_entry: self._copy_bibtex(entry))
+                top_row.addWidget(card.copy_bibtex)
             layout.addLayout(top_row)
 
             title_text = escape(item.text().split("\n")[0])
@@ -463,6 +480,10 @@ class ReferencesPanel(QWidget):
             self._fit(item)
         if focus:
             self.list.itemWidget(item).title.setFocus()
+
+    def _copy_bibtex(self, entry):
+        QGuiApplication.clipboard().setText(entry)
+        self._message("Copied BibTeX entry.")
 
     def _fit(self, item):
         self.updateGeometry()

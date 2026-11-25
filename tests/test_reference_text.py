@@ -106,9 +106,16 @@ class BibliographyTextTests(unittest.TestCase):
                  'retrieval': {'status': 'not_found'}},
                 {'id': '1', 'label': '2021', 'raw': '6'},
                 {'id': '2', 'label': '2', 'raw': 'Bob Writer. Second work. Journal 4, 2020.'}]})
-            reader = SimpleNamespace(pages=[SimpleNamespace(extract_text=lambda: text)], named_destinations={})
+            class FakePdf:
+                def __init__(self, _data=b''):
+                    self.pages = [SimpleNamespace(extract_text=lambda: text)]
+                    self.named_destinations = {}
+
+                def close(self):
+                    pass
+
             with patch.object(library, 'read_pdf', return_value=(b'', 0)), \
-                 patch('paperassist.references.PdfReader', return_value=reader):
+                 patch('paperassist.references.Pdf', FakePdf):
                 refs = references.analyze(library, 1)['references']
             self.assertEqual({ref['label']: ref['id'] for ref in refs}, {'1': '0', '2': '2', '3': '3'})
             self.assertEqual(refs[0]['retrieval']['status'], 'not_found')
@@ -160,6 +167,23 @@ class CitationGrammarTests(unittest.TestCase):
         refs = extract(['Smith et a l. (20 05), Smith et al. 2 0 0 5.\nReferences\n'
                         'Smith, A., Jones, B., & Brown, C. 2005, J, 1, 2'])
         self.assertEqual(refs[0]['citation_count'], 2)
+
+    def test_explicit_three_author_oxford_comma_and_without_comma(self):
+        refs = extract(['Smith, Jones, & Brown 2020; Smith, Jones, and Brown (2020); Smith, Jones & Brown 2020.\n'
+                        'References\n'
+                        'Smith, A., Jones, B., & Brown, C. 2020, ApJ, 1, 2\n'
+                        'Brown, C. 2020, ApJ, 3, 4'])
+        self.assertEqual([r['citation_count'] for r in refs], [3, 0])
+
+    def test_numeric_superscript_and_parenthesized_citations_in_text(self):
+        refs = extract([
+            'Observed earlier¹˒²⁻³ and confirmed (1, 3). Ignore Eq. (2), Fig. (1), 10³, cm⁻², (2020).\n'
+            'References\n'
+            '[1] First Author. 2020, J, 1, 1\n'
+            '[2] Second Author. 2021, J, 2, 2\n'
+            '[3] Third Author. 2022, J, 3, 3\n'
+        ])
+        self.assertEqual([r['citation_count'] for r in refs], [2, 1, 2])
 
 
 if __name__ == '__main__':

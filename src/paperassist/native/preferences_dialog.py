@@ -2,7 +2,7 @@
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLayout, QLineEdit, QPushButton, QVBoxLayout,
 )
 from shiboken6 import isValid
@@ -41,6 +41,14 @@ class PreferencesDialog(QDialog):
         layout.addWidget(self.size_combo)
         layout.addWidget(QLabel("Applies at once to the toolbar, panels and dialogs on this computer. "
                                 "Documents keep their own zoom.", objectName="muted-note", wordWrap=True))
+        self.restore_session_check = QCheckBox(
+            "Reopen open tabs and split views on startup",
+            objectName="preferences-restore-session",
+            accessibleName="Reopen open tabs and split views on startup",
+        )
+        with QSignalBlocker(self.restore_session_check):
+            self.restore_session_check.setChecked(bool(settings.preferences().get("restore_session", False)))
+        layout.addWidget(self.restore_session_check)
 
         self.library_section = QFrame()
         section = QVBoxLayout(self.library_section)
@@ -97,6 +105,7 @@ class PreferencesDialog(QDialog):
             layout.addWidget(widget)
 
         self.size_combo.currentIndexChanged.connect(self._on_size_changed)
+        self.restore_session_check.toggled.connect(self._on_restore_session_changed)
         self.inbox_browse.clicked.connect(lambda: self._browse(self.inbox_edit, "Folder for manual downloads"))
         self.inbox_save.clicked.connect(self._save_inbox)
         self.inbox_clear.clicked.connect(lambda: self._save_inbox(clear=True))
@@ -230,12 +239,22 @@ class PreferencesDialog(QDialog):
         except (OSError, ValueError) as error:
             self._say(f"Could not save interface size: {error}", bad=True)
 
+    def _on_restore_session_changed(self, checked):
+        try:
+            settings.update_preferences({"restore_session": bool(checked)})
+            self._say("")
+        except (OSError, ValueError) as error:
+            self._say(f"Could not save startup preference: {error}", bad=True)
+
     def open_preferences(self, focus="zoom"):
         if not self.isVisible():
             self._return_focus = self.host.focusWidget()
-        stored = parse_zoom(settings.preferences().get("ui_zoom"))
+        prefs = settings.preferences()
+        stored = parse_zoom(prefs.get("ui_zoom"))
         if stored != self.zoom_value:
             self.apply_zoom(stored)
+        with QSignalBlocker(self.restore_session_check):
+            self.restore_session_check.setChecked(bool(prefs.get("restore_session", False)))
         self._refresh_workspace()
         self._say("")
         self.open()

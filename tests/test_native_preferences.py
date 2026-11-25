@@ -879,6 +879,29 @@ class NativePreferencesTests(QtTestCase):
         self.assertTrue(flow.hasHeightForWidth())
         self.assertGreater(flow.heightForWidth(140), flow.heightForWidth(900))
 
+    def test_restore_session_checkbox_defaults_off_and_persists_preference(self):
+        from PySide6.QtWidgets import QCheckBox
+        window = self.make_window()
+        window.show_preferences()
+        self.pump()
+        dialog = window.preferences_dialog
+        checkbox = dialog.findChild(QCheckBox, "preferences-restore-session")
+        self.assertIsNotNone(checkbox)
+        self.assertEqual(checkbox.accessibleName(), "Reopen open tabs and split views on startup")
+        self.assertFalse(checkbox.isChecked())
+        self.assertFalse(settings.preferences().get("restore_session", False))
+
+        checkbox.click()
+        self.pump()
+        self.assertTrue(checkbox.isChecked())
+        self.assertIs(settings.preferences()["restore_session"], True)
+
+        restarted = self.make_window()
+        restarted.show_preferences()
+        self.pump()
+        restarted_box = restarted.preferences_dialog.findChild(QCheckBox, "preferences-restore-session")
+        self.assertTrue(restarted_box.isChecked())
+
 
 if __name__ == "__main__":
     unittest.main()

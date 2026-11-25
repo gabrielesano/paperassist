@@ -4,7 +4,8 @@ import re
 import unicodedata
 from collections import defaultdict
 
-from .citation import NUMERIC_MARKER, citation_numbers, first_surname, surnames
+from .citation import (NUMERIC_MARKER, PAREN_NUMERIC_MARKER, SCIENTIFIC_UNITS, SUPERSCRIPT_MARKER,
+                       citation_numbers, first_surname, superscript_to_ascii, surnames)
 from .native.engine import Pdf, Rect
 
 IGNORED = set("\u00ad\u2010\u2011\u2012\u2013\u2014\u2015\u2212-`¨¯´¸ˆ˘˙˚˛˜˝\ufffe\x02")
@@ -20,6 +21,8 @@ def visible_chars(text):
         for char in unicodedata.normalize("NFKD", original).lower():
             if char.isspace() or unicodedata.category(char).startswith("M") or char in IGNORED:
                 continue
+            if char == "˒":
+                char = ","
             yield ("i" if char == "ı" else char), at
 
 
@@ -129,7 +132,14 @@ def complete_citation(text):
     text = text.strip()
     contents = text.removeprefix('[').removesuffix(']')
     marker = NUMERIC_MARKER.fullmatch(f'[{contents}]')
-    return bool(re.search(r"\b(?:19|20)\d{2}[a-z]?\s*[\])}.,;]*$", text) or (marker and citation_numbers(marker[1])))
+    paren = PAREN_NUMERIC_MARKER.fullmatch(text)
+    sup = SUPERSCRIPT_MARKER.fullmatch(text)
+    return bool(
+        re.search(r"\b(?:19|20)\d{2}[a-z]?\s*[\])}.,;]*$", text)
+        or (marker and citation_numbers(marker[1]))
+        or (paren and citation_numbers(paren[1]))
+        or (sup and citation_numbers(sup[1]))
+    )
 
 
 def pdf_rect(frame, rect):
@@ -159,6 +169,29 @@ def next_citation_index(positions, last, here):
     return next((i for i, position in enumerate(positions) if position >= here), 0)
 
 
+def _numeric_refs(refs, numbers):
+    if not numbers:
+        return []
+    groups = [[ref for ref in refs if re.sub(r"[\[\].\s]", "", str(ref.get("label", ""))) == str(n)]
+              for n in numbers]
+    return list({ref["id"]: ref for group in groups for ref in group}.values()) if all(groups) else []
+
+
+def _valid_superscript_prefix(prefix):
+    prefix = prefix.rstrip(' ')
+    if not prefix:
+        return True
+    if prefix[-1] in '-+=^/*×<>~0123456789':
+        return False
+    if prefix[-1] in '.,;:)"\'”’]':
+        stem = re.split(r'\s+', prefix.rstrip('.,;:)"\'”’]'))[-1].lstrip('("\'“‘[')
+        if stem.lower() in SCIENTIFIC_UNITS or (stem.isdigit() and int(stem) < 1000):
+            return False
+        return True
+    word = re.split(r'\s+', prefix)[-1].lstrip('("\'“‘[')
+    return len(word) >= 3 and any(c.isalpha() for c in word) and not any(c.isdigit() for c in word) and word.lower() not in SCIENTIFIC_UNITS
+
+
 def citation_matches(refs, text, destination=None):
     """Only recognized markers consume links; uncertain candidates remain an explicit choice."""
     if destination is not None:
@@ -168,17 +201,34 @@ def citation_matches(refs, text, destination=None):
         if re.search(r"(?:^|[._:-])(?:fig(?:ure)?|sec(?:tion)?|eq(?:uation)?|table|tab)(?=[._:\d-]|$)",
                      destination, re.I):
             return []
-    text = text.strip().rstrip(".,;")
+    raw_text = text.strip()
+    text = raw_text.rstrip(".,;")
     marker = NUMERIC_MARKER.fullmatch(text)
     if marker:
-        groups = [[ref for ref in refs if re.sub(r"[\[\].\s]", "", str(ref.get("label", ""))) == str(n)]
-                  for n in citation_numbers(marker[1])]
-        return list({ref["id"]: ref for group in groups for ref in group}.values()) if all(groups) else []
-    author_year = re.fullmatch(r"\(?([^\d()]+?)\s*[,]?\s+\(?(19\d{2}[a-z]?|20\d{2}[a-z]?)\)?\)?", text.strip(), re.I)
+        return _numeric_refs(refs, citation_numbers(marker[1]))
+    numeric_labels = [int(lbl) for ref in refs
+                      if (lbl := re.sub(r"[\[\].\s]", "", str(ref.get("label", "")))).isdigit()]
+    if numeric_labels:
+        sup = SUPERSCRIPT_MARKER.fullmatch(text)
+        if not sup and (trailing := re.search(r'([⁰¹²³⁴⁵⁶⁷⁸⁹][⁰¹²³⁴⁵⁶⁷⁸⁹,;˒⁻–—−\s-]*)$', raw_text)):
+            cand = trailing.group(1).strip()
+            if SUPERSCRIPT_MARKER.fullmatch(cand) and _valid_superscript_prefix(raw_text[:trailing.start()]):
+                sup = SUPERSCRIPT_MARKER.fullmatch(cand)
+        if sup:
+            nums = [n for n in citation_numbers(superscript_to_ascii(sup[1])) if not (1900 <= n <= 2099)]
+            if nums:
+                return _numeric_refs(refs, nums)
+        paren = PAREN_NUMERIC_MARKER.fullmatch(text)
+        if paren:
+            max_entry = max(numeric_labels)
+            nums = citation_numbers(paren[1])
+            if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                return _numeric_refs(refs, nums)
+    author_year = re.fullmatch(r"\(?([^\d()]+?)\s*[,]?\s+\(?(19\d{2}[a-z]?|20\d{2}[a-z]?)\)?\)?", text, re.I)
     if not author_year:
         return []
     cited = re.sub(r'\s+et\s+al\.?$', '', author_year[1].rstrip(', '), flags=re.I)
-    cited_names = re.split(r'\s*(?:&|\band\b)\s*', cited, flags=re.I)
+    cited_names = [name for name in re.split(r'\s*(?:,\s*(?:&|\band\b)\s*|&|\band\b|,)\s*', cited, flags=re.I) if name]
     found = []
     for ref in refs:
         authors = str(ref.get('authors') or '')

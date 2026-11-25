@@ -6,10 +6,12 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current release is **0.3.2**, which adds async worker search, reading
-marks, Copy with source, Markdown note export, library removal, `arXiv`/`bibcode`
-identities, and batch manual-download matching. See the
-[release notes](../docs/releases/0.3.2.md).
+The current release is **0.4.0**, which adds zero-copy `SharedMemory` PDF IPC
+and worker-side highlight filtering, PDFium-unified two-column reference
+analysis with superscript/`(n)`/3+-author citations, on-demand searchable
+sidecar OCR, FTS5 catalog indexing, BibTeX export, revision compaction, opt-in
+session restore, and Windows DPAPI/ACL key protection. See the
+[release notes](../docs/releases/0.4.0.md).
 The build commands below produce the current source version. See
 [0.3.0 release acceptance](../docs/development/release-0.3.0.md)
 for the previous release and

@@ -279,6 +279,34 @@ class DocumentTests(unittest.TestCase):
         self.assertIsNone(self.doc.annotation_at(0, x, y, highlights=False))
         self.assertEqual(self.doc.annotation_at(0, 325, 320, highlights=False)['subtype'], 'ink')
 
+    def test_pdf_render_filters_highlights_and_ink_highlights_while_keeping_ink(self):
+        from paperassist.native import annotations
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        data = annotations.apply(pdf_bytes(writer), 'highlight', 0, rects=[(20, 20, 80, 40)], color=(1, 1, 0), opacity=1)
+        data = annotations.apply(data, 'ink', 0, strokes=[[(20, 80), (80, 100)]], color=(0, 1, 0), width=10, freehand=True)
+        data = annotations.apply(data, 'ink', 0, strokes=[[(20, 140), (80, 160)]], color=(0, 0, 0), width=6, freehand=False)
+        pdf = Pdf(data)
+        self.addCleanup(pdf.close)
+
+        def pixel(rendered, x, y):
+            mv = memoryview(rendered.rgb).cast("B")
+            off = ((rendered.height - y) * rendered.width + x) * 3
+            return tuple(mv[off:off + 3])
+
+        visible = pdf.render(0, 1.0, highlights=True)
+        self.assertNotEqual(pixel(visible, 50, 30), (255, 255, 255))
+        self.assertNotEqual(pixel(visible, 50, 90), (255, 255, 255))
+        self.assertEqual(pixel(visible, 50, 150), (0, 0, 0))
+
+        hidden = pdf.render(0, 1.0, highlights=False)
+        self.assertEqual(pixel(hidden, 50, 30), (255, 255, 255))
+        self.assertEqual(pixel(hidden, 50, 90), (255, 255, 255))
+        self.assertEqual(pixel(hidden, 50, 150), (0, 0, 0))
+
+        # Flag restoration ensures subsequent visible renders keep all highlights.
+        self.assertEqual(bytes(pdf.render(0, 1.0, highlights=True).rgb), bytes(visible.rgb))
+
 
 @needs_qt
 class WindowEditingTests(QtTestCase):
@@ -580,16 +608,23 @@ class WindowEditingTests(QtTestCase):
         self.assertEqual(len(view.doc.annotations(0)), 2)
 
     def test_edits_while_highlights_are_hidden_keep_them_hidden_in_the_render_copy(self):
-        from paperassist.native.annotations import read
+        from paperassist.native import annotations
         view = self.open("hidden-edit")
         self.highlight(view)
-        view.set_highlights_visible(False)
-        self.bar.draw.trigger()
-        self.drag(view, [self.point(view, 0, 50, 300), self.point(view, 0, 120, 340)])
-        kinds = [a['subtype'] for a in read(view.doc.pdf.render_data(False), 0)]
-        self.assertEqual(kinds, ['ink'])
+        with patch.object(annotations, "without_highlights", wraps=annotations.without_highlights) as stripped, \
+             patch.object(view.client, "open", wraps=view.client.open) as reopened:
+            view.set_highlights_visible(False)
+            self.pump(lambda: view.has_page(0))
+            reopened.assert_not_called()
+            self.bar.draw.trigger()
+            self.drag(view, [self.point(view, 0, 50, 300), self.point(view, 0, 120, 340)])
+            self.pump(lambda: view.has_page(0))
+            stripped.assert_not_called()
         self.assertEqual([a['subtype'] for a in view.doc.annotations(0)], ['highlight', 'ink'])  # the document keeps both
         self.assertFalse(view.highlights_visible)
+        hidden = view.doc.pdf.render(0, 1.0, highlights=False)
+        shown = view.doc.pdf.render(0, 1.0, highlights=True)
+        self.assertNotEqual(bytes(hidden.rgb), bytes(shown.rgb))
 
     # ---- the whole Save rule ------------------------------------------------------------------
     def test_only_save_writes_the_pdf_whatever_the_reader_does(self):

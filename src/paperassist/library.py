@@ -15,6 +15,8 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
+from . import paths
+from .bibtex import export_documents_bibtex
 from .citation import ARXIV_ID, first_surname, normalize_doi, pdf_name, reference_key, strip_arxiv_version
 from .metadata import PARSER_VERSION, extract_metadata, useful
 
@@ -22,6 +24,72 @@ MAX_LABEL = 80
 RESERVED_NAME = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", re.I)
 # Names that say nothing about the paper; the document id is a better label than these.
 GENERIC_NAME = re.compile(r"(?:download|document|file|untitled)[\d_()-]*|[\d_-]+|[0-9a-f]{16,}", re.I)
+_SNAPSHOT_NAME = re.compile(r"^(\d+)-(\d+)\.pdf$")
+_LIGHTWEIGHT_SELECT = """
+    id, sha256, filename, source_path, size, title, authors, year, doi, pages,
+    metadata_status, work_id, revision, created_at, stored_name, label, revision_sha256,
+    json_extract(extracted, '$.verified.provider') AS verified_provider,
+    json_extract(extracted, '$.refresh.message') AS refresh_message,
+    json_extract(extracted, '$.sources') AS sources_json,
+    json_extract(extracted, '$.manual') AS manual_json,
+    CASE WHEN json_extract(extracted, '$.verified') IS NOT NULL THEN 1 ELSE 0 END AS has_verified
+"""
+
+
+def _fts_expr(prefix: str = "") -> str:
+    p = f"{prefix}." if prefix else ""
+    return (
+        f"COALESCE({p}title,'') || ' ' || COALESCE({p}label,'') || ' ' || COALESCE({p}authors,'') || ' ' || "
+        f"COALESCE(CAST({p}year AS TEXT),'') || ' ' || COALESCE({p}doi,'') || ' ' || COALESCE({p}filename,'') || ' ' || "
+        f"COALESCE({p}metadata_status,'') || ' ' || COALESCE(json_extract({p}extracted, '$.verified.arxiv_id'),'') || ' ' || "
+        f"COALESCE(json_extract({p}extracted, '$.verified.bibcode'),'') || ' ' || "
+        f"COALESCE(json_extract({p}extracted, '$.candidates.arxiv'),'') || "
+        f"CASE WHEN {p}metadata_status IN ('needs_review', 'incomplete') THEN ' Metadata needs review' ELSE '' END"
+    )
+
+
+def _normalize_session(payload) -> dict | None:
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return None
+    raw_tabs = payload.get("tabs")
+    if not isinstance(raw_tabs, list):
+        return None
+    tabs = []
+    for entry in raw_tabs:
+        if not isinstance(entry, dict):
+            continue
+        main_id = entry.get("main_id")
+        if type(main_id) is not int or main_id <= 0:
+            continue
+        quick_id = entry.get("quick_id")
+        if quick_id is not None and (type(quick_id) is not int or quick_id <= 0):
+            quick_id = None
+        label = entry.get("label")
+        label = " ".join(label.split())[:MAX_LABEL] if isinstance(label, str) else ""
+        active_pane = entry.get("active_pane")
+        if active_pane not in ("main", "quick") or quick_id is None:
+            active_pane = "main"
+        raw_shares = entry.get("shares") if isinstance(entry.get("shares"), dict) else {}
+        shares = {}
+        for axis, default in (("vertical", 0.4), ("horizontal", 0.5)):
+            value = raw_shares.get(axis, default)
+            shares[axis] = (
+                max(0.2, min(0.75, float(value)))
+                if type(value) in (int, float) and math.isfinite(value)
+                else default
+            )
+        tabs.append({
+            "main_id": main_id,
+            "quick_id": quick_id,
+            "label": label,
+            "active_pane": active_pane,
+            "shares": shares,
+        })
+    active_tab = payload.get("active_tab", 0)
+    if type(active_tab) is not int or active_tab < 0:
+        active_tab = 0
+    active_tab = min(active_tab, len(tabs) - 1) if tabs else 0
+    return {"version": 1, "active_tab": active_tab, "tabs": tabs}
 
 
 def safe_filename(name: str) -> str:
@@ -225,6 +293,25 @@ class Library:
             if "revision_sha256" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN revision_sha256 TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS documents_stored_name ON documents(stored_name)")
+            new_expr = _fts_expr("NEW")
+            db.executescript(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(search_text, tokenize='trigram');
+                CREATE TRIGGER IF NOT EXISTS documents_fts_insert AFTER INSERT ON documents BEGIN
+                    INSERT INTO documents_fts(rowid, search_text) VALUES (NEW.id, {new_expr});
+                END;
+                CREATE TRIGGER IF NOT EXISTS documents_fts_update AFTER UPDATE ON documents BEGIN
+                    DELETE FROM documents_fts WHERE rowid = OLD.id;
+                    INSERT INTO documents_fts(rowid, search_text) VALUES (NEW.id, {new_expr});
+                END;
+                CREATE TRIGGER IF NOT EXISTS documents_fts_delete AFTER DELETE ON documents BEGIN
+                    DELETE FROM documents_fts WHERE rowid = OLD.id;
+                END;
+            """)
+            fts_count = db.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0]
+            doc_count = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            if fts_count != doc_count:
+                db.execute("DELETE FROM documents_fts")
+                db.execute(f"INSERT INTO documents_fts(rowid, search_text) SELECT id, {_fts_expr()} FROM documents")
             if not had_manual_links:
                 for source_id, payload in db.execute("SELECT source_id, payload FROM reference_analyses").fetchall():
                     try:
@@ -321,6 +408,36 @@ class Library:
         return result
 
     @staticmethod
+    def _lightweight_document(row):
+        result = dict(row)
+        verified_provider = result.pop("verified_provider", None)
+        refresh_message = result.pop("refresh_message", None)
+        sources_json = result.pop("sources_json", None)
+        manual_json = result.pop("manual_json", None)
+        has_verified = result.pop("has_verified", 0)
+        result.pop("_search_text", None)
+        metadata = {"sources": json.loads(sources_json) if sources_json else {}}
+        if has_verified or verified_provider:
+            metadata["verified"] = {"provider": verified_provider}
+        if refresh_message:
+            metadata["refresh"] = {"message": refresh_message}
+        if manual_json is not None:
+            metadata["manual"] = json.loads(manual_json)
+        result["metadata"] = metadata
+        return result
+
+    @staticmethod
+    def _search_blob(doc: dict) -> str:
+        verified = doc["metadata"].get("verified") or {}
+        fields = [str(doc.get(key) or "") for key in
+                  ("title", "label", "authors", "year", "doi", "filename", "metadata_status")]
+        fields.extend(str(verified.get(key) or "") for key in ("arxiv_id", "bibcode"))
+        fields.extend(doc["metadata"].get("candidates", {}).get("arxiv", []))
+        if doc["metadata_status"] in ("needs_review", "incomplete"):
+            fields.append("Metadata needs review")
+        return " ".join(fields)
+
+    @staticmethod
     def _stored_name(doc) -> str:
         # Libraries created before readable names keep <sha256>.pdf until the next open.
         return doc["stored_name"] or f'{doc["sha256"]}.pdf'
@@ -401,23 +518,119 @@ class Library:
         for document_id in legacy:
             self._rename(document_id)
 
-    def list_documents(self, query: str = "") -> list[dict]:
-        with self._connect() as db:
-            rows = db.execute("SELECT * FROM documents ORDER BY title COLLATE NOCASE, id").fetchall()
+    def list_documents(self, query: str = "", *, lightweight: bool = False) -> list[dict]:
         needle = query.casefold().strip()
+        cols = _LIGHTWEIGHT_SELECT if lightweight else "*"
+        params: tuple = ()
+        where = ""
+        if len(needle) >= 3:
+            if lightweight:
+                cols += ", (SELECT search_text FROM documents_fts WHERE rowid = documents.id) AS _search_text"
+            where = " WHERE id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH '\"' || replace(?, '\"', '\"\"') || '\"')"
+            params = (needle,)
+        elif needle:
+            if lightweight:
+                cols += ", (SELECT search_text FROM documents_fts WHERE rowid = documents.id) AS _search_text"
+            escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where = " WHERE id IN (SELECT rowid FROM documents_fts WHERE lower(search_text) LIKE '%' || ? || '%' ESCAPE '\\')"
+            params = (escaped,)
+        sql = f"SELECT {cols} FROM documents{where} ORDER BY title COLLATE NOCASE, id"
+        with self._connect() as db:
+            rows = db.execute(sql, params).fetchall()
         documents = []
         for row in rows:
-            doc = self._document(row)
-            verified = doc["metadata"].get("verified") or {}
-            fields = [str(doc.get(key) or "") for key in
-                      ("title", "label", "authors", "year", "doi", "filename", "metadata_status")]
-            fields.extend(str(verified.get(key) or "") for key in ("arxiv_id", "bibcode"))
-            fields.extend(doc["metadata"].get("candidates", {}).get("arxiv", []))
-            if doc["metadata_status"] in ("needs_review", "incomplete"):
-                fields.append("Metadata needs review")
-            if not needle or needle in " ".join(fields).casefold():
-                documents.append(doc)
+            if lightweight:
+                search_text = row["_search_text"] if needle else ""
+                doc = self._lightweight_document(row)
+                if not needle or needle in (search_text or "").casefold():
+                    documents.append(doc)
+            else:
+                doc = self._document(row)
+                if not needle or needle in self._search_blob(doc).casefold():
+                    documents.append(doc)
         return documents
+
+    def status_counts(self) -> tuple[int, list[int]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT id, metadata_status FROM documents ORDER BY title COLLATE NOCASE, id").fetchall()
+        review_ids = [row["id"] for row in rows if row["metadata_status"] in ("needs_review", "incomplete")]
+        return len(rows), review_ids
+
+    def document_ids(self) -> list[int]:
+        with self._connect() as db:
+            return [row[0] for row in db.execute("SELECT id FROM documents ORDER BY title COLLATE NOCASE, id").fetchall()]
+
+    def _superseded_snapshot_paths(self) -> list[tuple[Path, int]]:
+        verified_revs: dict[int, int | None] = {}
+        targets: list[tuple[Path, int]] = []
+        with os.scandir(self.working) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                match = _SNAPSHOT_NAME.fullmatch(entry.name)
+                if not match:
+                    continue
+                doc_id, file_rev = int(match.group(1)), int(match.group(2))
+                if file_rev < 1:
+                    continue
+                if doc_id not in verified_revs:
+                    try:
+                        doc = self.get_document(doc_id)
+                        rev = doc["revision"]
+                        if rev > 1 and self._pdf_path(doc, rev).is_file():
+                            self._read_pdf(doc, rev)
+                            verified_revs[doc_id] = rev
+                        else:
+                            verified_revs[doc_id] = None
+                    except (KeyError, FileNotFoundError, ValueError, OSError):
+                        verified_revs[doc_id] = None
+                current_rev = verified_revs[doc_id]
+                if current_rev is not None and 1 <= file_rev < current_rev:
+                    try:
+                        size = entry.stat().st_size
+                    except OSError:
+                        size = 0
+                    targets.append((Path(entry.path), size))
+        return targets
+
+    def superseded_snapshots(self) -> dict:
+        with self._lock:
+            targets = self._superseded_snapshot_paths()
+            return {"count": len(targets), "bytes": sum(size for _, size in targets)}
+
+    def compact_snapshots(self) -> dict:
+        with self._lock:
+            removed = bytes_freed = 0
+            for path, size in self._superseded_snapshot_paths():
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                removed += 1
+                bytes_freed += size
+            return {"removed": removed, "bytes_freed": bytes_freed}
+
+    def get_session(self) -> dict | None:
+        try:
+            data = json.loads((self.data_dir / "session.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return _normalize_session(data)
+
+    def save_session(self, payload: dict) -> None:
+        normalized = _normalize_session(payload)
+        if normalized is None:
+            raise ValueError("Invalid session payload")
+        paths.write_json_atomic(self.data_dir / "session.json", normalized)
+
+    def export_bibtex(self, document_ids: list[int]) -> tuple[str, int, int]:
+        if not isinstance(document_ids, (list, tuple, set)) or any(type(v) is not int or v <= 0 for v in document_ids):
+            raise ValueError("document_ids must contain positive integers")
+        ids = list(dict.fromkeys(document_ids))
+        if not ids:
+            return "", 0, 0
+        documents = [self.get_document(doc_id) for doc_id in ids]
+        return export_documents_bibtex(documents)
 
     def remove_documents(self, document_ids: list[int]) -> int:
         """Delete library copies, annotations, notes, and cached analyses for these document IDs."""

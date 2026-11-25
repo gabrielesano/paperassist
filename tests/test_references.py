@@ -15,6 +15,19 @@ class ReferenceTestLibrary(Catalog):
         return str(self.get_path(document_id, annotated)).encode(), 0
 
 
+def _fake_pdf(pages, named_destinations=None):
+    class FakePdf:
+        def __init__(self, _data=b''):
+            self.pages = pages
+            self.named_destinations = named_destinations or {}
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    return FakePdf
+
+
 class ReferenceTests(unittest.TestCase):
     def test_publication_fingerprints_distinguish_journals(self):
         self.assertEqual(_publication('Antolin, P. 2012, ApJ, 745, 152', '2012'),
@@ -234,7 +247,7 @@ class ReferenceTests(unittest.TestCase):
                    'authors': 'Guarrasi', 'year': '2014', 'doi': ''}
             _save(library, 9, {'references': [ref], 'status': 'partial',
                                'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
-            with patch('paperassist.references.PdfReader', return_value=Reader()) as reader:
+            with patch('paperassist.references.Pdf', return_value=_fake_pdf(Reader.pages)()) as reader:
                 result = get(library, 9)['references'][0]
                 self.assertEqual((result['local_document_id'], result['local_match']), (1, 'publication'))
                 get(library, 9)
@@ -268,7 +281,7 @@ class ReferenceTests(unittest.TestCase):
                    'authors': 'Antolin', 'year': '2012'}
             _save(library, 1, {'references': [ref], 'status': 'partial',
                                'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
-            with patch('paperassist.references.PdfReader', return_value=Reader()):
+            with patch('paperassist.references.Pdf', return_value=_fake_pdf(Reader.pages)()):
                 self.assertEqual(get(library, 1)['references'][0]['local_document_id'], 2)
 
     def test_only_authors_the_user_typed_outrank_the_printed_header(self):
@@ -293,7 +306,7 @@ class ReferenceTests(unittest.TestCase):
                   Library(Path(directory) / 'library.sqlite', {'manual': manual}) as library):
                 _save(library, 1, {'references': [dict(ref)], 'status': 'partial',
                                    'destination_version': DESTINATION_VERSION, 'extraction_version': EXTRACTION_VERSION})
-                with patch('paperassist.references.PdfReader', return_value=Reader()):
+                with patch('paperassist.references.Pdf', return_value=_fake_pdf(Reader.pages)()):
                     self.assertEqual(get(library, 1)['references'][0]['local_document_id'], expected)
 
     def test_manual_links_shared_only_when_reference_and_target_are_unique(self):
@@ -463,7 +476,7 @@ class ReferenceTests(unittest.TestCase):
             ref = {'raw': 'Smith, A. 2020', 'authors': 'Smith', 'year': '2020',
                    'manual_link': True, 'local_document_id': 3}
             _save(library, 1, {'references': [ref], 'status': 'partial'})
-            with patch('paperassist.references.PdfReader', return_value=Reader()) as reader:
+            with patch('paperassist.references.Pdf', return_value=_fake_pdf(Reader.pages)()) as reader:
                 result = get(library, 1)['references'][0]
                 self.assertEqual(result['local_document_id'], 3)
                 self.assertEqual(result['destinations'], [])
@@ -527,7 +540,7 @@ class ReferenceTests(unittest.TestCase):
             missing = {'id': '1', 'label': 'Lost 2001', 'authors': 'Lost', 'year': '2001',
                        'raw': 'Lost, A. 2001', 'manual_link': True, 'local_document_id': 4}
             _save(library, 1, {'references': [old, missing], 'status': 'partial'})
-            with patch('paperassist.references.PdfReader', return_value=Reader()) as reader:
+            with patch('paperassist.references.Pdf', return_value=_fake_pdf(Reader.pages)()) as reader:
                 refs = get(library, 1)['references']
                 by_label = {ref['label']: ref for ref in refs}
                 self.assertEqual(by_label['Testa 2012']['local_document_id'], 3)
@@ -562,9 +575,14 @@ class FakeLibrary(ReferenceTestLibrary):
 
 
 class FakeReader:
-    def __init__(self, stream):
-        text = FakeLibrary.pages[stream.read().decode()]
+    def __init__(self, data):
+        key = data.decode() if isinstance(data, (bytes, bytearray)) else data.read().decode()
+        text = FakeLibrary.pages[key]
         self.pages = [type('Page', (), {'extract_text': lambda self: text})()]
+        self.named_destinations = {}
+
+    def close(self):
+        pass
 
 
 FakeLibrary.pages = {}
@@ -580,7 +598,7 @@ class ConflictTests(unittest.TestCase):
         FakeLibrary.pages = {'browning': 'A&A 485, 837-848 (2008)\nHeating the corona by nanoflares',
                              'guarrasi': 'A&A 564, A48 (2014)\nMHD modeling of coronal loops',
                              'other': 'No journal line here'}
-        patcher = patch('paperassist.references.PdfReader', side_effect=lambda path: FakeReader(path))
+        patcher = patch('paperassist.references.Pdf', side_effect=lambda data: FakeReader(data))
         patcher.start()
         self.addCleanup(patcher.stop)
         self.directory = TemporaryDirectory()
@@ -1006,7 +1024,7 @@ class ShortenedEntryCarryOverTests(unittest.TestCase):
             short = {'id': '2', 'label': 'Baty 2000', 'authors': 'Baty', 'year': '2000', 'manual_link': True, 'local_document_id': 3,
                      'raw': 'Baty, H. 2000, A&A, 353, 1074 Figure 14. As Figure 10(a), for the simulation.'}
             _save(library, 1, {'references': [old, short], 'status': 'partial', 'extraction_version': EXTRACTION_VERSION - 1})
-            with patch('paperassist.references.PdfReader', return_value=Reader()):
+            with patch('paperassist.references.Pdf', return_value=_fake_pdf(Reader.pages)()):
                 refs = get(library, 1)['references']
         self.assertEqual([ref['raw'] for ref in refs], ['Brown, C. 2019, A&A, 1, 2', 'Baty, H. 2000, A&A, 353, 1074', WINEBARGER])
         self.assertEqual(refs[2]['local_document_id'], 3)
@@ -1121,39 +1139,63 @@ class LineNumberAndHeadingTests(unittest.TestCase):
         self.assertEqual(extract(['References 1\nThis is a normal paragraph.\nNothing cited here.']), [])
 
     def test_analyze_pdf_reuses_extracted_chunks_without_second_extract_text(self):
+        from io import BytesIO
+        from pypdf import PdfWriter
+        from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, TextStringObject
+        from paperassist import references
+        from paperassist.native.engine import Pdf
         from paperassist.references import _analyze_pdf
-        calls = []
 
-        class Dest:
-            typ, left, top, bottom = '/XYZ', 80.0, 560.0, None
-
-        class Page:
-            mediabox = type('Box', (), {'width': 612.0, 'right': 612.0})()
-
-            def extract_text(self, visitor_text=None):
-                calls.append(visitor_text is not None)
-                spans = [('References\n', 80, 600, 10), ('Smith, A. 2020, ApJ, 10, 20\n', 80, 550, 8)]
-                if visitor_text is not None:
-                    for text, x, y, size in spans:
-                        visitor_text(text, [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, x, y], {}, size)
-                return ''.join(text for text, *_ in spans)
-
-        class Reader:
-            pages = [Page()]
-            named_destinations = {'cite.smith2020': Dest()}
-
-            def get_destination_page_number(self, dest):
-                return 0
+        writer = PdfWriter()
+        font = writer._add_object(DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+            NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')}))
+        page = writer.add_blank_page(600, 700)
+        page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+        stream = DecodedStreamObject()
+        stream.set_data(
+            b'BT /F1 10 Tf 80 650 Td (See Smith (2020) here.) Tj '
+            b'0 -50 Td (References) Tj '
+            b'0 -50 Td (Smith, A. 2020, ApJ, 10, 20) Tj ET'
+        )
+        page[NameObject('/Contents')] = writer._add_object(stream)
+        writer.add_named_destination_array(TextStringObject('cite.smith2020'), ArrayObject([
+            writer.pages[0].indirect_reference, NameObject('/XYZ'), FloatObject(80), FloatObject(562), FloatObject(0)]))
+        writer.add_annotation(0, DictionaryObject({
+            NameObject('/Subtype'): NameObject('/Link'),
+            NameObject('/Rect'): ArrayObject(FloatObject(v) for v in (100, 648, 160, 662)),
+            NameObject('/Dest'): TextStringObject('cite.smith2020'),
+        }))
+        buf = BytesIO()
+        writer.write(buf)
+        pdf_bytes = buf.getvalue()
 
         class StubLibrary:
             def read_pdf(self, document_id, annotated=False):
-                return b'%PDF-stub', 0
+                return pdf_bytes, 0
 
-        with patch('paperassist.references.PdfReader', return_value=Reader()), \
-             patch('paperassist.references._crosscheck_links'):
+        opened = []
+        shared_args = []
+        real_crosscheck = references._crosscheck_links
+
+        def open_pdf(data):
+            instance = Pdf(data)
+            opened.append(instance)
+            return instance
+
+        def tracked_crosscheck(pdf_arg, heading, refs):
+            shared_args.append(pdf_arg)
+            return real_crosscheck(pdf_arg, heading, refs)
+
+        with patch('paperassist.references.Pdf', side_effect=open_pdf) as pdf_ctor, \
+             patch('paperassist.references._crosscheck_links', side_effect=tracked_crosscheck), \
+             patch('pypdf.PdfReader', side_effect=AssertionError('PdfReader must not be called')):
             refs = _analyze_pdf(StubLibrary(), 1)
-        self.assertEqual(calls, [True])
+        self.assertEqual(pdf_ctor.call_count, 1)
+        self.assertEqual(len(opened), 1)
+        self.assertIs(shared_args[0], opened[0])
+        self.assertTrue(opened[0].is_closed)
         self.assertEqual(refs[0]['destinations'], ['cite.smith2020'])
+        self.assertEqual(refs[0]['citation_count'], 1)
 
     def test_resolve_checks_pdf_availability_without_n_plus_one_get_path(self):
         from io import BytesIO
@@ -1241,3 +1283,157 @@ class LineNumberAndHeadingTests(unittest.TestCase):
             self.assertEqual((resolved[1]['local_document_id'], resolved[1]['local_match']), (2, 'first_page_arxiv'))
             self.assertIsNone(resolved[2]['local_document_id'])
             self.assertEqual((resolved[3]['local_document_id'], resolved[3]['local_match']), (3, 'bibcode'))
+
+
+class PdfiumTwoColumnAndNumericTests(unittest.TestCase):
+    @staticmethod
+    def _build_pdf(pages_ops, named_dests=()):
+        from io import BytesIO
+        from pypdf import PdfWriter
+        from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, TextStringObject
+
+        writer = PdfWriter()
+        font = writer._add_object(DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+            NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')}))
+        for ops in pages_ops:
+            page = writer.add_blank_page(600, 800)
+            page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+            stream = DecodedStreamObject()
+            stream.set_data('\n'.join(ops).encode())
+            page[NameObject('/Contents')] = writer._add_object(stream)
+        for name, page_idx, left, top in named_dests:
+            writer.add_named_destination_array(TextStringObject(name), ArrayObject([
+                writer.pages[page_idx].indirect_reference, NameObject('/XYZ'), FloatObject(left), FloatObject(top), FloatObject(0)]))
+        buf = BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+    def test_two_column_pdfium_reads_left_column_before_right_column_with_spanning_bands(self):
+        from paperassist.native.engine import Pdf
+
+        ops = [
+            # Full-width spanning title (> 52% width)
+            'BT /F1 14 Tf 60 740 Td (A Full Width Title About Solar Coronal Loops) Tj ET',
+            # Interleaved stream order across left and right columns
+            'BT /F1 10 Tf 40 680 Td (Left one discusses Smith \\(2020\\).) Tj ET',
+            'BT /F1 10 Tf 320 680 Td (Right one cites Brown \\(2021\\).) Tj ET',
+            'BT /F1 10 Tf 40 660 Td (Left two continues the section.) Tj ET',
+            'BT /F1 10 Tf 320 660 Td (Right two continues further.) Tj ET',
+            'BT /F1 10 Tf 40 640 Td (Left three finishes body.) Tj ET',
+            'BT /F1 10 Tf 320 640 Td (Right three precedes refs.) Tj ET',
+            # Full-width spanning References heading across center gutter
+            'BT /F1 12 Tf 255 600 Td (References) Tj ET',
+            # Two-column bibliography entries
+            'BT /F1 9 Tf 40 560 Td (Alpha, A. 2019, ApJ, 1, 1) Tj ET',
+            'BT /F1 9 Tf 320 560 Td (Brown, B. 2021, ApJ, 3, 3) Tj ET',
+            'BT /F1 9 Tf 40 540 Td (Beta, C. 2018, ApJ, 2, 2) Tj ET',
+            'BT /F1 9 Tf 320 540 Td (Smith, A. 2020, ApJ, 4, 4) Tj ET',
+            'BT /F1 9 Tf 40 520 Td (Gamma, D. 2017, ApJ, 5, 5) Tj ET',
+            'BT /F1 9 Tf 320 520 Td (Zeta, E. 2016, ApJ, 6, 6) Tj ET',
+        ]
+        pdf_bytes = self._build_pdf(
+            [ops],
+            named_dests=[
+                ('cite.brown', 0, 320, 570),
+                ('cite.smith', 0, 40, 530),  # intentional y below Beta
+            ],
+        )
+        pdf = Pdf(pdf_bytes)
+        try:
+            pages, ignored = _extract_pages(pdf)
+            lines = pages[0].splitlines()
+            self.assertEqual(lines[0], 'A Full Width Title About Solar Coronal Loops')
+            self.assertEqual(lines[1:7], [
+                'Left one discusses Smith (2020).',
+                'Left two continues the section.',
+                'Left three finishes body.',
+                'Right one cites Brown (2021).',
+                'Right two continues further.',
+                'Right three precedes refs.',
+            ])
+            self.assertEqual(lines[7], 'References')
+            self.assertEqual(lines[8:], [
+                'Alpha, A. 2019, ApJ, 1, 1',
+                'Beta, C. 2018, ApJ, 2, 2',
+                'Gamma, D. 2017, ApJ, 5, 5',
+                'Brown, B. 2021, ApJ, 3, 3',
+                'Smith, A. 2020, ApJ, 4, 4',
+                'Zeta, E. 2016, ApJ, 6, 6',
+            ])
+            refs = extract(pages)
+            by_label = {r['label']: r for r in refs}
+            self.assertEqual(by_label['Smith 2020']['citation_count'], 1)
+            self.assertEqual(by_label['Brown 2021']['citation_count'], 1)
+            map_destinations(pdf, pages, refs, ignored)
+            self.assertEqual(by_label['Brown 2021']['destinations'], ['cite.brown'])
+        finally:
+            pdf.close()
+
+    def test_pdfium_strips_gutter_and_margin_line_numbers_and_promotes_geometric_superscripts(self):
+        from paperassist.native.engine import Pdf
+
+        ops = [
+            # Left column with margin line numbers (x=18) and gutter line numbers (x=295)
+            'BT /F1 7 Tf 18 700 Td (1) Tj ET',
+            'BT /F1 10 Tf 1 0 0 1 45 700 Tm (As shown earlier) Tj /F1 6 Tf 1 0 0 1 125 704 Tm (1-3) Tj ET',
+            'BT /F1 7 Tf 295 700 Td (5) Tj ET',
+            'BT /F1 10 Tf 1 0 0 1 320 700 Tm (Scaling as 10) Tj /F1 6 Tf 1 0 0 1 378 704 Tm (6) Tj /F1 10 Tf 1 0 0 1 385 700 Tm ( cm) Tj /F1 6 Tf 1 0 0 1 402 704 Tm (-3) Tj ET',
+            'BT /F1 7 Tf 18 680 Td (2) Tj ET',
+            'BT /F1 10 Tf 45 680 Td (Line two body.) Tj ET',
+            'BT /F1 7 Tf 295 680 Td (6) Tj ET',
+            'BT /F1 10 Tf 320 680 Td (Right line two.) Tj ET',
+            'BT /F1 7 Tf 18 660 Td (3) Tj ET',
+            'BT /F1 10 Tf 45 660 Td (Line three body.) Tj ET',
+            'BT /F1 7 Tf 295 660 Td (7) Tj ET',
+            'BT /F1 10 Tf 320 660 Td (Right line three.) Tj ET',
+            'BT /F1 7 Tf 18 640 Td (4) Tj ET',
+            'BT /F1 10 Tf 45 640 Td (Line four body.) Tj ET',
+            'BT /F1 7 Tf 295 640 Td (8) Tj ET',
+            'BT /F1 10 Tf 320 640 Td (Right line four.) Tj ET',
+            'BT /F1 12 Tf 45 580 Td (References) Tj ET',
+            'BT /F1 9 Tf 45 550 Td ([1] Alpha, A. 2020, ApJ, 1, 1) Tj ET',
+            'BT /F1 9 Tf 45 535 Td ([2] Beta, B. 2021, ApJ, 2, 2) Tj ET',
+            'BT /F1 9 Tf 45 520 Td ([3] Gamma, C. 2022, ApJ, 3, 3) Tj ET',
+            'BT /F1 9 Tf 45 505 Td ([6] Six, F. 2023, ApJ, 6, 6) Tj ET',
+        ]
+        pdf = Pdf(self._build_pdf([ops]))
+        try:
+            pages, ignored = _extract_pages(pdf)
+            self.assertEqual(len(ignored.get(0, ())), 8)
+            self.assertIn('earlier¹⁻³', pages[0])
+            self.assertNotIn('10⁶', pages[0])
+            self.assertNotIn('cm⁻³', pages[0])
+            refs = extract(pages)
+            by_label = {r['label']: r for r in refs}
+            self.assertEqual([by_label[k]['citation_count'] for k in ('1', '2', '3', '6')], [1, 1, 1, 0])
+            self.assertEqual(by_label['1']['occurrences'][0]['marker'], '1-3')
+        finally:
+            pdf.close()
+
+    def test_unicode_superscript_and_parenthesized_numeric_citations_and_guards(self):
+        pages = [
+            'Prior work¹˒²⁻⁴ and shown.¹⁻³ Skip 10⁶, cm⁻³, s⁻¹, x².\n'
+            'Compare (1) and (1, 2–3). Skip Eq. (1), Eqs. (1, 2), Equation (2), Fig. (2), '
+            'Figure (3), Table (1), Sec. (2), Section (3), Model (1), Case (2), Step (1).\n'
+            'Also skip a = (1), x + (2), (3) = y, year (2020), out-of-range (9), and equation line:\n'
+            'E = mc^2   (1)\n'
+            '(2)\n'
+            'References\n'
+            '[1] Alpha, A. 2020, ApJ, 1, 1\n'
+            '[2] Beta, B. 2021, ApJ, 2, 2\n'
+            '[3] Gamma, C. 2022, ApJ, 3, 3\n'
+            '[4] Delta, D. 2023, ApJ, 4, 4\n'
+        ]
+        refs = extract(pages)
+        self.assertEqual([r['citation_count'] for r in refs], [4, 3, 3, 1])
+
+    def test_three_author_oxford_comma_does_not_leak_to_single_author(self):
+        pages = [
+            'Smith, Jones, & Brown 2020 and Smith, Jones, and Brown (2020) and Smith, Jones & Brown 2020.\n'
+            'Brown (2020) is separate.\n'
+            'References\n'
+            'Smith, A., Jones, B., & Brown, C. 2020, ApJ, 1, 1\n'
+            'Brown, C. 2020, ApJ, 2, 2\n'
+        ]
+        refs = extract(pages)
+        self.assertEqual([r['citation_count'] for r in refs], [3, 1])

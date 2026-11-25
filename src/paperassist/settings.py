@@ -1,8 +1,12 @@
 """User settings stored beside the library: contact email, API keys and source switches."""
 
+import base64
+import ctypes
+from ctypes import wintypes
 import json
 import os
 import re
+import sys
 import threading
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -26,6 +30,81 @@ NEEDS = {'ads': 'token', 'core': 'key', 'unpaywall': 'email'}
 ENVIRONMENT = {'email': 'PAPERASSIST_EMAIL', 'openalex': 'OPENALEX_API_KEY'}
 ZOOM_CHOICES = (0.8, 0.9, 1, 1.1, 1.25, 1.5)
 _WRITE = threading.Lock()
+_DPAPI_PREFIX = 'dpapi:'
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_byte))]
+
+
+def _dpapi_libs():
+    return ctypes.windll.crypt32, ctypes.windll.kernel32
+
+
+def _use_dpapi() -> bool:
+    return sys.platform == 'win32'
+
+
+def _dpapi_protect(data: bytes) -> bytes:
+    crypt32, kernel32 = _dpapi_libs()
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    buf = ctypes.create_string_buffer(data, len(data)) if data else ctypes.create_string_buffer(1)
+    in_blob = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte)))
+    out_blob = _DATA_BLOB()
+    if not crypt32.CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0x1, ctypes.byref(out_blob)):
+        raise (ctypes.WinError() if hasattr(ctypes, 'WinError') else OSError('CryptProtectData failed'))
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32.LocalFree(out_blob.pbData)
+
+
+def _dpapi_unprotect(data: bytes) -> bytes:
+    crypt32, kernel32 = _dpapi_libs()
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    buf = ctypes.create_string_buffer(data, len(data)) if data else ctypes.create_string_buffer(1)
+    in_blob = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte)))
+    out_blob = _DATA_BLOB()
+    if not crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0x1, ctypes.byref(out_blob)):
+        raise (ctypes.WinError() if hasattr(ctypes, 'WinError') else OSError('CryptUnprotectData failed'))
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32.LocalFree(out_blob.pbData)
+
+
+def _protect_secret(plaintext: str) -> str:
+    if not plaintext or not _use_dpapi():
+        return plaintext
+    return _DPAPI_PREFIX + base64.b64encode(_dpapi_protect(plaintext.encode('utf-8'))).decode('ascii')
+
+
+def _unprotect_secret(stored: str) -> str:
+    if not isinstance(stored, str) or not stored:
+        return ''
+    if not stored.startswith(_DPAPI_PREFIX):
+        return stored
+    if not _use_dpapi():
+        return ''
+    try:
+        raw = base64.b64decode(stored[len(_DPAPI_PREFIX):], validate=True)
+        return _dpapi_unprotect(raw).decode('utf-8')
+    except Exception:
+        return ''
+
+
+def _decrypt_loaded(data):
+    if not isinstance(data, dict):
+        return None
+    keys = data.get('keys')
+    if not isinstance(keys, dict):
+        return data
+    plain = {}
+    for name, value in keys.items():
+        secret = _unprotect_secret(value)
+        if secret:
+            plain[name] = secret
+    return {**data, 'keys': plain}
 
 
 class Settings:
@@ -71,7 +150,7 @@ def load(data_dir):
     if data_dir:
         try:
             data = json.loads((Path(data_dir) / 'settings.json').read_text(encoding='utf-8'))
-            return Settings(data if isinstance(data, dict) else None)
+            return Settings(_decrypt_loaded(data))
         except (OSError, ValueError):
             pass
     return Settings()
@@ -151,7 +230,10 @@ def update(data_dir, changes):
     path = Path(data_dir) / 'settings.json'
     with _WRITE:
         data = _merge(load(data_dir).data, changes, data_dir)
-        paths.write_json_atomic(path, data, mode=0o600)
+        stored = dict(data)
+        if stored.get('keys'):
+            stored['keys'] = {name: _protect_secret(value) for name, value in stored['keys'].items()}
+        paths.write_json_atomic(path, stored, mode=0o600)
     return Settings(data)
 
 
@@ -165,7 +247,8 @@ def update_preferences(changes):
     checks = {'ui_zoom': lambda value: type(value) in (int, float) and value in ZOOM_CHOICES,
               'quick_view_layout': lambda value: value in ('stacked', 'side'),
               'outline_expanded': lambda value: isinstance(value, bool),
-              'details_expanded': lambda value: isinstance(value, bool)}
+              'details_expanded': lambda value: isinstance(value, bool),
+              'restore_session': lambda value: isinstance(value, bool)}
     if not isinstance(changes, dict) or set(changes) - checks.keys():
         raise ValueError('Unknown interface preference')
     if any(not checks[name](value) for name, value in changes.items()):

@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import statistics
 import subprocess
 import sys
@@ -22,6 +23,8 @@ from pathlib import Path
 from .paths import write_json_atomic
 
 VERSION = 2
+SIDECAR_VERSION = 1
+DEFAULT_MAX_CACHE_BYTES = 256 * 1024 * 1024
 MAX_PIXELS = 12_000_000
 MAX_PAGES = 2
 ATTEMPT_SECONDS = 20
@@ -30,6 +33,7 @@ ATTEMPTS = ((200, 3), (300, 11))
 MAX_WORDS = 4000
 MAX_TSV_BYTES = 8 * 1024 * 1024
 LANGUAGE = re.compile(r"[a-z]{3}(?:\+[a-z]{3})*")
+_SHA256 = re.compile(r"[a-fA-F0-9]{64}")
 _LOCK = threading.Lock()
 _PROBE_LOCK = threading.Lock()
 _PROBE_CACHE: dict[tuple, dict] = {}
@@ -208,7 +212,7 @@ def _terminate(process):
     process.join(timeout=3)
 
 
-def _launch(task, arguments, cancel, deadline, progress=None):
+def _launch(task, arguments, cancel, deadline, progress=None, on_page=None):
     context = multiprocessing.get_context("spawn")
     receive, send = context.Pipe(duplex=False)
     process = context.Process(target=_worker, args=(task, arguments, send))
@@ -228,6 +232,10 @@ def _launch(task, arguments, cancel, deadline, progress=None):
                 if message["kind"] == "result":
                     process.join(timeout=.2)
                     return message["value"]
+                if message["kind"] == "page":
+                    if on_page:
+                        on_page(message["value"])
+                    continue
                 if progress:
                     progress(message["value"])
             elif not process.is_alive():
@@ -298,7 +306,170 @@ def _read_cache(path, key):
     return None
 
 
-def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, progress=None):
+def _valid_sha256(sha256):
+    return isinstance(sha256, str) and bool(_SHA256.fullmatch(sha256))
+
+
+def _valid_page_num(page):
+    return not isinstance(page, bool) and isinstance(page, int) and page >= 0
+
+
+def _sidecar_path(cache_dir, sha256, page):
+    return Path(cache_dir) / "pages" / sha256.lower() / f"page-{page}.json"
+
+
+def _write_sidecar_page(cache_dir, sha256, page_dict, engine_version):
+    payload = {
+        "sidecar_version": SIDECAR_VERSION,
+        "sha256": sha256.lower(),
+        "page": page_dict["page"],
+        "size": page_dict["size"],
+        "rotation": page_dict.get("rotation", 0),
+        "dpi": page_dict.get("dpi", 200.0),
+        "engine_version": engine_version,
+        "words": page_dict.get("words", []),
+        "lines": page_dict.get("lines", []),
+    }
+    destination = _sidecar_path(cache_dir, sha256, page_dict["page"])
+    write_json_atomic(destination, payload, indent=None, ensure_ascii=False, allow_nan=False)
+    return destination
+
+
+def _load_sidecar(cache_dir, sha256, page):
+    if not cache_dir or not _valid_sha256(sha256) or not _valid_page_num(page):
+        return None
+    path = _sidecar_path(cache_dir, sha256, page)
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if (not isinstance(data, dict)
+            or data.get("sidecar_version") != SIDECAR_VERSION
+            or data.get("sha256") != sha256.lower()
+            or isinstance(data.get("page"), bool)
+            or data.get("page") != page
+            or not isinstance(data.get("words"), list)):
+        return None
+    return data
+
+
+def has_sidecar_page(cache_dir, sha256, page: int) -> bool:
+    """Return True if a valid OCR sidecar JSON exists for this SHA-256 and 0-based page."""
+    return _load_sidecar(cache_dir, sha256, page) is not None
+
+
+def sidecar_words(cache_dir, sha256, page: int, expected_size=None) -> list[tuple]:
+    """Read cached OCR words as 6-tuples matching native.engine.Pdf.words(page)."""
+    data = _load_sidecar(cache_dir, sha256, page)
+    if data is None:
+        return []
+    sx = sy = 1.0
+    if expected_size is not None:
+        if not isinstance(expected_size, (list, tuple)) or len(expected_size) != 2:
+            return []
+        stored_size = data.get("size")
+        if not isinstance(stored_size, (list, tuple)) or len(stored_size) != 2:
+            return []
+        try:
+            ew, eh = float(expected_size[0]), float(expected_size[1])
+            sw, sh = float(stored_size[0]), float(stored_size[1])
+        except (ValueError, TypeError):
+            return []
+        if not all(math.isfinite(v) and v > 0 for v in (ew, eh, sw, sh)):
+            return []
+        if abs(ew - sw) > 1 or abs(eh - sh) > 1:
+            sx, sy = ew / sw, eh / sh
+    words = []
+    for idx, entry in enumerate(data["words"]):
+        if not isinstance(entry, dict):
+            return []
+        text = entry.get("text")
+        bbox = entry.get("bbox")
+        line = entry.get("line", idx)
+        if (not isinstance(text, str)
+                or not isinstance(bbox, (list, tuple)) or len(bbox) != 4
+                or isinstance(line, bool) or not isinstance(line, int)):
+            return []
+        try:
+            x0, y0, x1, y1 = (float(v) for v in bbox)
+        except (ValueError, TypeError):
+            return []
+        if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+            return []
+        words.append((x0 * sx, y0 * sy, x1 * sx, y1 * sy, text, line))
+    try:
+        os.utime(_sidecar_path(cache_dir, sha256, page), None)
+    except OSError:
+        pass
+    return words
+
+
+def prune_cache(cache_dir, max_bytes=DEFAULT_MAX_CACHE_BYTES) -> dict:
+    """Evict least-recently-used cached OCR JSON files until total size <= max_bytes."""
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    cache = Path(cache_dir)
+    if not cache.is_dir():
+        return {"removed": 0, "bytes_freed": 0, "bytes_remaining": 0}
+    candidates = list(cache.glob("*.json"))
+    pages_dir = cache / "pages"
+    if pages_dir.is_dir():
+        candidates.extend(pages_dir.glob("*/*.json"))
+    entries = []
+    total_bytes = 0
+    for path in candidates:
+        if path.name.startswith("."):
+            continue
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        entries.append((info.st_mtime_ns, str(path), path, info.st_size))
+        total_bytes += info.st_size
+    removed = 0
+    bytes_freed = 0
+    if total_bytes > max_bytes:
+        entries.sort(key=lambda item: (item[0], item[1]))
+        for _, _, path, size in entries:
+            if total_bytes <= max_bytes:
+                break
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            bytes_freed += size
+            total_bytes -= size
+    if pages_dir.is_dir():
+        for subdir in pages_dir.iterdir():
+            if subdir.is_dir():
+                try:
+                    subdir.rmdir()
+                except OSError:
+                    pass
+    return {"removed": removed, "bytes_freed": bytes_freed, "bytes_remaining": total_bytes}
+
+
+def _page_summary(status, message, *, pages_recognized=0, pages_cached=0, total_pages=0, cache_hit=False, cancelled=False):
+    summary = {
+        "status": status,
+        "message": message,
+        "pages_recognized": pages_recognized,
+        "pages_cached": pages_cached,
+        "total_pages": total_pages,
+        "cache_hit": cache_hit,
+    }
+    if cancelled:
+        summary["cancelled"] = True
+    return summary
+
+
+def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, progress=None,
+            max_cache_bytes=DEFAULT_MAX_CACHE_BYTES):
     """Read at most two identifying pages; source PDF bytes are never rewritten.
 
     The caller supplies the immutable original and its library fingerprint. Cache
@@ -306,7 +477,7 @@ def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, pro
     """
     if cancel.is_set():
         return _result("cancelled", "Offline OCR cancelled.")
-    if not re.fullmatch(r"[a-fA-F0-9]{64}", sha256):
+    if not _valid_sha256(sha256):
         return _result("failed", "Offline OCR needs the PDF's SHA-256 fingerprint.")
     if not _LOCK.acquire(blocking=False):
         return _result("busy", "Another offline OCR task is already running.")
@@ -336,9 +507,97 @@ def recover(path, cache_dir, sha256, cancel, *, language="eng", force=False, pro
         report.update(cache_key=key, engine_version=info["engine_version"], config=config, sha256=sha256.lower())
         if info["cacheable"] and report["status"] in ("completed", "empty") and not cancel.is_set():
             write_json_atomic(destination, report, indent=None, ensure_ascii=False, allow_nan=False)
+            for page_dict in report["pages"]:
+                _write_sidecar_page(cache, sha256, page_dict, info["engine_version"])
+            prune_cache(cache, max_bytes=max_cache_bytes)
         return report
     except (OSError, ValueError, RuntimeError) as error:
         return _result("failed", f"Offline OCR failed: {error}")
+    finally:
+        _LOCK.release()
+
+
+def recognize_pages(path, cache_dir, sha256, pages=None, cancel=None, *, language="eng", force=False,
+                    progress=None, max_cache_bytes=DEFAULT_MAX_CACHE_BYTES) -> dict:
+    """Recognize selected or all pages into per-page sidecar JSON files without modifying the PDF."""
+    if cancel is None:
+        cancel = threading.Event()
+    if cancel.is_set():
+        return _page_summary("cancelled", "Offline OCR cancelled.", cancelled=True)
+    if not _valid_sha256(sha256):
+        return _page_summary("failed", "Offline OCR needs the PDF's SHA-256 fingerprint.")
+    if not _LOCK.acquire(blocking=False):
+        return _page_summary("busy", "Another offline OCR task is already running.")
+    try:
+        if not LANGUAGE.fullmatch(language):
+            return _page_summary("unavailable", "Choose installed OCR language codes such as eng or eng+ita.")
+        info = _cached_probe(language, cancel, time.monotonic() + 8)
+        if not info.get("available"):
+            status = info.get("status")
+            if status in ("cancelled", "timeout"):
+                return _page_summary(status, info["message"], cancelled=(status == "cancelled"))
+            return _page_summary("unavailable", info["message"])
+        if _config(language)["renderer"] == "unavailable":
+            return _page_summary("unavailable", "Offline OCR is unavailable: PDFium is not installed.")
+        if pages is None:
+            from pypdf import PdfReader
+            try:
+                with Path(path).open("rb") as source:
+                    targets = list(range(len(PdfReader(source, strict=False).pages)))
+            except Exception as error:
+                raise ValueError(error) from error
+        else:
+            seen = set()
+            for page_num in pages:
+                if not _valid_page_num(page_num):
+                    raise ValueError(f"Invalid page number: {page_num!r}")
+                seen.add(page_num)
+            targets = sorted(seen)
+        cache = Path(cache_dir)
+        uncached = targets if force else [p for p in targets if not has_sidecar_page(cache, sha256, p)]
+        cached_count = len(targets) - len(uncached)
+        if not uncached:
+            return _page_summary(
+                "completed",
+                "Offline OCR cache hit.",
+                pages_recognized=0,
+                pages_cached=cached_count,
+                total_pages=len(targets),
+                cache_hit=True,
+            )
+        cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+        recognized_count = 0
+
+        def save_page(page_dict):
+            nonlocal recognized_count
+            _write_sidecar_page(cache, sha256, page_dict, info["engine_version"])
+            recognized_count += 1
+
+        deadline = time.monotonic() + TOTAL_SECONDS * len(uncached)
+        with tempfile.TemporaryDirectory(prefix="ocr-", dir=cache) as staging:
+            arguments = {
+                "path": str(Path(path).resolve()),
+                "temporary": staging,
+                "engine": info["engine"],
+                "tessdata": info.get("tessdata"),
+                "language": language,
+                "pages": uncached,
+                "per_page_seconds": TOTAL_SECONDS,
+            }
+            report = _launch("ocr_pages", arguments, cancel, deadline, progress, on_page=save_page)
+        prune_cache(cache, max_bytes=max_cache_bytes)
+        status = report["status"]
+        return _page_summary(
+            status,
+            report["message"],
+            pages_recognized=recognized_count,
+            pages_cached=cached_count,
+            total_pages=len(targets),
+            cache_hit=False,
+            cancelled=(status == "cancelled"),
+        )
+    except (OSError, ValueError, TypeError, RuntimeError) as error:
+        return _page_summary("failed", f"Offline OCR failed: {error}")
     finally:
         _LOCK.release()
 
@@ -393,7 +652,9 @@ def _parse_tsv(path, page_number, size, pixels):
             if len(words) == MAX_WORDS:
                 break
     lines = []
-    for indexes in groups.values():
+    for line_index, indexes in enumerate(groups.values()):
+        for index in indexes:
+            words[index]["line"] = line_index
         members = [words[index] for index in indexes]
         box = [min(word["bbox"][0] for word in members), min(word["bbox"][1] for word in members),
                max(word["bbox"][2] for word in members), max(word["bbox"][3] for word in members)]
@@ -463,6 +724,28 @@ def _run(task, arguments, send):
     try:
         if task == "probe":
             result = _probe(arguments["language"])
+        elif task == "ocr_pages":
+            import pypdfium2 as pdfium
+            recognized_count = 0
+            found = False
+            with pdfium.PdfDocument(arguments["path"]) as document:
+                total_doc_pages = len(document)
+                for number in arguments["pages"]:
+                    if not 0 <= number < total_doc_pages:
+                        raise ValueError(f"Page {number} is out of range (0..{total_doc_pages - 1})")
+                    page = document[number]
+                    try:
+                        page_args = {**arguments, "deadline": time.monotonic() + arguments["per_page_seconds"]}
+                        page_dict = _recognize(page_args, page, number, send)
+                    finally:
+                        page.close()
+                    recognized_count += 1
+                    if page_dict["words"]:
+                        found = True
+                    send.send({"kind": "page", "value": page_dict})
+            status = "completed" if found else "empty"
+            message = "Offline OCR finished." if found else "No readable text was found by offline OCR."
+            result = _result(status, message, pages_recognized=recognized_count)
         else:
             import pypdfium2 as pdfium
             pages = []

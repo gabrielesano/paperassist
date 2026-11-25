@@ -15,7 +15,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QSocketNotifier
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import paperassist
-from paperassist import paths
+from paperassist import paths, settings
 from paperassist.paths import locate_existing
 from paperassist.workspace import LibraryInUse, Workspace, library_lock
 
@@ -254,6 +254,8 @@ def show(app, workspace, pdfs):
         server = InstanceServer(workspace.data_dir, window.file_opener.receive, window)
         app.file_open_events.receiver = window.file_opener.receive
         window.show()
+        if workspace is not None and settings.preferences().get("restore_session") is True:
+            window.restore_session()
         window.file_opener.receive(pdfs)
         app.file_open_events.flush()
         return app.exec(), window.switch_target

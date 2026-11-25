@@ -39,16 +39,22 @@ class PdfView(QAbstractScrollArea):
     selection_changed = Signal()
     comment_selection_changed = Signal(object)
     comment_requested = Signal(object)  # 1-based page number at cursor when opened without a text selection
+    ocr_requested = Signal(object)  # document_id or None
 
     def __init__(self, doc, client):
         super().__init__()
         self.doc, self.client = doc, client
         self.highlights_visible = True
         self._rendered_data_id = id(doc.pdf.data)
-        self.doc_id = client.open(self._render_source())
+        self.doc_id = client.open(
+            self._render_source(),
+            highlights=self.highlights_visible,
+            ocr_cache_dir=getattr(doc.source, "ocr_cache_dir", None),
+            sha256=getattr(doc.source, "sha256", None),
+        )
         client.page_ready.connect(self._page_ready)
         self.zoom, self.fit = 1.0, True
-        self.cache = PageCache(CACHE_BYTES)  # page -> (scale, render id, QPixmap)
+        self.cache = PageCache(CACHE_BYTES)  # page -> (scale, render id, QPixmap, highlights_visible)
         self.render_seconds = deque(maxlen=256)  # worker-side time of recent pages this view received
         self.locked = False  # another view of this PDF has unsaved edits
         self.tool = 'select'  # 'select', 'pan', 'highlight', 'ink', or 'comment'
@@ -138,11 +144,11 @@ class PdfView(QAbstractScrollArea):
 
     def _render_source(self):
         # Library documents pass their hash-verified byte snapshot so the worker cannot read a tampered file.
-        if self.doc.source.document_id is None and not self.doc.modified and self.highlights_visible:
+        if self.doc.source.document_id is None and not self.doc.modified:
             path = getattr(self.doc.source, "path", None)
             if path is not None and path.is_file():
                 return path
-        return self.doc.pdf.render_data(self.highlights_visible)
+        return self.doc.pdf.data
 
     @property
     def read_only(self):
@@ -272,7 +278,8 @@ class PdfView(QAbstractScrollArea):
     def _fresh(self, page, scale=None):
         entry = self.cache.get(page)
         scale = self._render_plan().get(page) if scale is None else scale
-        return entry is not None and entry[0] == scale and entry[1] == self.doc_id
+        return (entry is not None and entry[0] == scale and entry[1] == self.doc_id
+                and entry[3] == self.highlights_visible)
 
     def _want(self):
         """Ask the render process for what is visible plus half a screen; hidden views ask for nothing."""
@@ -286,7 +293,8 @@ class PdfView(QAbstractScrollArea):
             return  # late pixels for a view that was hidden meanwhile must not refill its cache
         pixmap = QPixmap.fromImage(QImage(rgb, width, height, width * 3, QImage.Format_RGB888))
         pixmap.setDevicePixelRatio(self.devicePixelRatioF())
-        self.cache.put(page, (scale, doc_id, pixmap), width * height * 4, protected=self.visible_pages())
+        self.cache.put(page, (scale, doc_id, pixmap, self.highlights_visible), width * height * 4,
+                       protected=self.visible_pages())
         self.render_seconds.append(seconds)
         self.viewport().update()
 
@@ -297,11 +305,17 @@ class PdfView(QAbstractScrollArea):
         """After the file changed: render from the new bytes, keep showing the old pixels meanwhile."""
         old = self.doc_id
         self._rendered_data_id = id(self.doc.pdf.data)
-        self.doc_id = self.client.open(self._render_source(), inherit_from=old if preserve_citations else None)
+        self.doc_id = self.client.open(
+            self._render_source(),
+            inherit_from=old if preserve_citations else None,
+            highlights=self.highlights_visible,
+            ocr_cache_dir=getattr(self.doc.source, "ocr_cache_dir", None),
+            sha256=getattr(self.doc.source, "sha256", None),
+        )
         if pages is not None:
-            for page, ((scale, _, pixmap), size) in list(self.cache.entries.items()):
+            for page, ((scale, _, pixmap, visible), size) in list(self.cache.entries.items()):
                 if page not in pages:
-                    self.cache.entries[page] = ((scale, self.doc_id, pixmap), size)
+                    self.cache.entries[page] = ((scale, self.doc_id, pixmap, visible), size)
         self.client.close(old)
         self._want()
         if self.search_pending or (self._query and not preserve_citations):
@@ -315,7 +329,8 @@ class PdfView(QAbstractScrollArea):
                 item = next((a for a in self.doc.annotations(page) if a['index'] == index), None)
                 if item and (item['subtype'] == 'highlight' or item['freehand']):
                     self.select_annotation(None)
-            self.refresh_render()  # the old pixels stay on screen until the new ones arrive
+            self.client.set_highlights(self.doc_id, visible)
+            self._want()  # the old pixels stay on screen until the new ones arrive
             self.viewport().update()
 
     def reload(self):
@@ -740,6 +755,14 @@ class PdfView(QAbstractScrollArea):
             delete_annotation = menu.addAction(f"Delete {kind}")
             delete_annotation.setEnabled(not self.read_only)
             delete_annotation.triggered.connect(self.delete_annotation)
+
+        target_page = current_page(self) if page is None else page
+        if self.doc.source.document_id is not None and len(self.doc) and not self.doc.words(target_page):
+            menu.addSeparator()
+            ocr_action = menu.addAction("Recognize scanned text (OCR)")
+            ocr_action.triggered.connect(
+                lambda _=False, doc_id=self.doc.source.document_id: self.ocr_requested.emit(doc_id)
+            )
 
         return menu
 

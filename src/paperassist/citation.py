@@ -7,11 +7,31 @@ import unicodedata
 _RANGE_DASHES = '–—−-'
 _NUMBER_GROUP = rf'\d+(?:\s*[,;{_RANGE_DASHES}]\s*\d+)*'
 NUMERIC_MARKER = re.compile(rf'\[\s*({_NUMBER_GROUP})\s*\]')
+_SUP_DIGITS = '⁰¹²³⁴⁵⁶⁷⁸⁹'
+_SUP_DASHES = '⁻–—−'
+_SUP_TO_ASCII = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹˒⁻–—−', '0123456789,----')
+SUPERSCRIPT_MARKER = re.compile(
+    rf'(?<![0-9{_SUP_DIGITS}{_SUP_DASHES}+=^\-])'
+    rf'([{_SUP_DIGITS}]+(?:\s*[,;˒{_SUP_DASHES}\-]\s*[{_SUP_DIGITS}]+)*)'
+    rf'(?![0-9{_SUP_DIGITS}])'
+)
+PAREN_NUMERIC_MARKER = re.compile(rf'(?<![A-Za-z0-9])\(\s*({_NUMBER_GROUP})\s*\)')
+SCIENTIFIC_UNITS = frozenset({
+    'cm', 'mm', 'km', 'um', 'nm', 'pm', 'erg', 'sec', 'hz', 'khz', 'mhz', 'ghz',
+    'ev', 'kev', 'mev', 'gev', 'tev', 'k', 'yr', 'myr', 'gyr', 'kyr',
+    'au', 'pc', 'kpc', 'mpc', 'gpc', 'sr', 'mol', 'rad', 'deg', 'arcsec', 'arcmin',
+})
 _RANGE_SEPARATOR = re.compile(rf'\s*[{_RANGE_DASHES}]\s*')
+
+
+def superscript_to_ascii(text):
+    """Translate Unicode superscript digits and separators to ASCII."""
+    return (text or '').translate(_SUP_TO_ASCII)
 
 
 def citation_numbers(group):
     """Expand a numeric marker's contents in order, once per reference number."""
+    group = superscript_to_ascii(group)
     numbers = {}
     for part in re.split(r'\s*[,;]\s*', group):
         try:
@@ -207,15 +227,20 @@ SPACING_ACCENT = re.compile(r'\s*([´¨˜ˆˇ˚¸])\s*([A-Za-zı])')
 COMBINING = {'´': '\u0301', '¨': '\u0308', '˜': '\u0303', 'ˆ': '\u0302', 'ˇ': '\u030c', '˚': '\u030a', '¸': '\u0327'}
 
 
+_SUP_PRESERVED = re.compile(r'[^⁰¹²³⁴⁵⁶⁷⁸⁹⁻˒]+')
+
+
 def clean_text(text):
     """Repair detached accents ("M¨ uller"), ligatures and line-end hyphenated names."""
     joined = SPACING_ACCENT.sub(lambda m: m.group(2).replace('ı', 'i') + COMBINING[m.group(1)], text or '')
-    return re.sub(r'(?<=[^\W\d_])-\n(?=[a-z])', '', unicodedata.normalize('NFKC', joined))
+    # Preserve Unicode superscripts so NFKC does not flatten citations like "text¹⁻³" into "text1−3".
+    normalized = _SUP_PRESERVED.sub(lambda m: unicodedata.normalize('NFKC', m.group()), joined)
+    return re.sub(r'(?<=[^\W\d_])-\n(?=[a-z])', '', normalized)
 
 
 def reference_key(text):
     """Normalized alphanumeric key for matching bibliography entries across analyses."""
-    return ''.join(c for c in clean_text(text).casefold() if c.isalnum())
+    return ''.join(c for c in unicodedata.normalize('NFKC', clean_text(text)).casefold() if c.isalnum())
 
 
 def has_surname(text, surname):
@@ -243,10 +268,56 @@ def first_surname(authors):
     return ' '.join(words[start:])
 
 
+_INITIAL_SEQ = r'(?:[^\W\d_]{1,2}\.(?:\s*-?\s*[^\W\d_]{1,2}\.)*\s*)+'
+_INITIAL_AUTHOR = re.compile(rf'\s*({SURNAME})(?:,\s*(?:[JS]r\.,?\s*)?|\s+){_INITIAL_SEQ}(?=[,.\s]|$)')
+
+
+def _valid_surname(name):
+    words = name.split()
+    return bool(words) and (words[0][0].isupper() or (words[0].lower() in PARTICLES and len(words) > 1 and words[-1][0].isupper()))
+
+
 def surnames(raw):
     """Author surnames listed before the year, in order."""
     head = re.split(r'\b(?:19|20)\d{2}[a-z]?\b', unicodedata.normalize('NFKC', raw), maxsplit=1)[0]
-    return re.findall(rf'({SURNAME}),\s*(?:[^\W\d_]\.\s*)+', head)
+    head = re.sub(r'^\s*(?:\[\d+\]|\d+\.)\s*', '', head)
+    head = re.sub(r'\bet\s+al\.?.*$', '', head, flags=re.I).strip()
+    if not head:
+        return []
+    clauses = [c.strip() for c in re.split(r'\s*(?:,\s*(?:&|\band\b)|[;&]|\band\b)\s*', head) if c.strip()]
+    found = []
+    for clause in clauses:
+        pos = 0
+        while pos < len(clause):
+            while pos < len(clause) and clause[pos] in ' ,.':
+                pos += 1
+            m = _INITIAL_AUTHOR.match(clause, pos)
+            if not m:
+                break
+            name = m.group(1).strip()
+            if _valid_surname(name):
+                found.append(name)
+            pos = m.end()
+    if found:
+        return found
+    # Fallback for "Surname, GivenName" author lists without dotted initials.
+    given_names = []
+    for clause in clauses:
+        # Stop before a sentence-ending period following a multi-letter word (e.g. "Carol. Title").
+        trimmed = re.split(r'(?<=[^\W\d_]{2})\.\s+', clause, maxsplit=1)[0].rstrip('., ')
+        parts = [p.strip() for p in trimmed.split(',') if p.strip()]
+        if len(parts) < 2 or len(parts) % 2:
+            return []
+        for idx, part in enumerate(parts):
+            words = part.split()
+            if not words or len(words) > 3 or any(any(ch.isdigit() or ch == '.' for ch in w) for w in words):
+                return []
+            if idx % 2 == 0 and not _valid_surname(part):
+                return []
+            if idx % 2 == 1 and not all(w[0].isupper() or w.lower() in PARTICLES for w in words):
+                return []
+        given_names.extend(parts[0::2])
+    return given_names
 
 
 def pdf_name(surname, year, fingerprint=None):

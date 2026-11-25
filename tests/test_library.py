@@ -769,3 +769,61 @@ class RemovalAndWorkIdentityTests(unittest.TestCase):
         with reopened._connect() as db:
             rows = db.execute("SELECT source_id, raw_key, target_id FROM reference_manual_links").fetchall()
         self.assertEqual([tuple(r) for r in rows], [(str(source['id']), 'smitha2020apj12', str(target['id']))])
+
+
+class FtsAndProjectionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.library = Library(Path(self.tmp.name) / 'library')
+        self.addCleanup(self.library.close)
+
+    def test_fts_triggers_sync_raw_sql_and_backfill_on_open(self):
+        first = self.library.import_stream(io.BytesIO(pdf()), 'first.pdf')
+        second = self.library.import_stream(io.BytesIO(pdf() + b'\n% two\n'), 'other.pdf')
+        # Raw SQL UPDATE directly on documents must immediately synchronize documents_fts via triggers.
+        with self.library._connect() as db:
+            db.execute("UPDATE documents SET title = 'Triggered Corona', authors = 'Z. Author' WHERE id = ?", (first['id'],))
+        self.assertEqual([d['id'] for d in self.library.list_documents('Corona')], [first['id']])
+        self.assertEqual([d['id'] for d in self.library.list_documents('Co')], [first['id']])
+
+        # Raw SQL DELETE removes from documents_fts via AFTER DELETE trigger.
+        with self.library._connect() as db:
+            db.execute("DELETE FROM documents WHERE id = ?", (second['id'],))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0], 1)
+            # Clear FTS table to verify backfill on Library reopen.
+            db.execute("DELETE FROM documents_fts")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0], 0)
+        reopened = Library(self.library.data_dir)
+        self.addCleanup(reopened.close)
+        self.assertEqual([d['id'] for d in reopened.list_documents('Triggered')], [first['id']])
+
+    def test_lightweight_projections_status_counts_and_document_ids(self):
+        a = self.library.import_stream(io.BytesIO(pdf()), 'alpha.pdf')
+        b = self.library.import_stream(io.BytesIO(pdf() + b'\n% beta\n'), 'beta.pdf')
+        self.library.apply_verified(a['id'], {
+            'provider': 'crossref', 'title': 'Alpha Paper', 'authors': 'Ada Lovelace',
+            'year': 2021, 'doi': '10.1234/alpha', 'first_author': 'Lovelace',
+        })
+        self.library.update_metadata(b['id'], {'title': 'Beta Manual'})
+        self.library.record_metadata_refresh(b['id'], 'local', 'Kept manual title.')
+        c = self.library.import_stream(io.BytesIO(pdf() + b'\n% gamma\n'), 'gamma.pdf')
+
+        with mock.patch('paperassist.library.json.loads', wraps=json.loads) as loads_spy:
+            light = self.library.list_documents(lightweight=True)
+            # Only small JSON projections (sources, manual) are parsed, not full extracted blobs.
+            for call in loads_spy.call_args_list:
+                self.assertNotIn('candidates', str(call.args[0]))
+        self.assertEqual(len(light), 3)
+        by_id = {d['id']: d for d in light}
+        self.assertEqual(by_id[a['id']]['metadata']['verified']['provider'], 'crossref')
+        self.assertEqual(by_id[b['id']]['metadata']['refresh']['message'], 'Kept manual title.')
+        self.assertEqual(manual_fields(by_id[b['id']]), ['title'])
+        self.assertEqual(by_id[c['id']]['metadata_status'], 'needs_review')
+
+        self.assertEqual([d['id'] for d in self.library.list_documents('10.1234/alpha', lightweight=True)], [a['id']])
+        self.assertEqual([d['id'] for d in self.library.list_documents('%', lightweight=True)], [])
+        total, review_ids = self.library.status_counts()
+        self.assertEqual(total, 3)
+        self.assertEqual(review_ids, [c['id']])
+        self.assertEqual(self.library.document_ids(), [a['id'], b['id'], c['id']])

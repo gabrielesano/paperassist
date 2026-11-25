@@ -16,6 +16,8 @@ class DocumentSource(Protocol):
     title: str             # short name for tabs and dialogs
     path: Path             # location of the saved PDF
     document_id: int | None
+    sha256: str | None
+    ocr_cache_dir: Path | None
 
     def citation(self, pages: str) -> str: ...
 
@@ -27,6 +29,8 @@ class DocumentSource(Protocol):
 
 class FileSource:
     document_id: int | None = None
+    sha256: str | None = None
+    ocr_cache_dir: Path | None = None
 
     def __init__(self, path):
         self.path = Path(path).resolve()
@@ -60,6 +64,8 @@ class LibrarySource:
         self.library, self.document_id = library, document["id"]
         self.title = display_title(document)
         self.revision = document["revision"]
+        self.sha256 = document["sha256"]
+        self.ocr_cache_dir = self.library.data_dir / "cache" / "ocr"
         # The document, not a revision, is the identity: every view of it shares one save authority.
         self.key = f"library:{self.document_id}"
 
@@ -76,7 +82,7 @@ class LibrarySource:
     def open(self):
         """Read the newest revision; a view that reloads after another view saved gets that one."""
         data, revision = self.library.read_pdf(self.document_id)
-        pdf = Pdf(data)
+        pdf = Pdf(data, sha256=self.sha256, ocr_cache_dir=self.ocr_cache_dir)
         self.revision = revision
         return pdf
 

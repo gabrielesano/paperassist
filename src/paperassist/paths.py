@@ -1,5 +1,7 @@
 """Where the library lives: the user's explicit choice, then the saved one, then the platform default."""
 
+import ctypes
+from ctypes import wintypes
 import json
 import os
 import sys
@@ -55,6 +57,82 @@ def format_size(count):
         count /= 1024
 
 
+def _is_windows() -> bool:
+    return os.name == 'nt'
+
+
+def _win32_libs():
+    return ctypes.windll.kernel32, ctypes.windll.advapi32
+
+
+def _restrict_windows_acl(path: Path) -> None:
+    """Apply an owner-only protected DACL on a file using numeric SIDs (locale-independent)."""
+    kernel32, advapi32 = _win32_libs()
+    TOKEN_QUERY = 0x0008
+    TokenUser = 1
+    SDDL_REVISION_1 = 1
+    DACL_SECURITY_INFORMATION = 0x00000004
+    PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+    ERROR_INSUFFICIENT_BUFFER = 122
+
+    class _SID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [('Sid', ctypes.c_void_p), ('Attributes', wintypes.DWORD)]
+
+    class _TOKEN_USER(ctypes.Structure):
+        _fields_ = [('User', _SID_AND_ATTRIBUTES)]
+
+    def _fail():
+        raise (ctypes.WinError() if hasattr(ctypes, 'WinError') else OSError('Windows ACL update failed'))
+
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.ULONG),
+    ]
+    advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
+        _fail()
+    sid_str = ctypes.c_void_p()
+    sd = ctypes.c_void_p()
+    try:
+        needed = wintypes.DWORD(0)
+        if advapi32.GetTokenInformation(token, TokenUser, None, 0, ctypes.byref(needed)):
+            _fail()
+        last_error = ctypes.GetLastError() if hasattr(ctypes, 'GetLastError') else ERROR_INSUFFICIENT_BUFFER
+        if last_error != ERROR_INSUFFICIENT_BUFFER or not needed.value:
+            _fail()
+        buf = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(token, TokenUser, buf, needed.value, ctypes.byref(needed)):
+            _fail()
+        user_sid = ctypes.cast(buf, ctypes.POINTER(_TOKEN_USER)).contents.User.Sid
+        if not advapi32.ConvertSidToStringSidW(user_sid, ctypes.byref(sid_str)):
+            _fail()
+        sddl = f'D:P(A;;FA;;;{ctypes.wstring_at(sid_str.value)})'
+        if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, SDDL_REVISION_1, ctypes.byref(sd), None
+        ):
+            _fail()
+        if not advapi32.SetFileSecurityW(
+            str(path), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd
+        ):
+            _fail()
+    finally:
+        if sd.value:
+            kernel32.LocalFree(sd.value)
+        if sid_str.value:
+            kernel32.LocalFree(sid_str.value)
+        if token.value:
+            kernel32.CloseHandle(token)
+
+
 def write_json_atomic(path, data, mode=None, **dump_kwargs):
     """Write JSON through a sibling temporary file so a crash never leaves half a file."""
     path = Path(path)
@@ -65,8 +143,11 @@ def write_json_atomic(path, data, mode=None, **dump_kwargs):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as file:
             json.dump(data, file, **dump_kwargs)
-        if mode is not None and os.name != 'nt':
-            os.chmod(temp, mode)
+        if mode is not None:
+            if not _is_windows():
+                os.chmod(temp, mode)
+            elif mode == 0o600:
+                _restrict_windows_acl(temp)
         os.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)

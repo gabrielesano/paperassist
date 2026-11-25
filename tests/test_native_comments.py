@@ -26,8 +26,11 @@ if pdf_available:
     class Client(QObject):
         page_ready = Signal(int, int, float, int, int, bytes, float)
 
-        def open(self, data, *, inherit_from=None):
+        def open(self, data, *, inherit_from=None, **_kwargs):
             return 1
+
+        def set_highlights(self, *args):
+            pass
 
         def want(self, *args):
             pass

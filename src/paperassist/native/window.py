@@ -14,6 +14,7 @@ from .annotation_bar import AnnotationBar
 from .app_menu import BrandButton
 from .comments import CommentsController
 from .document import SaveState
+from .jobs import JobWatcher
 from .library_dialog import LibraryDialog
 from .outline import OutlinePanel
 from .pane import Pane
@@ -121,6 +122,8 @@ class MainWindow(QMainWindow):
         self.client, self.workspace, self.library_dialog, self.switch_target = client, workspace, None, None
         self.annotation_bar = None
         self.tab_editor = None
+        self._restoring_session = False
+        self._ocr_watchers = {}
         saved = settings.preferences()
         self.side_by_side = saved.get("quick_view_layout") == "side"
         self.resize(1400, 900)
@@ -399,6 +402,7 @@ class MainWindow(QMainWindow):
         pane.view.message.connect(lambda text: self.statusBar().showMessage(text, 4500))
         pane.view.edited.connect(self.refresh)
         pane.view.moved.connect(self._on_view_moved)
+        pane.view.ocr_requested.connect(self.start_ocr)
         if self.workspace and source.document_id is not None:
             PositionKeeper(pane, self.workspace).failed.connect(lambda message: self.statusBar().showMessage(message, 8000))
         self.pane_added.emit(pane)
@@ -420,7 +424,7 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(index)
         self.refresh()
         document_id = tab.main.view.doc.source.document_id
-        if document_id is not None:
+        if document_id is not None and not self._restoring_session:
             self.acquisition.main_opened(document_id)
         return tab
 
@@ -682,6 +686,11 @@ class MainWindow(QMainWindow):
         targets = set(document_ids)
         if not targets:
             return
+        for doc_id in targets:
+            if watcher := self._ocr_watchers.pop(doc_id, None):
+                watcher.cancel()
+                watcher.stop()
+                watcher.deleteLater()
         closed = []
         for i in range(self.tabs.count() - 1, -1, -1):
             tab = self.tabs.widget(i)
@@ -718,6 +727,134 @@ class MainWindow(QMainWindow):
         self.refresh()
         return True
 
+    def _session_payload(self):
+        tabs = []
+        active_tab = self.tabs.currentIndex()
+        saved_active = 0
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            main_id = tab.main.view.doc.source.document_id
+            if main_id is None:
+                continue
+            if i == active_tab:
+                saved_active = len(tabs)
+            quick_id = tab.quick.view.doc.source.document_id if tab.quick else None
+            active_pane = "quick" if (tab.quick is not None and tab.active is tab.quick) else "main"
+            tabs.append({
+                "main_id": main_id,
+                "quick_id": quick_id,
+                "label": tab.label,
+                "active_pane": active_pane,
+                "shares": {
+                    "vertical": float(tab.shares.get(Qt.Vertical, 0.4)),
+                    "horizontal": float(tab.shares.get(Qt.Horizontal, 0.5)),
+                },
+            })
+        return {"version": 1, "active_tab": saved_active if tabs else 0, "tabs": tabs}
+
+    def save_session(self):
+        if self.workspace is None:
+            return
+        try:
+            self.workspace.save_session(self._session_payload())
+        except (OSError, ValueError):
+            pass
+
+    def restore_session(self):
+        if self.workspace is None:
+            return
+        session = self.workspace.get_session()
+        if not session or not session.get("tabs"):
+            return
+        self._restoring_session = True
+        try:
+            for entry in session["tabs"]:
+                try:
+                    tab = self.open_library_document(entry["main_id"])
+                except (KeyError, OSError, ValueError):
+                    continue
+                if tab is None:
+                    continue
+                shares = entry.get("shares") or {}
+                tab.shares[Qt.Vertical] = float(shares.get("vertical", 0.4))
+                tab.shares[Qt.Horizontal] = float(shares.get("horizontal", 0.5))
+                if entry.get("label"):
+                    self.set_tab_label(tab, entry["label"])
+                quick_id = entry.get("quick_id")
+                if quick_id is not None:
+                    try:
+                        quick_pane = self.open_library_document_in_quick_view(quick_id, tab=tab)
+                    except (KeyError, OSError, ValueError):
+                        quick_pane = None
+                    if quick_pane is not None:
+                        tab._arrange()
+                        if entry.get("active_pane") == "main":
+                            tab.activate(tab.main)
+                        elif entry.get("active_pane") == "quick":
+                            tab.activate(quick_pane)
+            if self.tabs.count():
+                active_tab = max(0, min(session.get("active_tab", 0), self.tabs.count() - 1))
+                self.tabs.setCurrentIndex(active_tab)
+                self.refresh()
+        finally:
+            self._restoring_session = False
+
+    def start_ocr(self, document_id):
+        if self.workspace is None or document_id is None:
+            return
+        if document_id in self._ocr_watchers:
+            self.statusBar().showMessage("Offline OCR is already running for this paper.", 4500)
+            return
+        try:
+            job = self.workspace.ocr_document(document_id)
+        except Exception as error:
+            self.statusBar().showMessage(f"Could not start offline OCR: {error}", 8000)
+            return
+        watcher = self._ocr_watchers[document_id] = JobWatcher(self.workspace, job, self)
+        watcher.progress.connect(lambda record, doc_id=document_id: self._ocr_progress(doc_id, record))
+        watcher.finished.connect(lambda record, doc_id=document_id: self._ocr_finished(doc_id, record))
+        self.statusBar().showMessage("Recognizing scanned text (OCR)…")
+
+    def _ocr_progress(self, document_id, job):
+        progress = job.get("progress") or {}
+        if page := progress.get("page"):
+            stage = "rendering" if progress.get("stage") == "rendering" else "recognizing"
+            self.statusBar().showMessage(f"Offline OCR: {stage} page {page}…")
+        else:
+            self.statusBar().showMessage("Recognizing scanned text (OCR)…")
+
+    def _ocr_finished(self, document_id, job):
+        if watcher := self._ocr_watchers.pop(document_id, None):
+            watcher.deleteLater()
+        if job["status"] != "completed":
+            detail = job.get("error") or job["status"]
+            self.statusBar().showMessage(f"Offline OCR {detail}.", 8000)
+            return
+        result = job.get("result") or {}
+        status = result.get("status", "completed")
+        if status in ("completed", "empty"):
+            for pane in self.all_panes():
+                if pane.view.doc.source.document_id != document_id:
+                    continue
+                pane.view.doc.invalidate_text_cache()
+                pane.view._visible_selection.clear()
+                if pane.find_bar.isVisible() and (query := pane.find_bar.field.text()):
+                    pane.find_bar._last = query
+                    pane.view.find(query, pane.view._direction)
+                else:
+                    pane.find_bar._sync_ocr_button()
+        if status == "completed":
+            if result.get("cache_hit"):
+                message = "Offline OCR ready from cache."
+            else:
+                count = result.get("pages_recognized", 0)
+                message = f"Offline OCR finished ({count} page{'s' if count != 1 else ''})."
+        elif status == "empty":
+            message = result.get("message") or "Offline OCR found no readable text."
+        else:
+            message = result.get("message") or f"Offline OCR {status}."
+        self.statusBar().showMessage(message, 8000)
+
     def closeEvent(self, event):
         if getattr(self, '_closing', False):
             return event.ignore()
@@ -729,6 +866,10 @@ class MainWindow(QMainWindow):
                 return event.ignore()
             if not self.confirm(self.all_panes()):
                 return event.ignore()
+            self.save_session()
+            for watcher in self._ocr_watchers.values():
+                watcher.stop()
+            self._ocr_watchers.clear()
             for pane in self.all_panes():
                 pane.release()  # also stores the reading positions
             self.details.close()

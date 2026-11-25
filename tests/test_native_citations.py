@@ -11,7 +11,7 @@ from support import QtTestCase, make_pdf, needs_pdf, needs_qt, pdf_available
 
 if pdf_available:
     from paperassist.citations import (CitationIndex, build_text_index, citation_matches,
-        find_markers, match_rects, merge_links, nearest_item, next_citation_index, normalize)
+        complete_citation, find_markers, match_rects, merge_links, nearest_item, next_citation_index, normalize)
     from paperassist.native.citations import citation_position, reveal_citation
     from paperassist.native.engine import Pdf, Rect
 
@@ -122,6 +122,22 @@ class CitationLogicTests(unittest.TestCase):
         self.assertEqual(citation_matches(refs, "[1, 2]", "unknown"), refs)
         self.assertEqual(citation_matches(refs, "[1, 3]", "unknown"), [])
         self.assertEqual(citation_matches(refs, "[1]", "figure.1"), [])
+
+    def test_three_author_superscript_and_parenthesized_citation_matches(self):
+        author_refs = [{"id": "a", "raw": "Smith, A., Jones, B., & Brown, C. 2020, ApJ, 1, 2",
+                        "authors": "Smith", "year": "2020"}]
+        for text in ("Smith, Jones, & Brown (2020)", "Smith, Jones, and Brown 2020", "Smith, Jones & Brown 2020"):
+            self.assertEqual(citation_matches(author_refs, text), author_refs)
+
+        num_refs = [{"id": str(n), "label": str(n)} for n in range(1, 5)]
+        self.assertEqual([r["id"] for r in citation_matches(num_refs, "¹˒²⁻⁴")], ["1", "2", "3", "4"])
+        self.assertEqual([r["id"] for r in citation_matches(num_refs, "shown.¹⁻³")], ["1", "2", "3"])
+        self.assertEqual(citation_matches(num_refs, "10⁶"), [])
+        self.assertEqual([r["id"] for r in citation_matches(num_refs, "(1, 3–4)")], ["1", "3", "4"])
+        for rejected in ("Eq. (1)", "Fig. (2)", "(2020)", "(9)"):
+            self.assertEqual(citation_matches(num_refs, rejected), [])
+        self.assertTrue(complete_citation("¹˒²⁻⁴"))
+        self.assertTrue(complete_citation("(1, 2–4)"))
 
     def test_pdfium_locates_repeated_occurrences_and_page_only_fallback(self):
         with tempfile.TemporaryDirectory() as folder:

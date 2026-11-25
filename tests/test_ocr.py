@@ -1,6 +1,7 @@
 """Offline OCR: bounded, cancellable and never touching the source PDF."""
 import hashlib
 import io
+import json
 import multiprocessing
 import os
 import shutil
@@ -80,6 +81,44 @@ def scan_pdf(path, rotate=0, title=TITLE, authors=AUTHORS):
     return Path(path)
 
 
+def multi_scan_pdf(path, page_texts):
+    """Create a multi-page scanned PDF with distinct bitmap text per page."""
+    target = PdfWriter()
+    for title, authors in page_texts:
+        source = PdfWriter()
+        fonts = DictionaryObject({NameObject(f"/F{number}"): source._add_object(DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject(name)})) for number, name in ((1, "/Helvetica"), (2, "/Helvetica-Bold"))})
+        page = source.add_blank_page(612, 792)
+        page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): fonts})
+        content = "".join(f"BT /F2 24 Tf 60 {700 - 30 * number} Td ({line}) Tj ET\n" for number, line in enumerate(title))
+        content += f"BT /F1 13 Tf 60 {650 - 30 * (len(title) - 1)} Td ({authors}) Tj ET\n"
+        stream = DecodedStreamObject()
+        stream.set_data(content.encode("ascii"))
+        page[NameObject("/Contents")] = source._add_object(stream)
+        buffer = io.BytesIO()
+        source.write(buffer)
+        rendered = pdfium.PdfDocument(buffer.getvalue())
+        bitmap = rendered[0].render(scale=200 / 72, grayscale=True)
+        pixels = memoryview(bitmap.buffer).cast("B")
+        raw = b"".join(pixels[row * bitmap.stride:row * bitmap.stride + bitmap.width] for row in range(bitmap.height))
+        width, height = bitmap.width * .36, bitmap.height * .36
+        image = DecodedStreamObject()
+        image.set_data(raw)
+        image.update({NameObject("/Type"): NameObject("/XObject"), NameObject("/Subtype"): NameObject("/Image"),
+                      NameObject("/Width"): NumberObject(bitmap.width), NameObject("/Height"): NumberObject(bitmap.height),
+                      NameObject("/ColorSpace"): NameObject("/DeviceGray"), NameObject("/BitsPerComponent"): NumberObject(8)})
+        scanned = target.add_blank_page(width, height)
+        scanned[NameObject("/Resources")] = DictionaryObject({NameObject("/XObject"): DictionaryObject({
+            NameObject("/Im0"): target._add_object(image.flate_encode())})})
+        drawing = DecodedStreamObject()
+        drawing.set_data(f"q {width} 0 0 {height} 0 0 cm /Im0 Do Q".encode("ascii"))
+        scanned[NameObject("/Contents")] = target._add_object(drawing)
+    with open(path, "wb") as output:
+        target.write(output)
+    return Path(path)
+
+
 class Sink:
     def __init__(self):
         self.messages = []
@@ -154,7 +193,13 @@ class OcrRecoveryTests(unittest.TestCase):
         report = self.recover()
         self.assertEqual(report["status"], "completed", report["message"])
         self.assertEqual((self.scan.read_bytes(), self.scan.stat().st_mtime_ns), before)
-        self.assertEqual([entry.suffix for entry in self.cache.iterdir()], [".json"])
+        self.assertEqual(sorted(entry.name for entry in self.cache.iterdir() if entry.suffix != ".json"), ["pages"])
+        self.assertEqual(len(list(self.cache.glob("*.json"))), 1)
+        self.assertEqual(list(self.cache.rglob("*.pgm")) + list(self.cache.rglob("*.tsv")) + list(self.cache.rglob("*.tmp")), [])
+        self.assertEqual(list(self.cache.glob("ocr-*")), [])
+        self.assertTrue(ocr.has_sidecar_page(self.cache, self.sha, 0))
+        words = ocr.sidecar_words(self.cache, self.sha, 0)
+        self.assertIn("Lovelace", [word[4] for word in words])
         page = report["pages"][0]
         self.assertIn("Lovelace", [word["text"] for word in page["words"]])
         self.assertTrue(all(0 <= x0 < x1 <= page["size"][0] and 0 <= y0 < y1 <= page["size"][1]
@@ -293,7 +338,14 @@ class TsvTests(unittest.TestCase):
                           "4\t1\t1\t1\t1\t0\t0\t0\t10\t10\t-1\t\n")
         self.assertEqual([word["text"] for word in page["words"]], ["Hello"])
         self.assertEqual(page["words"][0]["bbox"], [10, 20, 60, 30])
+        self.assertEqual(page["words"][0]["line"], 0)
         self.assertEqual(page["lines"][0]["text"], "Hello")
+
+    def test_line_indexes_are_assigned_per_line_group(self):
+        page = self.parse("5\t1\t1\t1\t1\t1\t10\t10\t20\t10\t95\tFirst\n"
+                          "5\t1\t1\t1\t1\t2\t40\t10\t20\t10\t94\tLine\n"
+                          "5\t1\t1\t1\t2\t1\t10\t30\t20\t10\t93\tSecond\n")
+        self.assertEqual([(w["text"], w["line"]) for w in page["words"]], [("First", 0), ("Line", 0), ("Second", 1)])
 
     def test_missing_trailing_text_column_is_skipped(self):
         page = self.parse("5\t1\t1\t1\t1\t1\t20\t40\t100\t20\t96.5\n")
@@ -453,6 +505,173 @@ class BundledEngineTests(unittest.TestCase):
                 patch.object(ocr.subprocess, 'CREATE_NO_WINDOW', 0x08000000, create=True), \
                 patch.object(ocr, '_environment', return_value={}):
             self.assertEqual(ocr._process_options(str(self.engine))['creationflags'], 0x08000000)
+
+
+class SidecarAndPruneTests(unittest.TestCase):
+    SHA = "a" * 64
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.cache = Path(folder.name) / "cache"
+
+    def write_sidecar(self, page_num=0, sha=SHA, *, version=ocr.SIDECAR_VERSION, size=(100.0, 200.0), words=None):
+        path = self.cache / "pages" / sha.lower() / f"page-{page_num}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "sidecar_version": version,
+            "sha256": sha.lower(),
+            "page": page_num,
+            "size": list(size),
+            "rotation": 0,
+            "dpi": 200.0,
+            "engine_version": "5.3.0",
+            "words": words if words is not None else [
+                {"text": "Hello", "bbox": [10.0, 20.0, 30.0, 40.0], "confidence": 95.0, "line": 0},
+                {"text": "World", "bbox": [35.0, 20.0, 60.0, 40.0], "confidence": 92.0},
+            ],
+            "lines": [],
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_sidecar_words_returns_6_tuples_scales_expected_size_and_handles_invalid(self):
+        missing = self.cache / "nonexistent"
+        self.assertFalse(ocr.has_sidecar_page(missing, self.SHA, 0))
+        self.assertEqual(ocr.sidecar_words(missing, self.SHA, 0), [])
+        self.assertFalse(missing.exists())
+
+        self.write_sidecar(0)
+        self.assertTrue(ocr.has_sidecar_page(self.cache, self.SHA.upper(), 0))
+        self.assertFalse(ocr.has_sidecar_page(self.cache, "bad", 0))
+        self.assertFalse(ocr.has_sidecar_page(self.cache, self.SHA, -1))
+        self.assertFalse(ocr.has_sidecar_page(self.cache, self.SHA, True))
+
+        # Within 1pt: no scaling
+        self.assertEqual(
+            ocr.sidecar_words(self.cache, self.SHA, 0, expected_size=(100.5, 199.5)),
+            [(10.0, 20.0, 30.0, 40.0, "Hello", 0), (35.0, 20.0, 60.0, 40.0, "World", 1)],
+        )
+        # Differing by > 1pt: proportional scaling
+        self.assertEqual(
+            ocr.sidecar_words(self.cache, self.SHA, 0, expected_size=(200.0, 100.0)),
+            [(20.0, 10.0, 60.0, 20.0, "Hello", 0), (70.0, 10.0, 120.0, 20.0, "World", 1)],
+        )
+
+        # Version mismatch, corrupt JSON, and malformed entry fall back cleanly
+        self.write_sidecar(1, version=999)
+        self.assertFalse(ocr.has_sidecar_page(self.cache, self.SHA, 1))
+        self.assertEqual(ocr.sidecar_words(self.cache, self.SHA, 1), [])
+
+        bad_json = self.cache / "pages" / self.SHA / "page-2.json"
+        bad_json.write_text("{not json", encoding="utf-8")
+        self.assertFalse(ocr.has_sidecar_page(self.cache, self.SHA, 2))
+        self.assertEqual(ocr.sidecar_words(self.cache, self.SHA, 2), [])
+
+        self.write_sidecar(3, words=[{"text": "Bad", "bbox": [1, 2]}])
+        self.assertEqual(ocr.sidecar_words(self.cache, self.SHA, 3), [])
+
+    def test_prune_cache_evicts_lru_and_keeps_touched_pages_warm(self):
+        p0 = self.write_sidecar(0, words=[{"text": "A" * 120, "bbox": [0, 0, 10, 10], "confidence": 90, "line": 0}])
+        p1 = self.write_sidecar(1, words=[{"text": "B" * 120, "bbox": [0, 0, 10, 10], "confidence": 90, "line": 0}])
+        other_sha = "b" * 64
+        p2 = self.write_sidecar(0, sha=other_sha, words=[{"text": "C" * 120, "bbox": [0, 0, 10, 10], "confidence": 90, "line": 0}])
+        report_json = self.cache / ("c" * 64 + ".json")
+        report_json.write_text('{"status":"completed","pages":[]}', encoding="utf-8")
+        temp_dir = self.cache / "ocr-staging"
+        temp_dir.mkdir()
+        temp_file = temp_dir / "page.pgm"
+        temp_file.write_bytes(b"ignore")
+        dot_tmp = self.cache / ".page-0.json.tmp"
+        dot_tmp.write_bytes(b"ignore")
+
+        # Make all old, then read p0 via sidecar_words so its mtime is freshest
+        old_ns = 1_000_000_000_000
+        for idx, path in enumerate((p0, p1, p2, report_json)):
+            os.utime(path, ns=(old_ns + idx * 1_000_000, old_ns + idx * 1_000_000))
+        self.assertEqual(len(ocr.sidecar_words(self.cache, self.SHA, 0)), 1)
+
+        keep_limit = p0.stat().st_size
+        summary = ocr.prune_cache(self.cache, max_bytes=keep_limit)
+        self.assertEqual(summary["removed"], 3)
+        self.assertLessEqual(summary["bytes_remaining"], keep_limit)
+        self.assertTrue(p0.is_file())
+        self.assertFalse(p1.exists())
+        self.assertFalse(p2.exists())
+        self.assertFalse(report_json.exists())
+        self.assertFalse((self.cache / "pages" / other_sha).exists())
+        self.assertTrue(temp_file.is_file())
+        self.assertTrue(dot_tmp.is_file())
+
+
+@needs_ocr
+class RecognizePagesTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.shared = tempfile.TemporaryDirectory()
+        cls.doc = multi_scan_pdf(
+            Path(cls.shared.name) / "two_pages.pdf",
+            [(("First Page Title",), "Ada Lovelace"), (("Second Page Title",), "Grace Hopper")],
+        )
+        cls.sha = hashlib.sha256(cls.doc.read_bytes()).hexdigest()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.shared.cleanup()
+
+    def setUp(self):
+        ocr.clear_probe_cache()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.cache = Path(folder.name) / "cache"
+        self.cancel = threading.Event()
+
+    def test_recognize_pages_caches_hits_and_preserves_completed_pages_on_cancel(self):
+        before = (self.doc.read_bytes(), self.doc.stat().st_mtime_ns)
+
+        def cancel_on_second_page(step):
+            if step["page"] == 2 and step["stage"] == "recognizing":
+                self.cancel.set()
+
+        cancelled = ocr.recognize_pages(self.doc, self.cache, self.sha, cancel=self.cancel, progress=cancel_on_second_page)
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertTrue(cancelled["cancelled"])
+        self.assertEqual(cancelled["pages_recognized"], 1)
+        self.assertEqual(cancelled["total_pages"], 2)
+        self.assertTrue(ocr.has_sidecar_page(self.cache, self.sha, 0))
+        self.assertFalse(ocr.has_sidecar_page(self.cache, self.sha, 1))
+        self.assertIn("Lovelace", [w[4] for w in ocr.sidecar_words(self.cache, self.sha, 0)])
+        self.assertEqual(list(self.cache.glob("ocr-*")), [])
+
+        # Resume recognizes only page 1
+        resumed = ocr.recognize_pages(self.doc, self.cache, self.sha, pages=[1, 0, 1])
+        self.assertEqual(resumed["status"], "completed")
+        self.assertFalse(resumed["cache_hit"])
+        self.assertEqual(resumed["pages_cached"], 1)
+        self.assertEqual(resumed["pages_recognized"], 1)
+        self.assertEqual(resumed["total_pages"], 2)
+        self.assertIn("Hopper", [w[4] for w in ocr.sidecar_words(self.cache, self.sha, 1)])
+
+        # Full cache hit does not spawn a worker
+        with patch.object(ocr, "_launch") as launch:
+            hit = ocr.recognize_pages(self.doc, self.cache, self.sha)
+        launch.assert_not_called()
+        self.assertEqual(hit["status"], "completed")
+        self.assertTrue(hit["cache_hit"])
+        self.assertEqual((hit["pages_recognized"], hit["pages_cached"], hit["total_pages"]), (0, 2, 2))
+        self.assertEqual((self.doc.read_bytes(), self.doc.stat().st_mtime_ns), before)
+
+        # Force re-recognizes all target pages
+        forced = ocr.recognize_pages(self.doc, self.cache, self.sha, pages=[0], force=True)
+        self.assertEqual(forced["status"], "completed")
+        self.assertFalse(forced["cache_hit"])
+        self.assertEqual((forced["pages_recognized"], forced["pages_cached"], forced["total_pages"]), (1, 0, 1))
+
+    def test_recognize_pages_validates_inputs_and_refuses_concurrent_use(self):
+        self.assertEqual(ocr.recognize_pages(self.doc, self.cache, "abc")["status"], "failed")
+        self.assertEqual(ocr.recognize_pages(self.doc, self.cache, self.sha, pages=[-1])["status"], "failed")
+        with ocr._LOCK:
+            self.assertEqual(ocr.recognize_pages(self.doc, self.cache, self.sha)["status"], "busy")
 
 
 if __name__ == "__main__":

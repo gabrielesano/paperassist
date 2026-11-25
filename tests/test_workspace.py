@@ -279,3 +279,18 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(settings.preferences(), {'ui_zoom': 1.1})
         with self.assertRaises(WorkspaceConflict):
             self.open_workspace(target, 'option').prepare_switch(str(self.root / 'new'), 'move')
+
+    def test_refresh_metadata_uses_document_ids_and_session_delegates(self):
+        with patch.object(self.workspace.library, 'document_ids', wraps=self.workspace.library.document_ids) as ids_spy, \
+             patch.object(self.workspace.library, 'list_documents') as list_spy, \
+             patch('paperassist.workspace.metadata_refresh.refresh', return_value={'documents': []}):
+            job = self.finish(self.workspace.refresh_metadata(None, online=False, ocr='off'))
+        self.assertEqual(job['status'], 'completed')
+        ids_spy.assert_called_once_with()
+        list_spy.assert_not_called()
+
+        session = {'version': 1, 'active_tab': 0, 'tabs': [{'main_id': self.doc['id'], 'quick_id': None, 'label': 'Main'}]}
+        self.workspace.save_session(session)
+        loaded = self.workspace.get_session()
+        self.assertEqual(loaded['tabs'][0]['main_id'], self.doc['id'])
+        self.assertEqual(loaded['tabs'][0]['label'], 'Main')

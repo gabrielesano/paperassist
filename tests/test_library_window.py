@@ -133,13 +133,14 @@ class SourceTests(LibraryWindowCase):
         replacement = self.workspace.library.get_path(self.docs[2]['id']).read_bytes()
         render = self.client.open
 
-        def replace_before_render(data):
+        def replace_before_render(data, **kwargs):
             original.write_bytes(replacement)
-            return render(data)
+            return render(data, **kwargs)
 
         with patch.object(self.client, 'open', side_effect=replace_before_render) as start_rendering:
             self.open_document(window, self.docs[0])
-        start_rendering.assert_called_once_with(verified)
+        start_rendering.assert_called_once()
+        self.assertEqual(start_rendering.call_args.args, (verified,))
 
     def test_open_follows_the_newest_revision_and_save_creates_one(self):
         window = self.make_window()
@@ -219,6 +220,7 @@ class LibraryDialogTests(LibraryWindowCase):
         with patch.object(library, "list_documents", wraps=library.list_documents) as query:
             dialog = LibraryDialog(self.workspace)
             self.addCleanup(dialog.deleteLater)
+            self.addCleanup(dialog.typing.stop)
             dialog.show()
             self.assertEqual(query.call_count, 1)
             dialog.hide()
@@ -1027,6 +1029,23 @@ class ReferenceCardTests(LibraryWindowCase):
         updated_ref = next(r for r in self.panel.refs if r["id"] == refs[0]["id"])
         self.assertIsNone(updated_ref.get("local_document_id"))
         self.assertTrue(updated_ref.get("local_missing"))
+
+    def test_library_dialog_uses_lightweight_list_and_status_counts_on_search(self):
+        library = self.workspace.library
+        with patch.object(library, "list_documents", wraps=library.list_documents) as list_spy, \
+             patch.object(library, "status_counts", wraps=library.status_counts) as counts_spy:
+            dialog = LibraryDialog(self.workspace)
+            self.addCleanup(dialog.deleteLater)
+            self.addCleanup(dialog.typing.stop)
+            dialog.show()
+            self.assertEqual(list_spy.call_count, 1)
+            self.assertEqual(list_spy.call_args.kwargs, {"lightweight": True})
+            counts_spy.assert_not_called()
+            dialog.search.setText("p3")
+            dialog.refresh(reload_counts=True)
+            self.assertEqual(list_spy.call_args.kwargs, {"lightweight": True})
+            counts_spy.assert_called_once()
+            dialog.close()
 
 
 if __name__ == "__main__":
