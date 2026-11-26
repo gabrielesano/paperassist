@@ -15,7 +15,7 @@ from paperassist.settings import PROVIDER_NAMES
 from .dialogs import ElidedLabel, setup_dialog
 from .jobs import JobWatcher
 from .source import display_title
-from .theme import serif_heading_font, set_props
+from .theme import FlowLayout, serif_heading_font, set_props
 
 TITLE, TAB_NAME, AUTHORS, YEAR, METADATA = range(5)
 REVIEW = QColor("#a15c00")  # amber: not an error, a paper whose metadata nobody confirmed
@@ -150,6 +150,8 @@ class LibraryDialog(QDialog):
         self.table = QTreeWidget(objectName="dialog-tree", rootIsDecorated=False, uniformRowHeights=True,
                                  headerLabels=["Title", "Tab name", "Authors", "Year", "Metadata"])
         self.table.setAccessibleName("Papers")
+        self._column_reflow = QTimer(self, singleShot=True, interval=0,
+                                     timeout=lambda: self._sync_column_widths(force_minimums=True))
         self.table.installEventFilter(self)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setSortingEnabled(True)
@@ -169,7 +171,7 @@ class LibraryDialog(QDialog):
         self.copy_bibtex_button.setToolTip("Copy BibTeX citations for verified selected papers")
         self.remove_button = QPushButton("Remove…")
         self.remove_button.setToolTip("Remove selected papers from this library (Delete)")
-        self.selection_hint = QLabel(objectName="muted-note")
+        self.selection_hint = ElidedLabel(objectName="muted-note")
         self.refresh_button = QPushButton("Refresh metadata")
         self.refresh_button.setToolTip("Recover metadata locally from the PDF, with optional online verification. Fields you corrected are preserved.")
         menu = QMenu(self.refresh_button)
@@ -229,25 +231,18 @@ class LibraryDialog(QDialog):
         status_row.addWidget(self.progress)
         status_row.addWidget(self.cancel_button)
 
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
-        for widget in (self.import_button, self.folder_button, self.compact_button):
-            buttons.addWidget(widget)
-        buttons.addStretch(1)
-        for widget in (self.quick_button, self.open_button):
+        buttons = FlowLayout(h_spacing=8)
+        for widget in (self.import_button, self.folder_button, self.compact_button, self.quick_button, self.open_button):
             buttons.addWidget(widget)
 
-        metadata_row = QHBoxLayout()
-        metadata_row.addWidget(self.selection_hint, 1)
-        metadata_row.addWidget(self.copy_bibtex_button)
-        metadata_row.addWidget(self.edit_button)
-        metadata_row.addWidget(self.remove_button)
-        metadata_row.addWidget(self.refresh_button)
+        metadata_row = FlowLayout(h_spacing=8)
+        for widget in (self.selection_hint, self.copy_bibtex_button, self.edit_button, self.remove_button,
+                       self.refresh_button):
+            metadata_row.addWidget(widget)
 
-        self.confirm_row = QHBoxLayout()
-        self.confirm_row.setSpacing(8)
+        self.confirm_row = FlowLayout(h_spacing=8)
         for widget in (self.estimate, self.start_button, self.import_open_button, self.discard_button):
-            self.confirm_row.addWidget(widget, 1 if widget is self.estimate else 0)
+            self.confirm_row.addWidget(widget)
 
         column.addWidget(self.search)
         column.addLayout(metadata_row)
@@ -297,8 +292,8 @@ class LibraryDialog(QDialog):
         super().changeEvent(event)
         if event.type() in (QEvent.FontChange, QEvent.StyleChange) and hasattr(self, "heading"):
             self.heading.setFont(serif_heading_font(self.search.font()))
-            if hasattr(self, "table"):
-                self._sync_column_widths(force_minimums=True)
+            if hasattr(self, "_column_reflow"):
+                self._column_reflow.start()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -364,6 +359,9 @@ class LibraryDialog(QDialog):
         super().keyPressEvent(event)
 
     def eventFilter(self, watched, event):
+        if watched is self.table and event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            # The view may receive its new font after the dialog's style change.
+            self._column_reflow.start()
         # Qt's itemActivated key differs by platform; both Enter keys open the selected paper.
         if (watched is self.table and event.type() == QEvent.KeyPress
                 and event.key() in (Qt.Key_Return, Qt.Key_Enter)
