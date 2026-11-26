@@ -77,6 +77,11 @@ def theme_generation():
 
 
 class _ResizeGripStyle(QProxyStyle):
+    def sizeFromContents(self, contents_type, option, size, widget=None):
+        if contents_type == QStyle.CT_SizeGrip:
+            return QSize(max(size.width(), 16), max(size.height(), 16))
+        return super().sizeFromContents(contents_type, option, size, widget)
+
     def drawControl(self, element, option, painter, widget=None):
         if element != QStyle.CE_SizeGrip:
             return super().drawControl(element, option, painter, widget)
@@ -104,6 +109,9 @@ def style_resize_grip(container):
         app._resize_grip_style = _ResizeGripStyle("fusion")
         app._resize_grip_style.setParent(app)
     grip.setStyle(app._resize_grip_style)
+    grip.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+    grip.resize(grip.sizeHint())
+    grip.updateGeometry()
     grip.setAccessibleName("Resize window")
 
 
