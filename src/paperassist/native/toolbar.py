@@ -55,6 +55,11 @@ class PageField(QWidget):
             return True
         return super().eventFilter(watched, event)
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._fit_total_width()
+
     def show_page(self, view):
         self.view = view
         self._fit_total_width()
