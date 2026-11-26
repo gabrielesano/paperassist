@@ -107,7 +107,10 @@ PUBLICATION = re.compile(
     rf'(?<![^\W\d_])({_ALIAS})(?![^\W\d_])\.?\s*,?\s*(?:\({_YEAR}\)\s*,?\s*)?(\d+)'
     rf'\s*(?:\({_YEAR}\)\s*[,:]?|[,:])\s*([A-Z]?\d+)(?:[–-]\d+)?(?:\s*\({_YEAR}\))?', re.I)
 APJ_HEADER = re.compile(r'\bThe Astrophysical Journal\s*(Letters|Supplement(?: Series)?)?\s*,?\s*(\d+)\s*:\s*([A-Z]?\d+)[^\n]{0,80}?\b((?:19|20)\d{2})\b', re.I)
-SURNAME = r"[^\W\d_]+(?:[-'’][^\W\d_]+)*(?:\s+[^\W\d_]+(?:[-'’][^\W\d_]+)*)*"
+NAME_LETTER = r"[^\W\d_][\u0300-\u036f]*"
+_NAME_WORD = rf"(?:{NAME_LETTER})+"
+_HYPHENATED_NAME = rf"{_NAME_WORD}(?:[-'’]{_NAME_WORD})*"
+SURNAME = rf"{_HYPHENATED_NAME}(?:\s+{_HYPHENATED_NAME})*"
 
 
 def journal_code(name):
@@ -233,6 +236,7 @@ _SUP_PRESERVED = re.compile(r'[^⁰¹²³⁴⁵⁶⁷⁸⁹⁻˒]+')
 def clean_text(text):
     """Repair detached accents ("M¨ uller"), ligatures and line-end hyphenated names."""
     joined = SPACING_ACCENT.sub(lambda m: m.group(2).replace('ı', 'i') + COMBINING[m.group(1)], text or '')
+    joined = re.sub(r'(?<=[^\W\d_])`([AEIOUaeiou])\b', r'\1' + '\u0300', joined)
     # Preserve Unicode superscripts so NFKC does not flatten citations like "text¹⁻³" into "text1−3".
     normalized = _SUP_PRESERVED.sub(lambda m: unicodedata.normalize('NFKC', m.group()), joined)
     return re.sub(r'(?<=[^\W\d_])-\n(?=[a-z])', '', normalized)

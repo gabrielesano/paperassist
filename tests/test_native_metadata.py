@@ -160,8 +160,7 @@ class LibraryDialogTests(MetadataCase):
         expected = sum(p.stat().st_size for p in (folder / "one.pdf", folder / "deep" / "TWO.PDF"))
         self.dialog.show()
         self.dialog.select_import([str(folder)])
-        self.assertIn(f"2 PDFs, {format_size(expected)}", self.dialog.estimate.text())
-        self.assertIn("extra storage", self.dialog.estimate.text())
+        self.assertIn(f"2 PDFs, up to {format_size(expected)} of extra storage", self.dialog.estimate.text())
         self.assertFalse(self.dialog.import_button.isEnabled())
         self.assertEqual(self.library.list_documents(), [])  # nothing is copied yet
         self.dialog.start_button.click()
@@ -169,8 +168,7 @@ class LibraryDialogTests(MetadataCase):
         self.assertEqual(len(self.library.list_documents()), 2)
         self.assertFalse(self.dialog.estimate.isVisible())
         self.assertTrue(self.dialog.import_button.isEnabled())
-        self.assertEqual(self.dialog.message.text(),
-                         "2 added, 0 already in the library, 2 need metadata review, 0 failed")
+        self.assertEqual(self.dialog.message.text(), "2 added")
 
     def test_import_summary_separates_corrected_duplicates_review_files_and_failures(self):
         existing, path = self.add("existing.pdf", 3)
@@ -183,8 +181,11 @@ class LibraryDialogTests(MetadataCase):
         self.dialog.start_button.click()
         self.pump(lambda: self.dialog.watcher is None)
         message = self.dialog.message.text()
-        self.assertIn("1 added, 1 already in the library, 1 need metadata review, 1 failed", message)
-        self.assertIn(str(bad), message)
+        self.assertIn("1 added, 1 already in library, 1 failed", message)
+        self.assertIn(bad.name, message)
+        self.assertNotIn(str(bad.parent), message)
+        self.assertIn(str(bad), self.dialog.message.toolTip())
+        self.assertTrue(self.dialog.details_button.isVisibleTo(self.dialog))
         self.assertEqual(len(self.library.list_documents()), 2)
 
     def test_an_unreadable_only_selection_shows_its_error_instead_of_no_pdfs(self):
@@ -194,8 +195,10 @@ class LibraryDialogTests(MetadataCase):
         with patch("paperassist.library.os.scandir", side_effect=PermissionError("Access denied")):
             self.dialog.select_import([blocked])
         self.assertIn("Could not scan selection", self.dialog.message.text())
-        self.assertIn(str(blocked), self.dialog.message.text())
+        self.assertIn(blocked.name, self.dialog.message.text())
         self.assertIn("Access denied", self.dialog.message.text())
+        self.assertIn(str(blocked), self.dialog.message.toolTip())
+        self.assertTrue(self.dialog.details_button.isVisibleTo(self.dialog))
         self.assertFalse(self.dialog.start_button.isVisible())
         self.assertEqual(self.dialog.pending, [])
         self.assertEqual(self.library.list_documents(), [])
@@ -214,14 +217,87 @@ class LibraryDialogTests(MetadataCase):
         self.dialog.show()
         with patch("paperassist.library.os.scandir", side_effect=scan):
             self.dialog.select_import([str(folder)])
-            self.assertIn(str(blocked), self.dialog.message.text())
+            self.assertIn(blocked.name, self.dialog.message.text())
+            self.assertIn(str(blocked), self.dialog.message.toolTip())
             self.assertIn("estimate unavailable", self.dialog.estimate.text())
             self.dialog.start_button.click()
             self.pump(lambda: self.dialog.watcher is None)
-        self.assertIn("2 added, 0 already in the library, 2 need metadata review, 1 failed",
-                      self.dialog.message.text())
-        self.assertIn(str(blocked), self.dialog.message.text())
+        self.assertIn("2 added, 1 failed", self.dialog.message.text())
+        self.assertIn(blocked.name, self.dialog.message.text())
+        self.assertIn(str(blocked), self.dialog.message.toolTip())
         self.assertEqual(len(self.library.list_documents()), 2)
+
+    def test_long_failure_paths_keep_footer_single_line_and_open_error_details_dialog(self):
+        deep_dir = self.dir / "very" / "deeply" / "nested" / "collection" / "of" / "papers"
+        deep_dir.mkdir(parents=True)
+        bad1 = deep_dir / "Folkner2014.pdf"
+        bad2 = deep_dir / "Another2015.pdf"
+        bad1.write_bytes(b"bad1")
+        bad2.write_bytes(b"bad2")
+        self.dialog.resize(960, 600)
+        self.dialog.show()
+        self.app.processEvents()
+        table_height_before = self.dialog.table.height()
+
+        self.dialog._imported({
+            "status": "completed",
+            "result": {
+                "imported": 57,
+                "duplicates": 5,
+                "documents": [],
+                "cancelled": False,
+                "errors": [
+                    {"path": str(bad1), "error": "Encrypted PDF cannot be imported"},
+                    {"path": str(bad2), "error": "Invalid PDF header"},
+                ],
+            },
+        }, open_after=False)
+        self.app.processEvents()
+
+        self.assertEqual(self.dialog.message.text(), "57 added, 5 already in library, 2 failed")
+        self.assertEqual(self.dialog.message.property("tone"), "error")
+        self.assertEqual(self.dialog.message.objectName(), "library-status")
+        self.assertNotIn(str(deep_dir), self.dialog.message.text())
+        self.assertIn(str(bad1), self.dialog.message.toolTip())
+        self.assertIn(str(bad2), self.dialog.message.toolTip())
+        self.assertLessEqual(self.dialog.message.height(), self.dialog.message.fontMetrics().height() + 10)
+        self.assertEqual(self.dialog.open_button.y(), self.dialog.import_button.y())
+        self.assertGreaterEqual(self.dialog.table.height(), table_height_before - 40)
+        self.assertTrue(self.dialog.details_button.isVisibleTo(self.dialog))
+
+        self.dialog.details_button.click()
+        self.pump(lambda: self.dialog.error_dialog is not None and self.dialog.error_dialog.isVisible())
+        details_table = self.dialog.error_dialog.table
+        self.assertEqual(details_table.topLevelItemCount(), 2)
+        self.assertEqual(details_table.topLevelItem(0).text(0), "Folkner2014.pdf")
+        self.assertEqual(details_table.topLevelItem(0).text(1), "Encrypted PDF cannot be imported")
+        self.assertEqual(details_table.topLevelItem(0).text(2), str(bad1))
+        self.dialog.error_dialog.reject()
+
+    def test_year_and_title_columns_fit_at_default_and_zoomed_scales(self):
+        from paperassist.native.theme import apply_theme
+        self.add("sample.pdf", 3)
+        self.dialog.resize(960, 600)
+        self.dialog.show()
+        self.app.processEvents()
+        table = self.dialog.table
+        self.assertFalse(table.header().stretchLastSection())
+        self.assertEqual(table.fontMetrics().elidedText("2024", Qt.ElideRight, table.columnWidth(3) - 16), "2024")
+        title_before = table.columnWidth(0)
+        meta_before = table.columnWidth(4)
+
+        self.dialog.resize(1200, 600)
+        self.app.processEvents()
+        self.assertGreater(table.columnWidth(0), title_before)
+        self.assertEqual(table.columnWidth(4), meta_before)
+
+        base_font = self.app.font()
+        try:
+            apply_theme(base_font=base_font, zoom=1.5)
+            self.app.processEvents()
+            self.assertEqual(table.fontMetrics().elidedText("2024", Qt.ElideRight, table.columnWidth(3) - 16), "2024")
+        finally:
+            apply_theme(base_font=base_font, zoom=1.0)
 
     def test_a_selection_can_be_dropped_and_non_pdfs_alone_start_nothing(self):
         folder = self.make_files()

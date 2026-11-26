@@ -844,6 +844,11 @@ class MainWindow(QMainWindow):
                 else:
                     pane.find_bar._sync_ocr_button()
         if status == "completed":
+            if not result.get("cache_hit") and result.get("pages_recognized", 0) > 0:
+                if document_id == self.details.document_id:
+                    self.details.analyze(document_id)
+                else:
+                    self.details.evict(document_id)
             if result.get("cache_hit"):
                 message = "Offline OCR ready from cache."
             else:

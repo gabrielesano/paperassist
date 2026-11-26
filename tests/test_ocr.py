@@ -352,6 +352,16 @@ class TsvTests(unittest.TestCase):
         self.assertEqual(page["words"], [])
         self.assertEqual(page["lines"], [])
 
+    def test_unescaped_quote_in_tsv_does_not_swallow_following_rows(self):
+        page = self.parse(
+            '5\t1\t1\t1\t1\t1\t10\t10\t10\t10\t95\t"\n'
+            '5\t1\t1\t1\t2\t1\t10\t30\t60\t10\t94\tReferences\n'
+            '5\t1\t1\t1\t3\t1\t10\t50\t40\t10\t93\tSmith,\n'
+            '5\t1\t1\t1\t3\t2\t60\t50\t20\t10\t93\tA.\n'
+        )
+        self.assertEqual([w["text"] for w in page["words"]], ['"', "References", "Smith,", "A."])
+        self.assertEqual([line["text"] for line in page["lines"]], ['"', "References", "Smith, A."])
+
     def test_oversized_output_is_rejected(self):
         with patch.object(ocr, "MAX_TSV_BYTES", 10):
             with self.assertRaisesRegex(ValueError, "size limit"):

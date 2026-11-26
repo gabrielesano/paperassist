@@ -224,10 +224,10 @@ def citation_matches(refs, text, destination=None):
             nums = citation_numbers(paren[1])
             if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
                 return _numeric_refs(refs, nums)
-    author_year = re.fullmatch(r"\(?([^\d()]+?)\s*[,]?\s+\(?(19\d{2}[a-z]?|20\d{2}[a-z]?)\)?\)?", text, re.I)
+    author_year = re.fullmatch(r"\(?([^\d()]+?)\s*[.,]?\s+\(?(19\d{2}[a-z]?|20\d{2}[a-z]?)\)?\)?", text, re.I)
     if not author_year:
         return []
-    cited = re.sub(r'\s+et\s+al\.?$', '', author_year[1].rstrip(', '), flags=re.I)
+    cited = re.sub(r'\s+et\s+al\.?$', '', author_year[1].rstrip(',. '), flags=re.I)
     cited_names = [name for name in re.split(r'\s*(?:,\s*(?:&|\band\b)\s*|&|\band\b|,)\s*', cited, flags=re.I) if name]
     found = []
     for ref in refs:
@@ -237,8 +237,10 @@ def citation_matches(refs, text, destination=None):
         raw_year = re.search(r'\b(?:19|20)\d{2}[a-z]?\b', str(ref.get('raw') or ''), re.I)
         if len(year) == 4 and raw_year and raw_year[0][:4] == year:
             year = raw_year[0]
-        if (len(names) >= len(cited_names) and all(normalize(name) == normalize(other) for name, other in zip(names, cited_names))
-                and year.casefold() == author_year[2].casefold()):
+        author_match = (len(names) >= len(cited_names)
+                        and all(normalize(name) == normalize(other) for name, other in zip(names, cited_names)))
+        org_match = bool(authors) and normalize(authors) == normalize(cited)
+        if (author_match or org_match) and year.casefold() == author_year[2].casefold():
             found.append(ref)
     return found
 
@@ -287,7 +289,7 @@ class CitationIndex:
                 rows[item["line"]].append(item)
             for row in rows.values():
                 text = " ".join(item["str"] for item in row)
-                text = re.sub(r"^\s*(?:\[\d+\]|\d+\.)\s*", "", text)
+                text = re.sub(r"^\s*(?:\[\d+\]|\d+\.?)\s*", "", text)
                 normalized = "".join(c for c in normalize(text) if c.isalnum())
                 if len(normalized) >= 12 and any(normalized in raw for raw in entries):
                     rects = [item["rect"] for item in row]

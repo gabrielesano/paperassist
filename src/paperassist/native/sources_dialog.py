@@ -168,17 +168,18 @@ class SourcesDialog(QDialog):
         self.save_button.setProperty("primary", True)
         self.save_button.setDefault(True)
         self.check_button = QPushButton("Check access")
-        self.message = QLabel(objectName="muted-note", wordWrap=True)
+        self.message = QLabel(objectName="muted-note", wordWrap=True, visible=False)
         self.message.setAccessibleName("Status")
         close = QPushButton("Close")
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         for widget in (self.save_button, self.check_button):
             buttons.addWidget(widget)
-        buttons.addWidget(self.message, 1)
+        buttons.addStretch(1)
         buttons.addWidget(close)
         column.addLayout(form)
         column.addWidget(scroll, 1)
+        column.addWidget(self.message)
         column.addLayout(buttons)
         self.save_button.clicked.connect(self.save)
         self.check_button.clicked.connect(self.check)
@@ -194,6 +195,7 @@ class SourcesDialog(QDialog):
     def say(self, text, bad=False):
         self.message.setText(text)
         set_props(self.message, tone="error" if bad else "")
+        self.message.setVisible(bool(text))
 
     def load(self):
         """Show the saved settings; typed keys and staged removals are dropped."""

@@ -411,3 +411,14 @@ class AcquisitionWidgetTests(QtTestCase):
             panel.open_blocked.click()
             self.assertEqual(open_url.call_count, 1)
         panel.deleteLater()
+
+    def test_long_acquisition_status_stays_single_line_with_full_text(self):
+        self.window.resize(900, 600)
+        self.window.show()
+        self.pump()
+        long_status = "Opened 10 PDF links in your browser for /very/long/path/" + ("subdir/" * 15) + "paper.pdf"
+        self.controller._say(11, long_status)
+        self.pump()
+        self.assertEqual(self.controller.status.text(), long_status)
+        self.assertEqual(self.controller.status.toolTip(), long_status)
+        self.assertLessEqual(self.controller.status.height(), self.controller.status.fontMetrics().height() + 10)

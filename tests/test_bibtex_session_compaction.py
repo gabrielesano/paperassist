@@ -239,6 +239,7 @@ class BibtexCompactionAndSessionUiTests(QtTestCase):
         dialog.show()
         self.pump()
 
+        self.assertTrue(dialog.compact_button.isVisibleTo(dialog))
         self.assertTrue(dialog.compact_button.isEnabled())
         self.assertFalse(dialog.copy_bibtex_button.isEnabled())
 
@@ -261,10 +262,12 @@ class BibtexCompactionAndSessionUiTests(QtTestCase):
         # Compact revisions confirms and updates button state.
         with patch.object(dialog, "confirm_compact", return_value=False):
             dialog.compact_button.click()
+        self.assertTrue(dialog.compact_button.isVisibleTo(dialog))
         self.assertTrue(dialog.compact_button.isEnabled())
         with patch.object(dialog, "confirm_compact", return_value=True):
             dialog.compact_button.click()
         self.assertFalse(dialog.compact_button.isEnabled())
+        self.assertFalse(dialog.compact_button.isVisibleTo(dialog))
         self.assertIn("Removed 1 superseded revision", dialog.message.text())
 
     def test_references_panel_expanded_card_shows_copy_bibtex_when_verified(self):

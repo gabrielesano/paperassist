@@ -174,6 +174,19 @@ class SourcesDialogTests(QtTestCase):
         self.assertTrue(dialog.isVisible())
         self.assertEqual(dialog.email.text(), "")
 
+    def test_long_status_message_does_not_misalign_action_buttons(self):
+        self.dialog.show()
+        self.app.processEvents()
+        button_y = self.dialog.save_button.y()
+        long_text = "Very long error message " * 12
+        self.dialog.say(long_text, bad=True)
+        self.app.processEvents()
+        self.assertTrue(self.dialog.message.isVisible())
+        self.assertEqual(self.dialog.message.text(), long_text)
+        self.assertLess(self.dialog.message.y(), self.dialog.save_button.y())
+        self.assertEqual(self.dialog.save_button.height(), self.dialog.check_button.height())
+        self.assertNotEqual(button_y, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

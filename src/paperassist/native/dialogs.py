@@ -1,8 +1,51 @@
-"""Shared dialog chrome and table-picker helper."""
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QLineEdit, QTreeWidget, QVBoxLayout)
+"""Shared dialog chrome, single-line elided labels, and table-picker helper."""
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QPainter, QPalette
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QLineEdit, QSizePolicy, QTreeWidget, QVBoxLayout)
 
 from .theme import serif_heading_font
+
+
+class ElidedLabel(QLabel):
+    """Single-line label that elides long text cleanly without stretching or wrapping layouts."""
+
+    def __init__(self, text="", parent=None, **kwargs):
+        super().__init__(text, parent, **kwargs)
+        self._explicit_tip = kwargs.get("toolTip", "")
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        if not self._explicit_tip:
+            super().setToolTip(text)
+
+    def setText(self, text):
+        super().setText(text)
+        if not self._explicit_tip:
+            super().setToolTip(text)
+
+    def setToolTip(self, tip):
+        self._explicit_tip = tip or ""
+        super().setToolTip(self._explicit_tip or self.text())
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        return QSize(min(hint.width(), 360), hint.height())
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        elided = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, max(0, rect.width()))
+        self.style().drawItemText(
+            painter,
+            rect,
+            int(self.alignment()) | int(Qt.TextSingleLine),
+            self.palette(),
+            self.isEnabled(),
+            elided,
+            QPalette.WindowText,
+        )
 
 
 def setup_dialog(dialog, title, *, heading=None, subtitle=None, spacing=10, margins=(22, 20, 22, 18)):

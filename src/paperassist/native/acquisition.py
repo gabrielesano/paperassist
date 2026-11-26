@@ -15,7 +15,7 @@ from paperassist import references
 from paperassist.paths import write_json_atomic
 from paperassist.settings import PROVIDER_NAMES
 
-from .dialogs import PickerDialog, setup_dialog
+from .dialogs import ElidedLabel, PickerDialog, setup_dialog
 from .jobs import JobWatcher
 from .theme import FlowLayout, reference_palette, reference_tone, set_props
 
@@ -348,7 +348,7 @@ class AcquisitionController(QObject):
         self._closed = False
         self.selections = SelectionStore(self.workspace.data_dir) if self.workspace else None
         self.data, self.pending, self.dialogs, self.jobs, self.expanded = {}, set(), {}, {}, set()
-        self.status = QLabel(wordWrap=True)
+        self.status = ElidedLabel()
         self.cancel_button = QPushButton("Cancel search")
         self.cancel_button.hide()
         self.cancel_button.clicked.connect(self.cancel)

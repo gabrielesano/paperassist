@@ -631,7 +631,7 @@ def _parse_tsv(path, page_number, size, pixels):
         raise ValueError("OCR output exceeded its size limit")
     words, groups = [], {}
     with path.open(encoding="utf-8", errors="replace", newline="") as source:
-        for row in csv.DictReader(source, delimiter="\t"):
+        for row in csv.DictReader(source, delimiter="\t", quoting=csv.QUOTE_NONE):
             text = (row.get("text") or "").strip()
             if row.get("level") != "5" or not text:
                 continue

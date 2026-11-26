@@ -43,8 +43,8 @@ class ReferenceChoice(QPushButton):
 
 
 def _load_or_analyze(library, document_id):
-    payload = references.get(library, document_id)
-    return references.analyze(library, document_id) if payload["status"] == "not_analyzed" else payload
+    payload = references.get(library, document_id, allow_ocr=False)
+    return references.analyze(library, document_id, allow_ocr=False) if payload["status"] == "not_analyzed" else payload
 
 
 def reference_matcher(query):

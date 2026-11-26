@@ -315,7 +315,7 @@ class LibraryDialogTests(LibraryWindowCase):
         self.assertFalse(self.dialog.import_button.isEnabled())
         self.pump(lambda: self.dialog.watcher is None)
         self.assertEqual(len(self.titles()), 5)
-        self.assertIn("2 added, 1 already in the library", self.dialog.message.text())
+        self.assertIn("2 added, 1 already in library", self.dialog.message.text())
         self.assertTrue(self.dialog.import_button.isEnabled())
 
     def test_a_running_import_can_be_cancelled(self):

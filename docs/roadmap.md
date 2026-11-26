@@ -29,6 +29,10 @@ throttling, and consolidates the native UI and packaging stack. See
 
 ## Completed transitions and automated acceptance
 
+- Prepared `0.4.2` with alternative PDFium reading orders for incomplete
+  bibliographies, support for unheaded and scanned reference lists, and
+  improved library layout and error reporting. See the
+  [release notes](releases/0.4.2.md).
 - Released `0.4.1` ([release notes](releases/0.4.1.md)) with:
   - Zero-copy `SharedMemory` PDF IPC (parent-owned pool with Python 3.11+
     `resource_tracker` handling) and worker-side PDFium highlight visibility

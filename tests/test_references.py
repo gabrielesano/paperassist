@@ -48,10 +48,36 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(refs[0]['occurrences'][0]['page'], 1)
         self.assertEqual(refs[1]['occurrences'][0]['marker'], '[1—3]')
 
+    def test_wrapped_years_and_article_numbers_stay_in_dotted_entries(self):
+        refs = extract(['References\n'
+                        '1. Alpha A. 2020 An observation made between 2005 and\n'
+                        '2012. Example Journal 1, 10.\n'
+                        '2. Beta B. 2021 An example from the literature. Journal 2,\n'
+                        '271. (doi:10.1234/\n'
+                        'example(2))\n'
+                        '3. Gamma C. 2022 Another observation. Journal 3, 12.\n'
+                        '5. Delta D. 2023 A reference with a skipped number.'])
+        self.assertEqual([ref['label'] for ref in refs], ['1', '2', '3', '5'])
+        self.assertIn('between 2005 and 2012. Example Journal', refs[0]['raw'])
+        self.assertIn('Journal 2, 271.', refs[1]['raw'])
+        self.assertEqual(refs[1]['doi'], '10.1234/example(2)')
+
     def test_author_year_and_no_heading(self):
         refs = extract(['Smith et al. (2020) and Smith (2020).\nReferences\nSmith, A. 2020. A useful paper.'])
         self.assertEqual(refs[0]['citation_count'], 2)
         self.assertEqual(extract(['No bibliography here']), [])
+
+    def test_alternate_headings_require_reference_entries(self):
+        for heading in ('References and Notes:', 'Appendix A – References'):
+            with self.subTest(heading=heading):
+                pages = [f'Text cites [1].\n{heading}\n[1] Alpha, A. 2020, ApJ, 1, 1\n[2] Beta, B. 2021, ApJ, 2, 2']
+                self.assertEqual([ref['citation_count'] for ref in extract(pages)], [1, 0])
+                self.assertEqual(extract([f'{heading}\nA section listed in the contents.']), [])
+
+    def test_bibliography_can_begin_with_a_surname_without_a_comma(self):
+        refs = extract(['Text cites Alpha (2020).\nReferences\nAlpha A., 2020, ApJ, 1, 1\nBeta B., 2021, ApJ, 2, 2'])
+        self.assertEqual([ref['label'] for ref in refs], ['Alpha 2020', 'Beta 2021'])
+        self.assertEqual(refs[0]['citation_count'], 1)
 
     def test_multiline_entries_and_ambiguous_year(self):
         refs = extract(['Smith et al. (2020) mentions this.\nReferences\nSmith, A., Jones, B.,\nBrown, C. A long title, Journal 4, 2020.\nSmith, C., Green, D., White, E., Another paper, Journal 5, 2020.'])
@@ -859,6 +885,42 @@ def raws(pages):
 
 
 class BibliographyBoundaryTests(unittest.TestCase):
+    def test_real_bibliography_takes_precedence_over_a_table_of_contents_heading(self):
+        refs = extract(['Contents\n1 Introduction\n2 References\n22',
+                        'References\nProject Alpha (2020)\nA table of prior work.',
+                        'Brown (2019) points to this result.\nReferences\n'
+                        'Brown, C. 2019, A&A, 1, 2\nWhite, D. 2018, A&A, 3, 4'])
+        self.assertEqual([ref['label'] for ref in refs], ['Brown 2019', 'White 2018'])
+        self.assertEqual(refs[0]['citation_count'], 1)
+
+    def test_wrapped_book_volume_is_not_a_duplicate_numbered_entry(self):
+        refs = extract(['References\n[1] A. Alpha, Methods of analysis, vol.\n'
+                        '1. New York: Example Press, 1983.\n[2] B. Beta, ApJ, 2, 3, 1984.'])
+        self.assertEqual([ref['label'] for ref in refs], ['1', '2'])
+        self.assertIn('vol. 1. New York', refs[0]['raw'])
+
+    def test_running_header_glued_to_the_next_reference(self):
+        refs = extract(['References\nBrown, C. 2019, A&A, 1, 2',
+                        'Brown et al.: A&A, 1, 2 (2024)Ḱeppens, R. 2012, ApJ, 5, 6\n'
+                        'Nistic`o, G. 2013, A&A, 552, A57'])
+        self.assertEqual([ref['label'] for ref in refs], ['Brown 2019', 'Ḱeppens 2012', 'Nisticò 2013'])
+        self.assertNotIn('2024', refs[1]['raw'])
+
+    def test_references_glued_to_a_thesis_or_page_number_are_separate(self):
+        refs = extract(['References\nSmith, A. 2010, PhD thesisM\u0308uller, D. 2011, ApJ, 1, 2'
+                        'López Fuentes, M. C. 2012, ApJ, 3, 4'])
+        self.assertEqual([ref['label'] for ref in refs], ['Smith 2010', 'M\u0308uller 2011', 'López Fuentes 2012'])
+        self.assertEqual(refs[0]['raw'], 'Smith, A. 2010, PhD thesis')
+
+    def test_bibliography_retry_breaks_publication_key_tie_with_distinct_author_year_entries(self):
+        from paperassist.references import _bibliography_keys, _better_bibliography
+
+        prefix = 'References\nAlpha, A. 2000, ApJ, 10, 1\n'
+        visual = extract([prefix + 'Lin, N. 2013, Sol. Phys., 226, 239'])
+        retry = extract([prefix + 'Lin, N. 2005, Sol. Phys., 226, 239\nLionello, F. 2013, ÁpJ, 773, 134'])
+        self.assertEqual(len(_bibliography_keys(visual)), len(_bibliography_keys(retry)))
+        self.assertTrue(_better_bibliography(visual, retry))
+
     def test_entry_stops_before_figure_captions_that_follow_the_list(self):
         refs = extract(['Body cites Winebarger et al. 2011 and Smith (2020).\nReferences\n'
                         'Smith, A., Jones, B. 2020, ApJ, 745, 152\n' + WINEBARGER + '\n' + CAPTIONS])
@@ -1287,7 +1349,7 @@ class LineNumberAndHeadingTests(unittest.TestCase):
 
 class PdfiumTwoColumnAndNumericTests(unittest.TestCase):
     @staticmethod
-    def _build_pdf(pages_ops, named_dests=()):
+    def _build_pdf(pages_ops, named_dests=(), *, rotation=0):
         from io import BytesIO
         from pypdf import PdfWriter
         from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, TextStringObject
@@ -1297,6 +1359,7 @@ class PdfiumTwoColumnAndNumericTests(unittest.TestCase):
             NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')}))
         for ops in pages_ops:
             page = writer.add_blank_page(600, 800)
+            page.rotate(rotation)
             page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
             stream = DecodedStreamObject()
             stream.set_data('\n'.join(ops).encode())
@@ -1307,6 +1370,117 @@ class PdfiumTwoColumnAndNumericTests(unittest.TestCase):
         buf = BytesIO()
         writer.write(buf)
         return buf.getvalue()
+
+    def test_pdfium_ignores_vertical_imprint_beside_bibliography(self):
+        from paperassist.native.engine import Pdf
+
+        ops = [
+            'BT /F1 10 Tf 45 560 Td (Prior work [1] supports the result described on this page.) Tj ET',
+            'BT /F1 12 Tf 45 540 Td (References) Tj ET',
+            'BT /F1 9 Tf 45 520 Td (1. Alpha A. 2020 A study of how example data can support a published scientific result.) Tj ET',
+            'BT /F1 9 Tf 45 505 Td (2. Beta B. 2021 A follow-up study that evaluates an alternative explanation for the result.) Tj ET',
+            'BT /F1 9 Tf 0 -1 1 0 570 567 Tm (Journal imprint and publisher information) Tj ET',
+        ]
+        for rotation, page_ops in ((0, ops), (90, ['q 0 1 -1 0 600 0 cm', *ops, 'Q'])):
+            with self.subTest(rotation=rotation):
+                pdf = Pdf(self._build_pdf([page_ops], rotation=rotation))
+                try:
+                    pages, _ = _extract_pages(pdf)
+                    self.assertIn('References', pages[0].splitlines())
+                    refs = extract(pages)
+                    self.assertEqual([ref['label'] for ref in refs], ['1', '2'])
+                    self.assertEqual([ref['citation_count'] for ref in refs], [1, 0])
+                    self.assertEqual(refs[0]['raw'], 'Alpha A. 2020 A study of how example data can support a published scientific result.')
+                finally:
+                    pdf.close()
+
+    def test_pdfium_page_number_does_not_merge_adjacent_reference_lines(self):
+        from paperassist.native.engine import Pdf
+
+        ops = [
+            'BT /F1 10 Tf 45 760 Td (1. Alpha A. 2020 A long reference.) Tj ET',
+            'BT /F1 9 Tf 565 755 Td (1) Tj ET',
+            'BT /F1 10 Tf 58 749 Td (A continuation. Example Journal 3, 4.) Tj ET',
+        ]
+        pdf = Pdf(self._build_pdf([ops]))
+        try:
+            pages, _ = _extract_pages(pdf)
+            self.assertIn('1. Alpha A. 2020 A long reference.', pages[0].splitlines())
+            self.assertIn('A continuation. Example Journal 3, 4.', pages[0].splitlines())
+        finally:
+            pdf.close()
+
+    def test_pdfium_attaches_a_separately_drawn_accent_to_its_letter(self):
+        from paperassist.native.engine import Pdf
+
+        ops = [
+            'BT /F1 10 Tf 40 740 Td (Muller \\(2003\\) is cited here.) Tj ET',
+            'BT /F1 12 Tf 40 700 Td (References) Tj ET',
+            'BT /F1 10 Tf 40 680 Td (Muller, D. 2003, ApJ, 411, 605) Tj ET',
+            'BT /F1 10 Tf 48.5 740 Td (\\310) Tj ET',
+            'BT /F1 10 Tf 48.5 680 Td (\\310) Tj ET',
+        ]
+        pdf = Pdf(self._build_pdf([ops]))
+        try:
+            pages, _ = _extract_pages(pdf)
+            refs = extract(pages)
+            self.assertEqual([ref['label'] for ref in refs], ['Müller 2003'])
+            self.assertEqual(refs[0]['citation_count'], 1)
+        finally:
+            pdf.close()
+
+    def test_pdfium_recovers_a_heading_beside_an_acknowledgments_sidebar(self):
+        from types import SimpleNamespace
+
+        from paperassist.native.engine import Pdf
+        from paperassist.references import _analyze_pdf
+
+        ops = [
+            'BT /F1 10 Tf 180 680 Td (Earlier work [1] supports this result.) Tj ET',
+            'BT /F1 12 Tf 180 640 Td (References) Tj ET',
+            'BT /F1 9 Tf 180 616 Td ([1] Alpha, A. 2020, ApJ, 1, 1) Tj ET',
+            'BT /F1 9 Tf 35 640 Td (Acknowledgments) Tj ET',
+            'BT /F1 9 Tf 35 625 Td (Support for this study.) Tj ET',
+            'BT /F1 9 Tf 180 588 Td ([2] Beta, B. 2021, ApJ, 2, 2) Tj ET',
+        ]
+        data = self._build_pdf([ops])
+        pdf = Pdf(data)
+        try:
+            pages, _ = _extract_pages(pdf)
+            self.assertEqual(extract(pages), [])
+        finally:
+            pdf.close()
+        library = SimpleNamespace(read_pdf=lambda document_id, annotated: (data, 0))
+        refs = _analyze_pdf(library, 1)
+        self.assertEqual([ref['label'] for ref in refs], ['1', '2'])
+        self.assertEqual([ref['citation_count'] for ref in refs], [1, 0])
+
+    def test_pdfium_recovers_numbered_references_after_neighbors_end_the_visual_list(self):
+        from types import SimpleNamespace
+
+        from paperassist.native.engine import Pdf
+        from paperassist.references import _analyze_pdf
+
+        ops = [
+            'BT /F1 10 Tf 35 740 Td (Earlier work [1] supports the result.) Tj ET',
+            'BT /F1 9 Tf 35 640 Td (Acknowledgments) Tj ET',
+            'BT /F1 12 Tf 320 700 Td (References) Tj ET',
+            'BT /F1 9 Tf 320 683 Td ([1] Alpha, A. 2020, ApJ, 1, 1) Tj ET',
+            'BT /F1 9 Tf 320 668 Td ([2] Beta, B. 2021, ApJ, 2, 2) Tj ET',
+            'BT /F1 9 Tf 320 640 Td ([3] Gamma, C. 2022, ApJ, 3, 3) Tj ET',
+            'BT /F1 9 Tf 320 610 Td ([4] Delta, D. 2023, ApJ, 4, 4) Tj ET',
+        ]
+        data = self._build_pdf([ops])
+        pdf = Pdf(data)
+        try:
+            pages, _ = _extract_pages(pdf)
+            self.assertEqual([ref['label'] for ref in extract(pages)], ['1', '2'])
+        finally:
+            pdf.close()
+        library = SimpleNamespace(read_pdf=lambda document_id, annotated: (data, 0))
+        refs = _analyze_pdf(library, 1)
+        self.assertEqual([ref['label'] for ref in refs], ['1', '2', '3', '4'])
+        self.assertEqual([ref['citation_count'] for ref in refs], [1, 0, 0, 0])
 
     def test_two_column_pdfium_reads_left_column_before_right_column_with_spanning_bands(self):
         from paperassist.native.engine import Pdf
@@ -1437,3 +1611,199 @@ class PdfiumTwoColumnAndNumericTests(unittest.TestCase):
         ]
         refs = extract(pages)
         self.assertEqual([r['citation_count'] for r in refs], [3, 1])
+
+
+class OcrAndUnheadedBibliographyTests(unittest.TestCase):
+    @staticmethod
+    def _build_pdf(pages_ops, named_dests=()):
+        return PdfiumTwoColumnAndNumericTests._build_pdf(pages_ops, named_dests=named_dests)
+
+    @staticmethod
+    def _write_sidecar(cache_dir, sha256, page_idx, size, word_entries):
+        from paperassist import ocr
+        ocr._write_sidecar_page(
+            cache_dir,
+            sha256,
+            {'page': page_idx, 'size': list(size), 'rotation': 0, 'dpi': 200.0, 'words': word_entries, 'lines': []},
+            '5.5.0',
+        )
+
+    def test_ocr_sidecars_recover_scanned_and_incomplete_heading_bibliographies(self):
+        from io import BytesIO
+        from pypdf import PdfWriter
+
+        # 1) Pure scanned PDF (blank vector pages with OCR sidecar text including tall margin imprint).
+        buf = BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(600, 800)
+        writer.add_blank_page(600, 800)
+        writer.write(buf)
+        scan_bytes = buf.getvalue()
+
+        with TemporaryDirectory() as directory, Catalog(Path(directory)) as library:
+            doc = library.import_stream(BytesIO(scan_bytes), 'scan.pdf')
+            sha = doc['sha256']
+            cache_dir = Path(directory) / 'cache' / 'ocr'
+
+            def fake_recognize(pdf_path, cdir, target_sha, pages=None, **_kwargs):
+                self._write_sidecar(
+                    cdir, target_sha, 0, (600, 800),
+                    [
+                        {'text': 'Earlier', 'bbox': [50, 60, 95, 70], 'line': 0},
+                        {'text': 'Alpha', 'bbox': [100, 60, 140, 70], 'line': 0},
+                        {'text': '(2020)', 'bbox': [145, 60, 185, 70], 'line': 0},
+                    ],
+                )
+                self._write_sidecar(
+                    cdir, target_sha, 1, (600, 800),
+                    [
+                        # Tall narrow rotated margin stamp beside the heading must be ignored.
+                        {'text': '1977Journ', 'bbox': [18, 80, 24, 130], 'line': 0},
+                        {'text': 'References', 'bbox': [240, 95, 360, 108], 'line': 1},
+                        {'text': 'Alpha,', 'bbox': [50, 130, 95, 140], 'line': 2},
+                        {'text': 'A.', 'bbox': [100, 130, 115, 140], 'line': 2},
+                        {'text': '2020,', 'bbox': [120, 130, 155, 140], 'line': 2},
+                        {'text': 'ApJ,', 'bbox': [160, 130, 190, 140], 'line': 2},
+                        {'text': '1,', 'bbox': [195, 130, 210, 140], 'line': 2},
+                        {'text': '2', 'bbox': [215, 130, 225, 140], 'line': 2},
+                    ],
+                )
+                return {'status': 'completed', 'pages_recognized': 2, 'pages_cached': 0, 'total_pages': 2, 'cache_hit': False}
+
+            with patch('paperassist.ocr.recognize_pages', side_effect=fake_recognize) as run_ocr:
+                passive = analyze(library, doc['id'], allow_ocr=False, resolve=False)
+                self.assertEqual(passive['references'], [])
+                self.assertTrue(passive.get('ocr_pending'))
+                run_ocr.assert_not_called()
+
+                loaded = get(library, doc['id'], resolve=False)
+                self.assertEqual(run_ocr.call_count, 1)
+                self.assertFalse(loaded.get('ocr_pending'))
+                self.assertEqual([r['label'] for r in loaded['references']], ['Alpha 2020'])
+                self.assertEqual(loaded['references'][0]['citation_count'], 1)
+                self.assertTrue((cache_dir / 'pages').exists())
+
+        # 2) Hybrid PDF: native text has entries without printed heading; OCR sidecar supplies only the heading.
+        hybrid_bytes = self._build_pdf([
+            ['BT /F1 10 Tf 50 720 Td (Body cites Alpha \\(2020\\) and Beta \\(2021\\).) Tj ET'],
+            [
+                'BT /F1 9 Tf 50 680 Td (Alpha, A. 2020, ApJ, 1, 2) Tj ET',
+                'BT /F1 9 Tf 50 660 Td (Beta, B. 2021, ApJ, 3, 4) Tj ET',
+                'BT /F1 9 Tf 50 640 Td (Gamma, C. 2022, ApJ, 5, 6) Tj ET',
+                'BT /F1 9 Tf 50 620 Td (Delta, D. 2023, ApJ, 7, 8) Tj ET',
+                'BT /F1 9 Tf 50 600 Td (Epsilon, E. 2024, ApJ, 9, 10) Tj ET',
+            ],
+        ])
+        with TemporaryDirectory() as directory, Catalog(Path(directory)) as library:
+            doc = library.import_stream(BytesIO(hybrid_bytes), 'hybrid.pdf')
+
+            def hybrid_ocr(pdf_path, cdir, target_sha, pages=None, **_kwargs):
+                self._write_sidecar(
+                    cdir, target_sha, 1, (600, 800),
+                    [
+                        {'text': 'REFERENCES', 'bbox': [250, 90, 350, 102], 'line': 0},
+                    ],
+                )
+                return {'status': 'completed', 'pages_recognized': 1, 'pages_cached': 0, 'total_pages': 1, 'cache_hit': False}
+
+            with patch('paperassist.ocr.recognize_pages', side_effect=hybrid_ocr):
+                refs = analyze(library, doc['id'], resolve=False)['references']
+            self.assertEqual(len(refs), 5)
+            by_label = {r['label']: r for r in refs}
+            self.assertEqual(by_label['Alpha 2020']['citation_count'], 1)
+            self.assertEqual(by_label['Beta 2021']['citation_count'], 1)
+
+    def test_unheaded_numbered_and_superscript_bibliographies_with_links_and_negatives(self):
+        from io import BytesIO
+        from paperassist.native.engine import Pdf
+        from paperassist.references import _analyze_pdf
+
+        # 1) Unheaded bracketed list after a body numbered procedure + continuation page with axis ticks & FIG. 4.
+        bracketed_pages = [
+            'The model has four steps:\n'
+            '1. Initialization of the grid.\n'
+            '2. Boundary evolution step.\n'
+            '3. Energy calculation step.\n'
+            '4. Final relaxation step.\n'
+            'Prior studies [1, 2] and recent results [4] confirm the trend.\n'
+            '[1] Alpha, A. 2001, ApJ, 10, 20.\n'
+            '[2] Beta, B. 2002, Sol. Phys. 30, 40.\n'
+            '[3] Gamma, C. 2003, A&A, 50, 60;\n',
+            '0\n10\n20\n30\n40\n50\n60\nTime\nFIG. 4. Simulated energy curve.\n'
+            '7\n'
+            '[4] Delta, D. 2004, Phys. Rev. Lett. 91, 100.\n'
+            '[5] Epsilon, E. 2005, J. Fluid Mech. 120, 10.\n',
+        ]
+        refs = extract(bracketed_pages)
+        self.assertEqual([r['label'] for r in refs], ['1', '2', '3', '4', '5'])
+        self.assertEqual([r['citation_count'] for r in refs], [1, 1, 0, 1, 0])
+        self.assertNotIn('Time', refs[2]['raw'])
+        self.assertNotIn('FIG. 4', refs[2]['raw'])
+
+        # 2) Space-separated unheaded list (including "Surname, I." author format and URL entry).
+        space_pages = [
+            'Observations¹˒⁴˒⁵ and early theory² show scaling.\n'
+            '1 Alpha, A., The Astrophysical Journal 330, 474 (1988).\n'
+            '2 E. N. Parker, Solar Physics 121, 271 (1989).\n'
+            '3 Beta, B., and Gamma, C., Astronomy & Astrophysics 529, A101 (2011).\n'
+            '4 URL: https://example.org/catalog.\n'
+            '5 Delta, D., Phys. Rev. Lett. 92, 108501 (2004).\n',
+        ]
+        refs = extract(space_pages)
+        self.assertEqual([r['label'] for r in refs], ['1', '2', '3', '4', '5'])
+        self.assertEqual([r['citation_count'] for r in refs], [1, 1, 0, 1, 1])
+
+        # 3) RevTeX raised-superscript unheaded two-column PDFium PDF with destinations.
+        ops_p1 = [
+            'BT /F1 10 Tf 1 0 0 1 50 740 Tm (Early studies) Tj /F1 6 Tf 1 0 0 1 112 744 Tm (1,3) Tj '
+            '/F1 10 Tf 1 0 0 1 125 740 Tm (and work) Tj /F1 6 Tf 1 0 0 1 170 744 Tm (2) Tj ET',
+            # Raised line-leading superscript numbers "1".."4" before fs=8 author names, plus tall math in left col
+            'BT /F1 10 Tf 50 660 Td (Side formula in left column.) Tj ET',
+            'BT /F1 18 Tf 80 630 Td (X) Tj ET',
+            'BT /F1 6 Tf 1 0 0 1 317 690 Tm (1) Tj /F1 8 Tf 1 0 0 1 325 688 Tm (Alpha, A. 2001, ApJ, 10, 20.) Tj ET',
+            'BT /F1 6 Tf 1 0 0 1 317 678 Tm (2) Tj /F1 8 Tf 1 0 0 1 325 676 Tm (Beta, B. 2002, Sol. Phys. 30, 40.) Tj ET',
+            'BT /F1 6 Tf 1 0 0 1 317 666 Tm (3) Tj /F1 8 Tf 1 0 0 1 325 664 Tm (Gamma, C. 2003, A&A, 50, 60.) Tj ET',
+            'BT /F1 6 Tf 1 0 0 1 317 654 Tm (4) Tj /F1 8 Tf 1 0 0 1 325 652 Tm (Delta, D. 2004, Phys. Rev. Lett. 91, 100.) Tj ET',
+        ]
+        data = self._build_pdf([ops_p1], named_dests=[('cite.alpha', 0, 317, 692), ('cite.delta', 0, 317, 656)])
+        from types import SimpleNamespace
+        library = SimpleNamespace(read_pdf=lambda document_id, annotated=False: (data, 0))
+        pdf_refs = _analyze_pdf(library, 1)
+        self.assertEqual([r['label'] for r in pdf_refs], ['1', '2', '3', '4'])
+        self.assertEqual([r['citation_count'] for r in pdf_refs], [1, 1, 1, 0])
+        self.assertEqual(pdf_refs[0]['destinations'], ['cite.alpha'])
+        self.assertEqual(pdf_refs[3]['destinations'], ['cite.delta'])
+
+        # 4) Negative controls: numbered sections without pub cues, equation/footnote pages, and non-sequential tables.
+        self.assertEqual(extract([
+            'See Section 1 and Section 2.\n'
+            '1. Introduction\nWe present mission goals.\n'
+            '2. Objectives\nObservations cover three bands.\n'
+            '3. Payload\nInstruments measure fields.\n'
+            '4. Operations\nTelemetry uses standard links.\n'
+        ]), [])
+        self.assertEqual(extract([
+            'As shown in (1) and (2):\n'
+            '1. First footnote note in passing (Journal 1, 2001).\n'
+            '2. Second footnote note in passing.\n'
+            '3. Third item with no publication details.\n'
+            '4. Fourth item with no publication details.\n'
+        ]), [])
+
+    def test_organization_and_title_led_entries_under_references_heading(self):
+        from paperassist.citations import citation_matches
+
+        pages = [
+            'Standards boards (ACME, 1982) and working groups (Space Data Workshop.\n'
+            '1983) defined the archive format.\n'
+            'References\n'
+            'ACME, Data Archiving and Exchange, Vol. 1: Issues\n'
+            'and Recommendations. Committee on Data Archiving, Space\n'
+            'Board, National Research Council, 1982.\n'
+            'Space Data Workshop, Archive Conference Publication 2343, Jane Doe, Chair, December 1,1983.\n'
+        ]
+        refs = extract(pages)
+        self.assertEqual([r['label'] for r in refs], ['ACME 1982', 'Space Data Workshop 1983'])
+        self.assertEqual([r['citation_count'] for r in refs], [1, 1])
+        self.assertEqual(citation_matches(refs, '(ACME, 1982)'), [refs[0]])
+        self.assertEqual(citation_matches(refs, '(Space Data Workshop. 1983)'), [refs[1]])
