@@ -4,24 +4,50 @@ import html
 import re
 import unicodedata
 
-_RANGE_DASHES = '–—−-'
-_NUMBER_GROUP = rf'\d+(?:\s*[,;{_RANGE_DASHES}]\s*\d+)*'
-NUMERIC_MARKER = re.compile(rf'\[\s*({_NUMBER_GROUP})\s*\]')
+_RANGE_DASHES = '\u2010\u2011\u2012–—\u2015−-'
+_RANGE_OP = rf'(?:[{_RANGE_DASHES}]{{1,2}}|(?i:\bto\b))'
+_NUMBER_GROUP = rf'\d+(?:\s*(?:[,;]|{_RANGE_OP})\s*\d+)*'
+_CITE_PREFIX = (
+    r'(?:(?:see(?:\s+also)?|compare|cf\.?|e\.g\.?|i\.e\.?|for\s+(?:example|details|reviews?)|also)'
+    r'(?:\s*,?\s*)?)*'
+    r'(?:(?:refs?\.?|references?|papers?|citations?)\.?\s*)?'
+)
+_CITE_SUFFIX = (
+    r'(?:\s*[,;]\s*(?:and\s+references?\s+therein|references?\s+therein|and\s+refs?\.?\s+therein'
+    r'|etc\.?|among\s+others|and\s+others'
+    r'|(?:pp?\.|pages?|ch(?:ap(?:ter)?)?\.?|secs?\.?|sections?|eqs?\.?|figs?\.?|tables?|appendix)\s*[\w.\-–—()]+))?'
+)
+NUMERIC_MARKER = re.compile(rf'\[\s*{_CITE_PREFIX}({_NUMBER_GROUP}){_CITE_SUFFIX}\s*\]', re.I)
+BRACKET_RANGE_MARKER = re.compile(rf'\[\s*(\d+)\s*\]\s*{_RANGE_OP}\s*\[\s*(\d+)\s*\]')
 _SUP_DIGITS = '⁰¹²³⁴⁵⁶⁷⁸⁹'
-_SUP_DASHES = '⁻–—−'
-_SUP_TO_ASCII = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹˒⁻–—−', '0123456789,----')
+_SUP_DASHES = '⁻\u2010\u2011\u2012–—\u2015−'
+_SUP_TO_ASCII = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹˒' + _SUP_DASHES, '0123456789,' + '-' * len(_SUP_DASHES))
 SUPERSCRIPT_MARKER = re.compile(
     rf'(?<![0-9{_SUP_DIGITS}{_SUP_DASHES}+=^\-])'
-    rf'([{_SUP_DIGITS}]+(?:\s*[,;˒{_SUP_DASHES}\-]\s*[{_SUP_DIGITS}]+)*)'
+    rf'([{_SUP_DIGITS}]+(?:\s*(?:[,;˒]|[{_SUP_DASHES}\-]{{1,2}})\s*[{_SUP_DIGITS}]+)*)'
     rf'(?![0-9{_SUP_DIGITS}])'
 )
 PAREN_NUMERIC_MARKER = re.compile(rf'(?<![A-Za-z0-9])\(\s*({_NUMBER_GROUP})\s*\)')
+PAREN_RANGE_MARKER = re.compile(rf'(?<![A-Za-z0-9])\(\s*(\d+)\s*\)\s*{_RANGE_OP}\s*\(\s*(\d+)\s*\)')
+_PROSE_ITEM = rf'\d+(?:\s*{_RANGE_OP}\s*\d+)?'
+_PROSE_PLURAL_TAIL = (
+    rf'(?:\s*(?:[,;]\s*(?:(?:and|&)\s+)?|{_RANGE_OP}\s*)\d+'
+    rf'|\s+(?:and|&)\s+{_PROSE_ITEM}(?=\s*[.,;:)\]]|$))'
+)
+PROSE_NUMERIC_MARKER = re.compile(
+    rf'\b(?:'
+    rf'(?P<ref_cue>refs\.?|references|citations)\s+(?P<ref_nums>\d+{_PROSE_PLURAL_TAIL}*)'
+    rf'|(?P<sing_cue>ref\.?|reference|citation)\s+(?P<sing_nums>{_NUMBER_GROUP})'
+    rf'|(?P<paper_cue>papers?)\s+(?P<paper_nums>\d+{_PROSE_PLURAL_TAIL}+)'
+    rf')(?!\.\d|\d|[A-Za-z%°])',
+    re.I,
+)
 SCIENTIFIC_UNITS = frozenset({
     'cm', 'mm', 'km', 'um', 'nm', 'pm', 'erg', 'sec', 'hz', 'khz', 'mhz', 'ghz',
     'ev', 'kev', 'mev', 'gev', 'tev', 'k', 'yr', 'myr', 'gyr', 'kyr',
     'au', 'pc', 'kpc', 'mpc', 'gpc', 'sr', 'mol', 'rad', 'deg', 'arcsec', 'arcmin',
 })
-_RANGE_SEPARATOR = re.compile(rf'\s*[{_RANGE_DASHES}]\s*')
+_RANGE_SEPARATOR = re.compile(rf'\s*{_RANGE_OP}\s*')
 
 
 def superscript_to_ascii(text):
@@ -33,7 +59,7 @@ def citation_numbers(group):
     """Expand a numeric marker's contents in order, once per reference number."""
     group = superscript_to_ascii(group)
     numbers = {}
-    for part in re.split(r'\s*[,;]\s*', group):
+    for part in re.split(r'\s*(?:,\s*(?:and|&)\s*|[,;]|(?:\band\b|&))\s*', group, flags=re.I):
         try:
             ends = [int(value) for value in _RANGE_SEPARATOR.split(part)]
         except ValueError:

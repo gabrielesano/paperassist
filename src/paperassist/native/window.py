@@ -26,7 +26,7 @@ from .shortcuts import Shortcuts
 from .sidebar import DetailsPanel, SideColumn
 from .source import FileSource, LibrarySource
 from .tab import DocTab
-from .theme import INK, MUTED, icon, serif_heading_font, set_props
+from .theme import INK, MUTED, icon, serif_heading_font, set_props, style_resize_grip
 from .toolbar import PageField, install_overflow, reserve_zoom_width, step_page
 
 MARKERS = {SaveState.UNSAVED: " ●", SaveState.SAVING: " …", SaveState.FAILED: " !"}
@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self.side_by_side = saved.get("quick_view_layout") == "side"
         self.resize(1400, 900)
         self.setMinimumSize(800, 600)
+        self.setContentsMargins(1, 1, 1, 1)  # Keep the window border clear of the toolbars and status bar.
         self.tabs = QTabWidget(tabsClosable=False, movable=True, documentMode=True)
         self.tabs.currentChanged.connect(lambda _: self.refresh())
         bar = self.tabs.tabBar()
@@ -138,8 +139,8 @@ class MainWindow(QMainWindow):
 
         self._build_columns(saved)
         self.state_label = QLabel()
-        self.statusBar().setSizeGripEnabled(False)
         self.statusBar().addWidget(self.state_label)
+        style_resize_grip(self.statusBar())
         self._build_actions()
 
         self.annotation_bar = AnnotationBar(self)

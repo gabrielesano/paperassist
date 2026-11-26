@@ -354,6 +354,77 @@ class EventTests(unittest.TestCase):
             self.assertEqual(refs['1']['citation_count'], 1)
             self.assertEqual(refs['2']['citation_count'], 1)
 
+    def test_linked_range_endpoints_recover_intermediate_references_without_double_counting(self):
+        import io
+        font_dict = lambda w: w._add_object(DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+            NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')}))
+
+        def build_range_pdf(body_ops, links, *, omit_dest=()):
+            writer = PdfWriter()
+            font = font_dict(writer)
+            page = writer.add_blank_page(600, 800)
+            page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+            ops = list(body_ops) + ['BT /F1 12 Tf 40 600 Td (References) Tj ET']
+            dests = []
+            for i in range(1, 19):
+                y = 580 - i * 15
+                ops.append(f'BT /F1 9 Tf 40 {y} Td ([{i}] Author{i}, A. 2020, ApJ, 1, {i}) Tj ET')
+                if i not in omit_dest:
+                    dests.append((f'cite.r{i}', 0, 40, y + 10))
+            stream = DecodedStreamObject()
+            stream.set_data('\n'.join(ops).encode())
+            page[NameObject('/Contents')] = writer._add_object(stream)
+            for name, p, x, y in dests:
+                writer.add_named_destination_array(TextStringObject(name), ArrayObject([
+                    writer.pages[p].indirect_reference, NameObject('/XYZ'), FloatObject(x), FloatObject(y), FloatObject(0)]))
+            for rect, dest in links:
+                writer.add_annotation(0, DictionaryObject({
+                    NameObject('/Subtype'): NameObject('/Link'),
+                    NameObject('/Rect'): ArrayObject(FloatObject(v) for v in rect),
+                    NameObject('/Dest'): TextStringObject(dest),
+                }))
+            buf = io.BytesIO()
+            writer.write(buf)
+            return buf.getvalue()
+
+        for label, body_ops, links, omit_dest, expected_mid in (
+            ('prose papers 10-17',
+             ['BT /F1 10 Tf 40 700 Td (Refer to papers 10-17 here.) Tj ET'],
+             [((114, 698, 126, 710), 'cite.r10'), ((130, 698, 142, 710), 'cite.r17')],
+             (), 1),
+            ('split [10]-[17]',
+             ['BT /F1 10 Tf 40 700 Td (See [10]-[17] here.) Tj ET'],
+             [((62, 698, 74, 710), 'cite.r10'), ((82, 698, 94, 710), 'cite.r17')],
+             (), 1),
+            ('prefixed [e.g., 10-17]',
+             ['BT /F1 10 Tf 40 700 Td (See [e.g., 10-17] here.) Tj ET'],
+             [((86, 698, 98, 710), 'cite.r10'), ((102, 698, 114, 710), 'cite.r17')],
+             (), 1),
+            ('unrecognized cue studies 10-17 via link endpoints',
+             ['BT /F1 10 Tf 40 700 Td (See studies 10-17 here.) Tj ET'],
+             [((95, 698, 108, 710), 'cite.r10'), ((112, 698, 125, 710), 'cite.r17')],
+             (11, 12, 13, 14, 15, 16), 1),
+            ('non-range studies 10, 17',
+             ['BT /F1 10 Tf 40 700 Td (See studies 10, 17 here.) Tj ET'],
+             [((95, 698, 108, 710), 'cite.r10'), ((113, 698, 126, 710), 'cite.r17')],
+             (), 0),
+            ('superscript with body-size dash',
+             ['BT /F1 10 Tf 1 0 0 1 40 700 Tm (As shown earlier) Tj /F1 6 Tf 1 0 0 1 120 704 Tm (10) Tj '
+              '/F1 10 Tf 1 0 0 1 128 704 Tm (-) Tj /F1 6 Tf 1 0 0 1 132 704 Tm (17) Tj ET'],
+             [((120, 702, 127, 711), 'cite.r10'), ((132, 702, 139, 711), 'cite.r17')],
+             (), 1),
+        ):
+            with self.subTest(label=label):
+                data = build_range_pdf(body_ops, links, omit_dest=omit_dest)
+                lib = SimpleNamespace(read_pdf=lambda doc_id, annotated=False, raw=data: (raw, 0))
+                refs = {r['label']: r for r in references._analyze_pdf(lib, 1)}
+                self.assertEqual(refs['10']['citation_count'], 1)
+                self.assertEqual(refs['17']['citation_count'], 1)
+                for mid in range(11, 17):
+                    self.assertEqual(refs[str(mid)]['citation_count'], expected_mid)
+                    if expected_mid:
+                        self.assertTrue(refs[str(mid)]['occurrences'][0]['rects'])
+
 
 if __name__ == '__main__':
     unittest.main()

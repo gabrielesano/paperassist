@@ -3,7 +3,7 @@ from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QLayout, QLineEdit, QPushButton, QVBoxLayout,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
 )
 from shiboken6 import isValid
 
@@ -29,8 +29,7 @@ class PreferencesDialog(QDialog):
         self._return_focus = None
         self._saved_inbox, self._plan = "", None
 
-        layout, _ = setup_dialog(self, "Preferences", spacing=8)
-        layout.setSizeConstraint(QLayout.SetFixedSize)
+        layout, _ = setup_dialog(self, "Preferences", spacing=8, resizable=False)
 
         size_label = QLabel("Interface size")
         size_label.setProperty("strong", True)

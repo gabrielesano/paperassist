@@ -134,10 +134,14 @@ class CitationLogicTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in citation_matches(num_refs, "shown.¹⁻³")], ["1", "2", "3"])
         self.assertEqual(citation_matches(num_refs, "10⁶"), [])
         self.assertEqual([r["id"] for r in citation_matches(num_refs, "(1, 3–4)")], ["1", "3", "4"])
+        for grouped in ("[1]–[4]", "(1)–(4)", "[see 1–4]", "[1\u20104]", "papers 1-4", "Refs. 1–4"):
+            self.assertEqual([r["id"] for r in citation_matches(num_refs, grouped)], ["1", "2", "3", "4"])
         for rejected in ("Eq. (1)", "Fig. (2)", "(2020)", "(9)"):
             self.assertEqual(citation_matches(num_refs, rejected), [])
         self.assertTrue(complete_citation("¹˒²⁻⁴"))
         self.assertTrue(complete_citation("(1, 2–4)"))
+        self.assertTrue(complete_citation("[1]–[4]"))
+        self.assertTrue(complete_citation("(1)–(4)"))
 
     def test_pdfium_locates_repeated_occurrences_and_page_only_fallback(self):
         with tempfile.TemporaryDirectory() as folder:

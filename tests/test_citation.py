@@ -121,3 +121,15 @@ class CitationTests(unittest.TestCase):
         self.assertEqual(clean_text('ﬁrst shown.¹˒²⁻⁴'), 'first shown.¹˒²⁻⁴')
         self.assertEqual(citation_numbers('¹˒²⁻⁴'), [1, 2, 3, 4])
         self.assertEqual([m.group() for m in SUPERSCRIPT_MARKER.finditer('shown.¹˒²⁻⁴ and 10⁶ and cm⁻³')], ['¹˒²⁻⁴'])
+
+    def test_citation_numbers_supports_unicode_dashes_double_hyphens_and_words(self):
+        self.assertEqual(citation_numbers('10\u201012'), [10, 11, 12])
+        self.assertEqual(citation_numbers('10\u201112'), [10, 11, 12])
+        self.assertEqual(citation_numbers('10\u201212'), [10, 11, 12])
+        self.assertEqual(citation_numbers('10\u201512'), [10, 11, 12])
+        self.assertEqual(citation_numbers('10--12'), [10, 11, 12])
+        self.assertEqual(citation_numbers('10 to 12'), [10, 11, 12])
+        self.assertEqual(citation_numbers('10, 12–14, and 16'), [10, 12, 13, 14, 16])
+        self.assertEqual(citation_numbers('¹⁰\u2010¹²'), [10, 11, 12])
+        for invalid in ('1,', '17-10', '1-102'):
+            self.assertEqual(citation_numbers(invalid), [])

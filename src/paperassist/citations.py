@@ -4,7 +4,8 @@ import re
 import unicodedata
 from collections import defaultdict
 
-from .citation import (NUMERIC_MARKER, PAREN_NUMERIC_MARKER, SCIENTIFIC_UNITS, SUPERSCRIPT_MARKER,
+from .citation import (BRACKET_RANGE_MARKER, NUMERIC_MARKER, PAREN_NUMERIC_MARKER, PAREN_RANGE_MARKER,
+                       PROSE_NUMERIC_MARKER, SCIENTIFIC_UNITS, SUPERSCRIPT_MARKER, _RANGE_OP, _SUP_DASHES,
                        citation_numbers, first_surname, superscript_to_ascii, surnames)
 from .native.engine import Pdf, Rect
 
@@ -132,12 +133,16 @@ def complete_citation(text):
     text = text.strip()
     contents = text.removeprefix('[').removesuffix(']')
     marker = NUMERIC_MARKER.fullmatch(f'[{contents}]')
+    bracket_range = BRACKET_RANGE_MARKER.fullmatch(text)
     paren = PAREN_NUMERIC_MARKER.fullmatch(text)
+    paren_range = PAREN_RANGE_MARKER.fullmatch(text)
     sup = SUPERSCRIPT_MARKER.fullmatch(text)
     return bool(
         re.search(r"\b(?:19|20)\d{2}[a-z]?\s*[\])}.,;]*$", text)
         or (marker and citation_numbers(marker[1]))
+        or (bracket_range and citation_numbers(f'{bracket_range[1]}-{bracket_range[2]}'))
         or (paren and citation_numbers(paren[1]))
+        or (paren_range and citation_numbers(f'{paren_range[1]}-{paren_range[2]}'))
         or (sup and citation_numbers(sup[1]))
     )
 
@@ -203,6 +208,9 @@ def citation_matches(refs, text, destination=None):
             return []
     raw_text = text.strip()
     text = raw_text.rstrip(".,;")
+    bracket_range = BRACKET_RANGE_MARKER.fullmatch(text)
+    if bracket_range:
+        return _numeric_refs(refs, citation_numbers(f"{bracket_range[1]}-{bracket_range[2]}"))
     marker = NUMERIC_MARKER.fullmatch(text)
     if marker:
         return _numeric_refs(refs, citation_numbers(marker[1]))
@@ -210,7 +218,7 @@ def citation_matches(refs, text, destination=None):
                       if (lbl := re.sub(r"[\[\].\s]", "", str(ref.get("label", "")))).isdigit()]
     if numeric_labels:
         sup = SUPERSCRIPT_MARKER.fullmatch(text)
-        if not sup and (trailing := re.search(r'([⁰¹²³⁴⁵⁶⁷⁸⁹][⁰¹²³⁴⁵⁶⁷⁸⁹,;˒⁻–—−\s-]*)$', raw_text)):
+        if not sup and (trailing := re.search(rf'([⁰¹²³⁴⁵⁶⁷⁸⁹][⁰¹²³⁴⁵⁶⁷⁸⁹,;˒{_SUP_DASHES}\s-]*)$', raw_text)):
             cand = trailing.group(1).strip()
             if SUPERSCRIPT_MARKER.fullmatch(cand) and _valid_superscript_prefix(raw_text[:trailing.start()]):
                 sup = SUPERSCRIPT_MARKER.fullmatch(cand)
@@ -218,10 +226,21 @@ def citation_matches(refs, text, destination=None):
             nums = [n for n in citation_numbers(superscript_to_ascii(sup[1])) if not (1900 <= n <= 2099)]
             if nums:
                 return _numeric_refs(refs, nums)
+        max_entry = max(numeric_labels)
+        paren_range = PAREN_RANGE_MARKER.fullmatch(text)
+        if paren_range:
+            nums = citation_numbers(f"{paren_range[1]}-{paren_range[2]}")
+            if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                return _numeric_refs(refs, nums)
         paren = PAREN_NUMERIC_MARKER.fullmatch(text)
         if paren:
-            max_entry = max(numeric_labels)
             nums = citation_numbers(paren[1])
+            if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                return _numeric_refs(refs, nums)
+        prose = PROSE_NUMERIC_MARKER.fullmatch(text)
+        if prose:
+            group = prose.group('ref_nums') or prose.group('sing_nums') or prose.group('paper_nums')
+            nums = citation_numbers(group)
             if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
                 return _numeric_refs(refs, nums)
     author_year = re.fullmatch(r"\(?([^\d()]+?)\s*[.,]?\s+\(?(19\d{2}[a-z]?|20\d{2}[a-z]?)\)?\)?", text, re.I)
@@ -393,6 +412,60 @@ class CitationIndex:
         if self._bibliography is None:
             self._pages.clear()
         return sorted(links + citations, key=lambda item: (item["page"], item["key"]))
+
+    def linked_ranges(self, refs):
+        """Yield (page, n1, n2, band, text) for adjacent numeric links bracketing a printed range."""
+        self._load_links()
+        dest_nums = defaultdict(set)
+        for ref in refs:
+            if str(ref.get("label", "")).isdigit() and ref.get("citation_count") is not None:
+                num = int(ref["label"])
+                for dest in ref.get("destinations") or ():
+                    dest_nums[dest].add(num)
+        dest_to_num = {dest: next(iter(nums)) for dest, nums in dest_nums.items() if len(nums) == 1}
+        if not dest_to_num:
+            return
+        by_page = defaultdict(list)
+        seen = set()
+        for link in self.links:
+            num = dest_to_num.get(link["dest"])
+            if num is None or self._in_bibliography(link["page"], link["rects"][0]):
+                continue
+            rect = link["rects"][0]
+            identity = (link["page"], tuple(rect), num)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            by_page[link["page"]].append((num, rect))
+        for page, entries in sorted(by_page.items()):
+            entries.sort(key=lambda item: (item[1].y0, item[1].x0))
+            rows = []
+            for num, rect in entries:
+                if rows and abs(rows[-1][0][1].y0 - rect.y0) < max(rows[-1][0][1].height, rect.height, 8) * 0.5:
+                    rows[-1].append((num, rect))
+                else:
+                    rows.append([(num, rect)])
+            items = self._items(page)
+            for row in rows:
+                row.sort(key=lambda item: item[1].x0)
+                for (n1, r1), (n2, r2) in zip(row, row[1:]):
+                    if not (1 < n2 - n1 <= 100):
+                        continue
+                    gap = r2.x0 - r1.x1
+                    height = max(r1.height, r2.height, 8.0)
+                    if not (-2.0 <= gap <= height * 3.5):
+                        continue
+                    band = r1.union(r2)
+                    span_text = " ".join(
+                        item["str"] for item in items
+                        if overlaps(item_rect(item), band)
+                        and min(item["rect"].height, band.height) >= 2
+                        and (min(item["rect"].y1, band.y1) - max(item["rect"].y0, band.y0))
+                        > min(item["rect"].height, band.height) * .5
+                    )
+                    if re.search(rf'(?<!\d){n1}\s*[\])]?\s*{_RANGE_OP}\s*[\[(]?\s*{n2}(?!\d)',
+                                 superscript_to_ascii(span_text)):
+                        yield page, n1, n2, band, span_text
 
     def pdf_occurrences(self, ref):
         """Persist geometry in PDF coordinates so crop and rotation cannot move saved events."""

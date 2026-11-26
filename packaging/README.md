@@ -6,9 +6,10 @@ For the single-file per-user Windows setup executable, see
 For the Apple Silicon `.app` and drag-to-Applications `.dmg`, see
 [macOS packaging](macos/README.md). The Linux installer workflow is documented below.
 
-The current release is **0.4.2**. It improves bibliography recovery for
-two-column, scanned, and unheaded PDFs and improves library layout and error
-reporting. See the [release notes](../docs/releases/0.4.2.md).
+The current release is **0.4.3**. It expands grouped numeric citation range
+detection and link recovery, adds smooth mouse-wheel gliding, and improves
+window/dialog borders and resize grips. See the
+[release notes](../docs/releases/0.4.3.md).
 The build commands below produce the current source version. See
 [0.3.0 release acceptance](../docs/development/release-0.3.0.md)
 for the previous release and

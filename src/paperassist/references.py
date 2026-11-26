@@ -13,10 +13,12 @@ from functools import wraps
 from pathlib import Path
 from weakref import WeakValueDictionary
 
-from paperassist.citation import (ARXIV_ID, COMBINING, DOI, NAME_LETTER, NUMERIC_MARKER, PAREN_NUMERIC_MARKER, PARTICLES, SCIENTIFIC_UNITS,
-                                  SUPERSCRIPT_MARKER, SURNAME, arxiv_id, citation_numbers, clean_text as _clean,
-                                  describe, fold, has_surname, pdf_name, publication as _publication,
-                                  reference_key as _normalize, strip_arxiv_version, superscript_to_ascii, surnames)
+from paperassist.citation import (ARXIV_ID, BRACKET_RANGE_MARKER, COMBINING, DOI, NAME_LETTER, NUMERIC_MARKER,
+                                  PAREN_NUMERIC_MARKER, PAREN_RANGE_MARKER, PARTICLES, PROSE_NUMERIC_MARKER,
+                                  SCIENTIFIC_UNITS, SUPERSCRIPT_MARKER, SURNAME, _RANGE_DASHES, arxiv_id,
+                                  citation_numbers, clean_text as _clean, describe, fold, has_surname, pdf_name,
+                                  publication as _publication, reference_key as _normalize, strip_arxiv_version,
+                                  superscript_to_ascii, surnames)
 from paperassist.library import Library, manual_fields, sync_manual_links
 from paperassist.retrieval import identify
 
@@ -98,10 +100,12 @@ CONTINUATION = re.compile(r'(?:[-–−]\s?\d+[.,;)]?$|\d+\s?[-–−]\s?\d+[.,;
 SHORT_LINE, MIN_LINES = 16, 8
 # An entry this many times longer than the median entry is suspect, however long real author lists are.
 OUTLIER = 6
-EXTRACTION_VERSION = 13
+EXTRACTION_VERSION = 14
 _BLANK = {' ', '\r', '\n', '\t', '\ufffe'}
-_SUP_DIGITS_MAP = str.maketrans('0123456789,;–—−-', '⁰¹²³⁴⁵⁶⁷⁸⁹˒˒⁻⁻⁻⁻')
-_SUP_ASCII_GROUP = re.compile(r'\d+(?:[,;–—−-]\d+)*')
+_SUP_DIGITS_MAP = str.maketrans('0123456789,;' + _RANGE_DASHES, '⁰¹²³⁴⁵⁶⁷⁸⁹˒˒' + '⁻' * len(_RANGE_DASHES))
+_SUP_ASCII_GROUP = re.compile(rf'\d+(?:(?:[,;]|[{_RANGE_DASHES}]{{1,2}})\d+)*')
+_PROSE_PAPER_PREFIX = re.compile(r'\b(?:this|our|present|current)\s+$', re.I)
+_UNIT_AFTER = re.compile(r'^\s*([A-Za-z]+)\b')
 _PAREN_PREFIX_IGNORE = re.compile(
     r'(?:\b(?:eqs?|equations?|figs?|figures?|tables?|tabs?|secs?|sections?|models?|cases?|steps?)\.?\s*$'
     r'|(?:=|\+|-|–|—|−|/|\*|×|<|>|≤|≥|≈|∼|∝|\^|_)\s*$)',
@@ -418,18 +422,7 @@ def _find_unheaded_bibliography(pages):
                             and med_len <= 450
                             and pub_cues >= max(3, int(0.6 * len(entries)))):
                         body_text = '\n'.join([*pages[:page_idx], page[:offset]])
-                        max_entry = nums[-1]
-                        cited = set()
-                        for marker in NUMERIC_MARKER.finditer(body_text):
-                            cited.update(n for n in citation_numbers(marker[1]) if 1 <= n <= max_entry)
-                        for marker in SUPERSCRIPT_MARKER.finditer(body_text):
-                            if _valid_superscript_context(body_text, marker.start()):
-                                cited.update(n for n in citation_numbers(marker[1])
-                                             if 1 <= n <= max_entry and not (1900 <= n <= 2099))
-                        for marker in PAREN_NUMERIC_MARKER.finditer(body_text):
-                            if _valid_paren_context(body_text, marker):
-                                cited.update(n for n in citation_numbers(marker[1])
-                                             if 1 <= n <= max_entry and not (1900 <= n <= 2099))
+                        cited = set(_collect_numeric_markers(body_text, set(nums)))
                         if len(cited) >= 2:
                             return page_idx, re.compile(r'').search(page, offset)
             offset += len(raw_line)
@@ -590,16 +583,17 @@ def _format_segment_tokens(tokens):
                 k = i
                 while k < len(tokens):
                     cand = tokens[k]
-                    if (cand['fs'] > 0.83 * body_size
+                    is_sep = bool(k > i and re.fullmatch(rf'[,;{_RANGE_DASHES}]+', cand['text']))
+                    if ((cand['fs'] > 0.83 * body_size and not is_sep)
                             or cand['y1'] >= prev['y1'] - 0.15 * prev_h
-                            or not re.fullmatch(r'[0-9,;–—−-]+', cand['text'])
+                            or not re.fullmatch(rf'[0-9,;{_RANGE_DASHES}]+', cand['text'])
                             or (k > i and cand['x0'] - tokens[k - 1]['x1'] > max(body_size, 8.0) * 0.6)):
                         break
                     run.append(cand['text'])
                     k += 1
                 if run:
                     joined = ''.join(run)
-                    trimmed = joined.rstrip(',;')
+                    trimmed = joined.rstrip(f',;{_RANGE_DASHES}')
                     if trimmed and _SUP_ASCII_GROUP.fullmatch(trimmed):
                         out[-1] = out[-1] + trimmed.translate(_SUP_DIGITS_MAP)
                         if len(trimmed) < len(joined):
@@ -1173,6 +1167,80 @@ def _valid_paren_context(text, match):
     return True
 
 
+def _valid_prose_context(text, match):
+    cue = (match.group('ref_cue') or match.group('sing_cue') or match.group('paper_cue') or '').casefold()
+    if cue == 'references':
+        line_start = text.rfind('\n', 0, match.start()) + 1
+        if not text[line_start:match.start()].strip() and '\n' in match.group(0):
+            return False
+    if match.group('paper_cue') and _PROSE_PAPER_PREFIX.search(text[:match.start()]):
+        return False
+    if unit := _UNIT_AFTER.match(text[match.end():]):
+        if unit.group(1).lower() in SCIENTIFIC_UNITS:
+            return False
+    return True
+
+
+def _overlaps_span(consumed, start, end):
+    return any(s < end and start < e for s, e in consumed)
+
+
+def _collect_numeric_markers(body_text, numeric_labels):
+    numeric_markers = {}
+    seen_spans = set()
+    consumed = []
+    max_entry = max(numeric_labels) if numeric_labels else None
+
+    def record(match, nums, *, is_sup=False):
+        consumed.append((match.start(), match.end()))
+        for number in nums:
+            span = (number, match.start(), match.end())
+            if span not in seen_spans:
+                seen_spans.add(span)
+                numeric_markers.setdefault(number, []).append((match, is_sup))
+
+    for match in BRACKET_RANGE_MARKER.finditer(body_text):
+        nums = citation_numbers(f'{match[1]}-{match[2]}')
+        if nums and (max_entry is None or all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums)):
+            record(match, nums)
+    for match in NUMERIC_MARKER.finditer(body_text):
+        if _overlaps_span(consumed, match.start(), match.end()):
+            continue
+        nums = citation_numbers(match[1])
+        if nums:
+            record(match, nums)
+    if numeric_labels:
+        for match in SUPERSCRIPT_MARKER.finditer(body_text):
+            if _overlaps_span(consumed, match.start(), match.end()):
+                continue
+            if not _valid_superscript_context(body_text, match.start()):
+                continue
+            nums = citation_numbers(match[1])
+            if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                record(match, nums, is_sup=True)
+        if 1 in numeric_labels:
+            for match in PAREN_RANGE_MARKER.finditer(body_text):
+                if _overlaps_span(consumed, match.start(), match.end()) or not _valid_paren_context(body_text, match):
+                    continue
+                nums = citation_numbers(f'{match[1]}-{match[2]}')
+                if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                    record(match, nums)
+            for match in PAREN_NUMERIC_MARKER.finditer(body_text):
+                if _overlaps_span(consumed, match.start(), match.end()) or not _valid_paren_context(body_text, match):
+                    continue
+                nums = citation_numbers(match[1])
+                if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                    record(match, nums)
+        for match in PROSE_NUMERIC_MARKER.finditer(body_text):
+            if _overlaps_span(consumed, match.start(), match.end()) or not _valid_prose_context(body_text, match):
+                continue
+            group = match.group('ref_nums') or match.group('sing_nums') or match.group('paper_nums')
+            nums = citation_numbers(group)
+            if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
+                record(match, nums)
+    return numeric_markers
+
+
 def _continuation_page_lines(text):
     """Lines of a continuation page, dropping any figure axis-tick block before a FLOAT caption."""
     if _figure_page(text):
@@ -1229,37 +1297,7 @@ def _extract_references(pages, heading):
         page_starts.append(offset)
         offset += len(text) + 1
     numeric_labels = {int(entry['label']) for entry in entries if entry['label'].isdigit()}
-    numeric_markers = {}
-    seen_spans = {}
-    for match in NUMERIC_MARKER.finditer(body_text):
-        for number in citation_numbers(match[1]):
-            span = (number, match.start(), match.end())
-            if span not in seen_spans:
-                seen_spans[span] = True
-                numeric_markers.setdefault(number, []).append((match, False))
-    if numeric_labels:
-        max_entry = max(numeric_labels)
-        for match in SUPERSCRIPT_MARKER.finditer(body_text):
-            if not _valid_superscript_context(body_text, match.start()):
-                continue
-            nums = citation_numbers(match[1])
-            if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
-                for number in nums:
-                    span = (number, match.start(), match.end())
-                    if span not in seen_spans:
-                        seen_spans[span] = True
-                        numeric_markers.setdefault(number, []).append((match, True))
-        if 1 in numeric_labels:
-            for match in PAREN_NUMERIC_MARKER.finditer(body_text):
-                if not _valid_paren_context(body_text, match):
-                    continue
-                nums = citation_numbers(match[1])
-                if nums and all(1 <= n <= max_entry and not (1900 <= n <= 2099) for n in nums):
-                    for number in nums:
-                        span = (number, match.start(), match.end())
-                        if span not in seen_spans:
-                            seen_spans[span] = True
-                            numeric_markers.setdefault(number, []).append((match, False))
+    numeric_markers = _collect_numeric_markers(body_text, numeric_labels)
     found = []
     for index, entry in enumerate(entries):
         raw = entry['raw']
@@ -1587,7 +1625,7 @@ def _crosscheck_links(data, heading, refs):
     linked = [ref for ref in refs if ref.get('destinations') and ref.get('citation_count') is not None]
     if not linked or heading is None:
         return
-    from paperassist.citations import CitationIndex
+    from paperassist.citations import CitationIndex, citation_parts, overlaps, pdf_rect
 
     index = CitationIndex(data)
     try:
@@ -1597,6 +1635,42 @@ def _crosscheck_links(data, heading, refs):
             ref.pop('occurrence_geometry', None)
             occurrences = index.pdf_occurrences(ref)
             ref.update(occurrences=occurrences, citation_count=len(occurrences), occurrence_geometry='pdf')
+        numeric_by_label = {
+            int(ref['label']): ref
+            for ref in refs
+            if str(ref.get('label', '')).isdigit() and ref.get('citation_count') is not None
+        }
+        if numeric_by_label:
+            for page, n1, n2, band, span_text in index.linked_ranges(refs):
+                pdf_box = list(pdf_rect(index._pdf.frame(page - 1), band))
+                for mid in range(n1 + 1, n2):
+                    ref = numeric_by_label.get(mid)
+                    if ref is None:
+                        continue
+                    if ref.get('occurrence_geometry') != 'pdf':
+                        ref.pop('occurrence_geometry', None)
+                        occurrences = index.pdf_occurrences(ref)
+                        ref.update(occurrences=occurrences, citation_count=len(occurrences), occurrence_geometry='pdf')
+                    if any(
+                        part_page == page and any(overlaps(rect, pdf_box) for rect in part_rects)
+                        for occ in ref['occurrences']
+                        for part_page, part_rects in citation_parts(occ)
+                    ):
+                        continue
+                    ref['occurrences'].append({
+                        'page': page,
+                        'marker': span_text,
+                        'context': span_text,
+                        'rects': [pdf_box],
+                        'source': 'link',
+                    })
+                    ref['occurrences'].sort(
+                        key=lambda occ: (
+                            (occ['page'], (r := index._pdf.frame(occ['page'] - 1).rect(*occ['rects'][0])).y0, r.x0)
+                            if occ.get('rects') else (occ['page'], math.inf, math.inf)
+                        )
+                    )
+                    ref['citation_count'] = len(ref['occurrences'])
     finally:
         index.close()
 

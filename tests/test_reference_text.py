@@ -185,6 +185,54 @@ class CitationGrammarTests(unittest.TestCase):
         ])
         self.assertEqual([r['citation_count'] for r in refs], [2, 1, 2])
 
+    def test_grouped_numeric_ranges_in_prose_split_brackets_prefixed_and_unicode_dashes(self):
+        bib = '\nReferences\n' + '\n'.join(f'[{i}] Author{i}, A. 2020, ApJ, 1, {i}' for i in range(1, 20))
+        cases = [
+            'Refer to papers 10-17.',
+            'See Refs. 10–17.',
+            'See References 10 to 17.',
+            'See papers 10, 11–16, and 17.',
+            'See [10]–[17].',
+            'See [10]-[17].',
+            'See [10] to [17].',
+            'See (10)–(17).',
+            'See (10) to (17).',
+            'See [see 10–17].',
+            'See [e.g., 10–17].',
+            'See [Refs. 10–17].',
+            'See [10–17, and references therein].',
+            'See [10\u201017].',
+            'See [10\u201217].',
+            'See [10--17].',
+            'Work¹⁰\u2010¹⁷ shows this.',
+        ]
+        for body in cases:
+            with self.subTest(body=body):
+                refs = {r['label']: r['citation_count'] for r in extract([body + bib])}
+                self.assertEqual([refs[str(i)] for i in range(10, 18)], [1] * 8)
+
+        # Comma + split range and single Ref.
+        refs = {r['label']: r['citation_count'] for r in extract(['See [10], [11]–[17] and Ref. 10.' + bib])}
+        self.assertEqual(refs['10'], 2)
+        self.assertEqual([refs[str(i)] for i in range(11, 18)], [1] * 7)
+
+        # Negative controls must not falsely count numbers.
+        negatives = [
+            'In this paper 10 galaxies were observed.',
+            'In this paper 10-17 galaxies were observed.',
+            'Eqs. (10)–(17) and Figs. (1)–(3) and Section 10-17.',
+            'Values [10-17 km] and [Figure 1-3] and papers 10-17 km.',
+        ]
+        for body in negatives:
+            with self.subTest(negative=body):
+                refs = {r['label']: r['citation_count'] for r in extract([body + bib])}
+                self.assertEqual([refs[str(i)] for i in range(1, 20)], [0] * 19)
+
+        # "papers 10-17 and 3 figures" must count 10..17, not 3.
+        refs = {r['label']: r['citation_count'] for r in extract(['Refer to papers 10-17 and 3 figures.' + bib])}
+        self.assertEqual(refs['3'], 0)
+        self.assertEqual([refs[str(i)] for i in range(10, 18)], [1] * 8)
+
 
 if __name__ == '__main__':
     unittest.main()

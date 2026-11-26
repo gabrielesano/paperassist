@@ -8,12 +8,13 @@ from urllib.parse import parse_qs, urlsplit
 from support import QtTestCase, needs_qt, pdf_available, PySide6
 
 if pdf_available and PySide6:
-    from PySide6.QtGui import QKeySequence
-    from PySide6.QtWidgets import QMainWindow, QPushButton
+    from PySide6.QtGui import QColor, QKeySequence
+    from PySide6.QtWidgets import QMainWindow, QPushButton, QSizeGrip
     from paperassist.native.acquisition import (AcquisitionController, AcquisitionDialog, SelectionStore,
                                                blocked_urls, current_retrieval, provider_summary, proxy_url,
                                                reference_status, retrieval_details, search_links, web_url)
     from paperassist.native.references_panel import ReferencesPanel
+    from paperassist.native.theme import MUTED, WINDOW_BORDER
     from paperassist.settings import Settings
 
 
@@ -108,6 +109,25 @@ class AcquisitionWidgetTests(QtTestCase):
         self.assertFalse(self.controller.selections.path.exists())  # opening the offer changes nothing on disk
         dialog.boxes[0].setChecked(True)
         self.assertEqual(self.controller.selections.load(11), {"1"})
+
+    def test_offer_keeps_a_visible_outline_and_grip_when_resized(self):
+        self.controller.offer(11)
+        dialog = self.controller.dialogs[11]
+        grip = dialog.findChild(QSizeGrip)
+        self.assertIsNotNone(grip)
+        for extra in (0, 40):
+            dialog.resize(680 + extra, 560 + extra)
+            self.app.processEvents()
+            self.assertTrue(grip.isVisible())
+            self.assertEqual(grip.geometry().bottomRight(), dialog.rect().bottomRight())
+            self.assertIs(dialog.childAt(grip.mapTo(dialog, grip.rect().center())), grip)
+            image = dialog.grab().toImage()
+            right, bottom = image.width() - 1, image.height() - 1
+            for x, y in ((right // 2, 0), (0, bottom // 2), (right, bottom // 2), (right // 2, bottom)):
+                self.assertEqual(image.pixelColor(x, y), QColor(WINDOW_BORDER))
+            mark = grip.grab().toImage()
+            self.assertTrue(any(mark.pixelColor(x, y).value() <= QColor(MUTED).value() + 10
+                                for y in range(mark.height()) for x in range(mark.width())))
 
     def test_loose_file_window_has_no_acquisition_or_selection_sidecar(self):
         window = QMainWindow()

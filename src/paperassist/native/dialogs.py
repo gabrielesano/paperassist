@@ -1,9 +1,10 @@
 """Shared dialog chrome, single-line elided labels, and table-picker helper."""
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QPainter, QPalette
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QLineEdit, QSizePolicy, QTreeWidget, QVBoxLayout)
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QLayout, QLineEdit,
+                               QSizePolicy, QTreeWidget, QVBoxLayout)
 
-from .theme import serif_heading_font
+from .theme import serif_heading_font, style_resize_grip
 
 
 class ElidedLabel(QLabel):
@@ -48,12 +49,18 @@ class ElidedLabel(QLabel):
         )
 
 
-def setup_dialog(dialog, title, *, heading=None, subtitle=None, spacing=10, margins=(22, 20, 22, 18)):
-    """Configure standard window title, margins, serif heading, and optional muted subtitle."""
+def setup_dialog(dialog, title, *, heading=None, subtitle=None, spacing=10, margins=(22, 20, 22, 18),
+                 resizable=True):
+    """Configure shared dialog chrome and headings."""
     dialog.setWindowTitle(title)
     layout = QVBoxLayout(dialog)
     layout.setContentsMargins(*margins)
     layout.setSpacing(spacing)
+    if resizable:
+        dialog.setSizeGripEnabled(True)
+        style_resize_grip(dialog)
+    else:
+        layout.setSizeConstraint(QLayout.SetFixedSize)
     heading_label = QLabel(heading or title)
     heading_label.setProperty("headingScale", "dialog")
     heading_label.setFont(serif_heading_font(dialog.font()))

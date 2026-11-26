@@ -29,6 +29,10 @@ throttling, and consolidates the native UI and packaging stack. See
 
 ## Completed transitions and automated acceptance
 
+- Prepared `0.4.3` with expanded grouped numeric citation range detection and
+  link-assisted recovery (`EXTRACTION_VERSION = 14`), smooth mouse-wheel
+  gliding in the PDF reader, and visible window/dialog outlines and resize
+  grips. See the [release notes](releases/0.4.3.md).
 - Prepared `0.4.2` with alternative PDFium reading orders for incomplete
   bibliographies, support for unheaded and scanned reference lists, and
   improved library layout and error reporting. See the

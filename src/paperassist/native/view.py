@@ -8,10 +8,11 @@ import sqlite3
 import time
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QEvent, QEventLoop, QKeyCombination, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QEventLoop, QKeyCombination, QPointF, QRectF,
+                            Qt, QTimer, QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QContextMenuEvent, QCursor, QDesktopServices, QGuiApplication, QImage,
                          QKeySequence, QPainter, QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import QAbstractScrollArea, QMenu, QScrollBar
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QMenu, QScrollBar
 
 from .document import SaveState
 from .engine import HIGHLIGHT, Rect
@@ -21,6 +22,8 @@ from .positions import current_page
 
 CACHE_BYTES = 120 * 1024 * 1024  # about five fit-width pages at 1.5x HiDPI
 ZOOM_RANGE = (0.2, 4.0)
+WHEEL_LINE_PX = 33  # x the OS wheel line count: about 100 px per notch at the default 3 lines
+WHEEL_GLIDE_MS = 150
 LINK_SCHEMES = {"http", "https", "mailto"}  # a PDF must not be able to launch local files
 BACKGROUND = QColor("#dce2dc")
 PAGE_SHADOW = QColor(39, 59, 57, 28)
@@ -91,6 +94,13 @@ class PdfView(QAbstractScrollArea):
         self.setFocusPolicy(Qt.StrongFocus)
         self.viewport().setMouseTracking(True)
         self.verticalScrollBar().setSingleStep(48)
+        self._glide = QVariantAnimation(self, duration=WHEEL_GLIDE_MS, easingCurve=QEasingCurve.OutCubic)
+        self._glide.valueChanged.connect(self._glide_step)
+        self._gliding = False  # true only while the animation itself writes the scrollbar
+        # Any other movement (jump, key, drag, zoom, resize) must win over the glide, so watch the bar
+        # instead of stopping the animation at every call site.
+        self.verticalScrollBar().valueChanged.connect(self._stop_foreign_glide)
+        self.verticalScrollBar().rangeChanged.connect(self._glide.stop)
         self.pages = PageLayout(doc.sizes, self.zoom, self.viewport().width())
         self._update_scrollbars()
 
@@ -352,6 +362,7 @@ class PdfView(QAbstractScrollArea):
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        self._glide.stop()
         self._space_pan, self._space_panned, self._pan = False, False, None
         self._update_cursor()
         self._visible_selection.clear()
@@ -379,10 +390,37 @@ class PdfView(QAbstractScrollArea):
         self._after_move()
 
     def wheelEvent(self, event):
+        notches = event.angleDelta().y() / 120
         if event.modifiers() & Qt.ControlModifier:
             self.zoom_by(1.1 if event.angleDelta().y() > 0 else 1 / 1.1)
-        else:
+        elif event.modifiers() == Qt.NoModifier and event.phase() == Qt.NoScrollPhase and notches:
+            self._glide_by(-notches * QApplication.wheelScrollLines() * WHEEL_LINE_PX)
+            event.accept()
+        else:  # touchpads bring their own momentum; Shift and horizontal wheels keep Qt's behavior
             super().wheelEvent(event)
+
+    def _glide_by(self, delta):
+        """Add a wheel notch to the target and glide there, as browsers do."""
+        bar = self.verticalScrollBar()
+        running = self._glide.state() == QAbstractAnimation.Running
+        target = self._glide.endValue() if running and (self._glide.endValue() - bar.value()) * delta > 0 else bar.value()
+        target = min(max(target + delta, bar.minimum()), bar.maximum())
+        self._glide.stop()
+        if round(target) != bar.value():
+            self._glide.setStartValue(float(bar.value()))
+            self._glide.setEndValue(float(target))
+            self._glide.start()
+
+    def _glide_step(self, value):
+        self._gliding = True
+        try:
+            self.verticalScrollBar().setValue(round(value))
+        finally:
+            self._gliding = False
+
+    def _stop_foreign_glide(self):
+        if not self._gliding:
+            self._glide.stop()
 
     def keyPressEvent(self, event):
         bar = self.verticalScrollBar()

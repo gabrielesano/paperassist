@@ -1,7 +1,7 @@
 """Warm-paper visual tokens, HiDPI vector icons, QSS, interface zoom, and wrapping FlowLayout."""
 from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QLayout
+from PySide6.QtWidgets import QApplication, QLayout, QProxyStyle, QSizeGrip, QStyle
 
 from paperassist.settings import ZOOM_CHOICES
 
@@ -17,6 +17,7 @@ WELCOME_BG = "#edf1ea"
 DIALOG_BG = "#fbfcf7"
 CANVAS = "#dce2dc"
 LINE = "#d7ded7"
+WINDOW_BORDER = "#7b8c82"
 INPUT_BORDER = "#ccd7cd"
 ERROR_INK = "#8a3a1c"
 OK_INK = "#315c54"
@@ -73,6 +74,37 @@ def set_props(widget, **props):
 
 def theme_generation():
     return _THEME_GENERATION
+
+
+class _ResizeGripStyle(QProxyStyle):
+    def drawControl(self, element, option, painter, widget=None):
+        if element != QStyle.CE_SizeGrip:
+            return super().drawControl(element, option, painter, widget)
+        rect = option.rect
+        painter.save()
+        painter.translate(rect.left(), rect.top())
+        if option.direction == Qt.RightToLeft:
+            painter.translate(rect.width() - 1, 0)
+            painter.scale(-1, 1)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(MUTED), 1.5, Qt.SolidLine, Qt.RoundCap))
+        x, y = rect.width() - 4, rect.height() - 4
+        for length in (4, 8, 12):
+            painter.drawLine(x - length, y, x, y - length)
+        painter.restore()
+
+
+def style_resize_grip(container):
+    """Make the built-in grip visible across platforms while keeping Qt's drag behavior."""
+    grip = container.findChild(QSizeGrip, options=Qt.FindDirectChildrenOnly)
+    app = QApplication.instance()
+    if grip is None or app is None:
+        return
+    if not hasattr(app, "_resize_grip_style"):
+        app._resize_grip_style = _ResizeGripStyle("fusion")
+        app._resize_grip_style.setParent(app)
+    grip.setStyle(app._resize_grip_style)
+    grip.setAccessibleName("Resize window")
 
 
 def brand_icon(size=22):
@@ -262,6 +294,7 @@ APP_STYLE = f"""
 QMainWindow {{
     background: {PAPER};
     color: {INK};
+    border: 1px solid {WINDOW_BORDER};
 }}
 QToolBar {{
     background: {SURFACE};
@@ -669,6 +702,7 @@ QProgressBar::chunk {{
 QDialog {{
     background: {DIALOG_BG};
     color: {INK};
+    border: 1px solid {WINDOW_BORDER};
 }}
 QFrame#source-row, QFrame#acquire-row {{
     border-bottom: 1px solid {LINE};
